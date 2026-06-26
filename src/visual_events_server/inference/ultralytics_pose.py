@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from collections.abc import Callable, Mapping
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,7 @@ class UltralyticsPoseBackend:
         device: str | None,
         imgsz: int,
         conf: float,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.model_path = Path(model_path)
         if not self.model_path.is_file():
@@ -39,9 +42,16 @@ class UltralyticsPoseBackend:
         self.imgsz = imgsz
         self.conf = conf
         self._model: Any | None = None
+        self._clock = clock or time.perf_counter
+        self._last_phase_latencies_ms: dict[str, float] = {}
 
     async def infer(self, frame: FrameMessage) -> PoseDetections:
+        self._last_phase_latencies_ms = {}
+        decode_start = self._clock()
         image, image_width, image_height = _decode_jpeg(frame.jpeg_bytes)
+        decode_ms = _elapsed_ms(decode_start, self._clock)
+
+        infer_start = self._clock()
         results = self._load_model().predict(
             source=image,
             imgsz=self.imgsz,
@@ -49,14 +59,30 @@ class UltralyticsPoseBackend:
             device=self.device,
             verbose=False,
         )
+        infer_ms = _elapsed_ms(infer_start, self._clock)
+
+        postprocess_start = self._clock()
         if not results:
-            return PoseDetections(persons=[])
-        return result_to_pose_detections(
-            results[0],
-            image_width=image_width,
-            image_height=image_height,
-            conf_threshold=self.conf,
-        )
+            detections = PoseDetections(persons=[])
+        else:
+            detections = result_to_pose_detections(
+                results[0],
+                image_width=image_width,
+                image_height=image_height,
+                conf_threshold=self.conf,
+            )
+        postprocess_ms = _elapsed_ms(postprocess_start, self._clock)
+        self._last_phase_latencies_ms = {
+            "decode": decode_ms,
+            "infer": infer_ms,
+            "postprocess": postprocess_ms,
+        }
+        return detections
+
+    def consume_phase_metrics(self) -> Mapping[str, float]:
+        phase_latencies = self._last_phase_latencies_ms
+        self._last_phase_latencies_ms = {}
+        return phase_latencies
 
     def _load_model(self) -> Any:
         if self._model is None:
@@ -135,6 +161,10 @@ def _decode_jpeg(jpeg_bytes: bytes) -> tuple[Any, int, int]:
         rgb_image = image.convert("RGB")
         width, height = rgb_image.size
     return rgb_image, width, height
+
+
+def _elapsed_ms(start: float, clock: Callable[[], float]) -> float:
+    return max(0.0, (clock() - start) * 1000.0)
 
 
 def _to_list(value: Any) -> list[Any]:

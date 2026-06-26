@@ -61,12 +61,15 @@ _TOTAL_LATENCY_P99_MAX_MS = 200.0
 _ERROR_RATE_MAX = 0.01
 _SERVER_PHASES = (
     "decode",
-    "preprocess",
     "infer",
     "postprocess",
     "tracking",
+    "attention",
     "events",
+    "response",
+    "total",
 )
+_VRAM_4GIB_BYTES = 4 * 1024**3
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,14 @@ class RunConfig:
     semantic_event_cooldown_ms: int
 
 
+@dataclass(frozen=True)
+class ServerMetricsSummary:
+    valid_samples: int
+    server_phase_latency_ms: dict[str, Any]
+    memory: dict[str, Any]
+    vram: dict[str, Any]
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the full val-data E2E gate against visual-events-server."
@@ -154,6 +165,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS,
     )
     parser.add_argument(
+        "--server-metrics-jsonl",
+        type=Path,
+        default=None,
+        help="Server frame metrics JSONL artifact written by --metrics-jsonl.",
+    )
+    parser.add_argument(
         "--no-realtime",
         action="store_true",
         help="Send the next frame as soon as a response arrives.",
@@ -166,6 +183,12 @@ async def async_main(argv: list[str] | None = None) -> int:
     try:
         scene_dirs = preflight_val_data_root(args.data_dir)
         preflight_out_path(args.out, data_dir=args.data_dir)
+        if args.server_metrics_jsonl is not None:
+            preflight_server_metrics_jsonl_path(
+                args.server_metrics_jsonl,
+                data_dir=args.data_dir,
+                out=args.out,
+            )
         if args.fps <= 0:
             raise PreflightError("fps must be positive")
         if args.response_timeout_ms is not None and args.response_timeout_ms <= 0:
@@ -186,6 +209,8 @@ async def async_main(argv: list[str] | None = None) -> int:
             raise PreflightError("soak requires realtime playback")
         if args.semantic_event_cooldown_ms < 0:
             raise PreflightError("semantic-event-cooldown-ms must be non-negative")
+        if args.server_metrics_jsonl is not None:
+            prepare_server_metrics_jsonl_path(args.server_metrics_jsonl)
     except PreflightError as exc:
         print(f"preflight failed: {exc}", file=sys.stderr)
         return 1
@@ -214,7 +239,11 @@ async def async_main(argv: list[str] | None = None) -> int:
                     server_pid=args.server_pid,
                     memory_growth_max_mb=args.soak_memory_growth_max_mb,
                 )
-                perf_report = build_perf_report(cases, soak_report=soak_report)
+                perf_report = build_perf_report(
+                    cases,
+                    soak_report=soak_report,
+                    server_metrics_jsonl=args.server_metrics_jsonl,
+                )
                 report = build_e2e_report(cases, perf_report=perf_report)
                 _write_json(args.out / "report.json", report)
                 _write_json(args.out.parent / "perf" / "server_perf.json", perf_report)
@@ -231,7 +260,11 @@ async def async_main(argv: list[str] | None = None) -> int:
                 sample_interval_s=args.soak_sample_interval_s,
             )
 
-        perf_report = build_perf_report(cases, soak_report=soak_report)
+        perf_report = build_perf_report(
+            cases,
+            soak_report=soak_report,
+            server_metrics_jsonl=args.server_metrics_jsonl,
+        )
         report = build_e2e_report(cases, perf_report=perf_report)
         _write_json(args.out / "report.json", report)
         perf_path = args.out.parent / "perf" / "server_perf.json"
@@ -294,6 +327,44 @@ def preflight_out_path(out: Path, *, data_dir: Path) -> None:
         resolved_data_dir
     ):
         raise PreflightError("out must not be inside data-dir")
+
+
+def preflight_server_metrics_jsonl_path(
+    metrics_jsonl: Path,
+    *,
+    data_dir: Path,
+    out: Path,
+) -> None:
+    if metrics_jsonl.suffix != ".jsonl":
+        raise PreflightError("server-metrics-jsonl must be a .jsonl path")
+    if metrics_jsonl.exists() and metrics_jsonl.is_dir():
+        raise PreflightError("server-metrics-jsonl must not be a directory")
+    if metrics_jsonl.is_symlink():
+        raise PreflightError("server-metrics-jsonl must not be a symlink")
+
+    resolved_metrics = metrics_jsonl.resolve()
+    resolved_data_dir = data_dir.resolve()
+    if resolved_metrics == resolved_data_dir or resolved_metrics.is_relative_to(
+        resolved_data_dir
+    ):
+        raise PreflightError("server-metrics-jsonl must not be inside data-dir")
+
+    perf_root = (out.parent / "perf").resolve()
+    if resolved_metrics == perf_root or not resolved_metrics.is_relative_to(perf_root):
+        raise PreflightError("server-metrics-jsonl must be under artifacts/perf")
+
+
+def prepare_server_metrics_jsonl_path(metrics_jsonl: Path) -> None:
+    try:
+        metrics_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        if metrics_jsonl.exists() or metrics_jsonl.is_symlink():
+            if metrics_jsonl.is_dir():
+                raise PreflightError("server-metrics-jsonl must not be a directory")
+            metrics_jsonl.unlink()
+    except PreflightError:
+        raise
+    except OSError as exc:
+        raise PreflightError(f"could not prepare server-metrics-jsonl: {exc}") from exc
 
 
 async def _run_full_matrix(
@@ -713,6 +784,7 @@ def build_perf_report(
     cases: list[CaseResult],
     *,
     soak_report: dict[str, Any] | None = None,
+    server_metrics_jsonl: Path | None = None,
 ) -> dict[str, Any]:
     if soak_report is None:
         soak_report = build_soak_report_disabled()
@@ -729,6 +801,7 @@ def build_perf_report(
     latency_summary = _latency_summary(latencies)
     hz = _hz(frames_ok, elapsed_s)
     error_rate = _error_rate(errors, frames_sent)
+    server_metrics = read_server_metrics_summary(server_metrics_jsonl)
     threshold_results = {
         "hz": hz >= _HZ_MIN,
         "total_latency_p95_ms": (
@@ -741,13 +814,32 @@ def build_perf_report(
         ),
         "error_rate": error_rate < _ERROR_RATE_MAX,
     }
+    vram_thresholds = server_metrics.vram.get("thresholds")
+    if isinstance(vram_thresholds, dict):
+        threshold_results["vram_4gib"] = bool(
+            vram_thresholds.get("max_allocated_bytes_lte_4gib")
+            and vram_thresholds.get("max_reserved_bytes_lte_4gib")
+        )
+    total_phase = server_metrics.server_phase_latency_ms.get("total")
+    total_phase_available = (
+        isinstance(total_phase, dict) and total_phase.get("available") is True
+    )
+    server_metrics_available = (
+        server_metrics_jsonl is None or total_phase_available
+    )
     failure_reasons = [
         name for name, passed in threshold_results.items() if not passed
     ]
+    if not server_metrics_available:
+        failure_reasons.append("server_metrics_unavailable")
     if not soak_report["passed"]:
         failure_reasons.extend(soak_report["failure_reasons"])
     return {
-        "passed": all(threshold_results.values()) and soak_report["passed"],
+        "passed": (
+            all(threshold_results.values())
+            and soak_report["passed"]
+            and server_metrics_available
+        ),
         "failure_reasons": failure_reasons,
         "total_latency_ms": latency_summary,
         "hz": hz,
@@ -765,11 +857,9 @@ def build_perf_report(
             "error_rate_max": _ERROR_RATE_MAX,
             "results": threshold_results,
         },
-        "server_phase_latency_ms": {
-            phase: {"available": False} for phase in _SERVER_PHASES
-        },
-        "vram": {"available": False},
-        "memory": {"available": False},
+        "server_phase_latency_ms": server_metrics.server_phase_latency_ms,
+        "vram": server_metrics.vram,
+        "memory": server_metrics.memory,
         "soak": soak_report,
     }
 
@@ -835,6 +925,181 @@ def read_latency_samples(jsonl_path: Path) -> list[float]:
         if math.isfinite(latency):
             samples.append(latency)
     return samples
+
+
+def read_server_metrics_summary(metrics_jsonl: Path | None) -> ServerMetricsSummary:
+    if metrics_jsonl is None:
+        return ServerMetricsSummary(
+            valid_samples=0,
+            server_phase_latency_ms={
+                phase: {"available": False} for phase in _SERVER_PHASES
+            },
+            memory={"available": False},
+            vram={"available": False},
+        )
+
+    phase_samples: dict[str, list[float]] = {phase: [] for phase in _SERVER_PHASES}
+    rss_samples: list[int] = []
+    vram_samples: list[dict[str, Any]] = []
+    valid_samples = 0
+
+    try:
+        lines = metrics_jsonl.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("type") != "frame_metrics":
+            continue
+
+        has_usable_sample = False
+        phases = payload.get("phase_latencies_ms")
+        if isinstance(phases, dict):
+            for phase in _SERVER_PHASES:
+                sample = _finite_float(phases.get(phase))
+                if sample is None:
+                    continue
+                phase_samples[phase].append(sample)
+                has_usable_sample = True
+
+        resources = payload.get("resources")
+        if isinstance(resources, dict):
+            rss_bytes = _rss_bytes_sample(resources.get("rss"))
+            if rss_bytes is not None:
+                rss_samples.append(rss_bytes)
+                has_usable_sample = True
+
+            vram_sample = _vram_sample(resources.get("vram"))
+            if vram_sample is not None:
+                vram_samples.append(vram_sample)
+                has_usable_sample = True
+
+        if has_usable_sample:
+            valid_samples += 1
+
+    return ServerMetricsSummary(
+        valid_samples=valid_samples,
+        server_phase_latency_ms={
+            phase: _server_phase_summary(samples)
+            for phase, samples in phase_samples.items()
+        },
+        memory=_server_memory_summary(rss_samples),
+        vram=_server_vram_summary(vram_samples),
+    )
+
+
+def _server_phase_summary(samples: list[float]) -> dict[str, Any]:
+    if not samples:
+        return {
+            "available": False,
+            "count": 0,
+            "reason": "no_valid_phase_samples",
+        }
+    return {
+        "available": True,
+        "count": len(samples),
+        "p50": _percentile_nearest_rank(samples, 50),
+        "p95": _percentile_nearest_rank(samples, 95),
+        "p99": _percentile_nearest_rank(samples, 99),
+    }
+
+
+def _server_memory_summary(samples: list[int]) -> dict[str, Any]:
+    if not samples:
+        return {
+            "available": False,
+            "count": 0,
+            "reason": "no_valid_rss_samples",
+        }
+    return {
+        "available": True,
+        "count": len(samples),
+        "min_bytes": min(samples),
+        "max_bytes": max(samples),
+        "last_bytes": samples[-1],
+    }
+
+
+def _server_vram_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    if not samples:
+        return {
+            "available": False,
+            "count": 0,
+            "reason": "no_valid_vram_samples",
+        }
+
+    allocated_samples = [int(sample["allocated_bytes"]) for sample in samples]
+    reserved_samples = [int(sample["reserved_bytes"]) for sample in samples]
+    devices = [sample.get("device") for sample in samples]
+    device_consistent = (
+        all(_is_valid_vram_device(device) for device in devices)
+        and len(set(devices)) == 1
+    )
+    max_allocated_bytes = max(allocated_samples)
+    max_reserved_bytes = max(reserved_samples)
+    return {
+        "available": True,
+        "count": len(samples),
+        "device": devices[0] if device_consistent else None,
+        "device_consistent": device_consistent,
+        "max_allocated_bytes": max_allocated_bytes,
+        "max_reserved_bytes": max_reserved_bytes,
+        "thresholds": {
+            "max_allocated_bytes_lte_4gib": max_allocated_bytes <= _VRAM_4GIB_BYTES,
+            "max_reserved_bytes_lte_4gib": max_reserved_bytes <= _VRAM_4GIB_BYTES,
+        },
+    }
+
+
+def _rss_bytes_sample(resource: Any) -> int | None:
+    if not isinstance(resource, dict) or resource.get("available") is not True:
+        return None
+    return _nonnegative_int(resource.get("bytes"))
+
+
+def _vram_sample(resource: Any) -> dict[str, Any] | None:
+    if not isinstance(resource, dict) or resource.get("available") is not True:
+        return None
+    allocated_bytes = _nonnegative_int(resource.get("allocated_bytes"))
+    reserved_bytes = _nonnegative_int(resource.get("reserved_bytes"))
+    if allocated_bytes is None or reserved_bytes is None:
+        return None
+    device = resource.get("device")
+    return {
+        "device": device if _is_valid_vram_device(device) else None,
+        "allocated_bytes": allocated_bytes,
+        "reserved_bytes": reserved_bytes,
+    }
+
+
+def _is_valid_vram_device(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    return isinstance(value, str) and bool(value)
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    sample = _finite_float(value)
+    if sample is None or sample < 0:
+        return None
+    return int(sample)
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    sample = float(value)
+    if not math.isfinite(sample):
+        return None
+    return sample
 
 
 def read_process_rss_mb(pid: int | None) -> float | None:

@@ -23,6 +23,7 @@ STATIONARY_UNKNOWN_CASE_COUNT = len(REQUIRED_SCENE_NAMES) * 2
 FULL_MATRIX_CASE_COUNT = STATIONARY_UNKNOWN_CASE_COUNT + len(
     EXPECTED_MOVING_SUPPRESSION_SCENE_NAMES
 )
+GIB = 1024**3
 
 
 def write_jpeg(path: Path) -> None:
@@ -71,6 +72,49 @@ def write_fake_jsonl(save_jsonl: Path, latencies: list[float] | None = None) -> 
         + "\n",
         encoding="utf-8",
     )
+
+
+def append_fake_server_metrics_jsonl(
+    metrics_jsonl: Path,
+    phase_samples: list[dict[str, float]],
+    *,
+    rss_bytes: list[int] | None = None,
+    allocated_bytes: list[int] | None = None,
+    reserved_bytes: list[int] | None = None,
+    device: int | str = "cuda:0",
+) -> None:
+    metrics_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    rss_values = rss_bytes or [128 * 1024 * 1024] * len(phase_samples)
+    allocated_values = allocated_bytes or [1 * GIB] * len(phase_samples)
+    reserved_values = reserved_bytes or [2 * GIB] * len(phase_samples)
+    with metrics_jsonl.open("a", encoding="utf-8") as handle:
+        for index, phases in enumerate(phase_samples):
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "frame_metrics",
+                        "schema_version": 1,
+                        "camera": "front",
+                        "frame_id": index,
+                        "frame_timestamp_ms": 1710000000000 + index,
+                        "phase_latencies_ms": phases,
+                        "resources": {
+                            "rss": {
+                                "available": True,
+                                "bytes": rss_values[index],
+                            },
+                            "vram": {
+                                "available": True,
+                                "device": device,
+                                "allocated_bytes": allocated_values[index],
+                                "reserved_bytes": reserved_values[index],
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
 
 
 @pytest.mark.asyncio
@@ -169,6 +213,26 @@ async def test_preflight_rejects_unsafe_out_paths_without_replay(tmp_path, monke
                     str(data_dir),
                     "--out",
                     str(unsafe_out),
+                ]
+            )
+            == 1
+        )
+
+    for unsafe_metrics_jsonl in (
+        tmp_path / "server_metrics.jsonl",
+        data_dir / "artifacts" / "perf" / "server_metrics.jsonl",
+    ):
+        assert (
+            await async_main(
+                [
+                    "--server",
+                    "ws://127.0.0.1:8765/v1/stream",
+                    "--data-dir",
+                    str(data_dir),
+                    "--out",
+                    str(tmp_path / "artifacts" / "e2e"),
+                    "--server-metrics-jsonl",
+                    str(unsafe_metrics_jsonl),
                 ]
             )
             == 1
@@ -308,6 +372,435 @@ async def test_runner_replays_stationary_unknown_and_moving_rounds_and_writes_ar
     assert perf["server_phase_latency_ms"]["infer"] == {"available": False}
     assert perf["vram"] == {"available": False}
     assert perf["memory"] == {"available": False}
+
+
+@pytest.mark.asyncio
+async def test_server_metrics_jsonl_builds_s8_perf_fields(tmp_path, monkeypatch):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+    metrics_jsonl = tmp_path / "artifacts" / "perf" / "server_metrics.jsonl"
+    metrics_written = False
+
+    phase_samples = [
+        {
+            "decode": 1.0,
+            "infer": 10.0,
+            "postprocess": 2.0,
+            "tracking": 3.0,
+            "attention": 4.0,
+            "events": 5.0,
+            "response": 6.0,
+            "total": 31.0,
+        },
+        {
+            "decode": 2.0,
+            "infer": 20.0,
+            "postprocess": 4.0,
+            "tracking": 6.0,
+            "attention": 8.0,
+            "events": 10.0,
+            "response": 12.0,
+            "total": 62.0,
+        },
+        {
+            "decode": 3.0,
+            "infer": 30.0,
+            "postprocess": 6.0,
+            "tracking": 9.0,
+            "attention": 12.0,
+            "events": 15.0,
+            "response": 18.0,
+            "total": 93.0,
+        },
+    ]
+
+    async def fake_replay_scene(**kwargs):
+        nonlocal metrics_written
+        write_fake_jsonl(kwargs["save_jsonl"])
+        if not metrics_written:
+            append_fake_server_metrics_jsonl(
+                metrics_jsonl,
+                phase_samples,
+                rss_bytes=[111, 222, 150],
+                allocated_bytes=[1 * GIB, 2 * GIB, 3 * GIB],
+                reserved_bytes=[2 * GIB, 3 * GIB, 3 * GIB],
+                device=0,
+            )
+            metrics_written = True
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--server-metrics-jsonl",
+            str(metrics_jsonl),
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 0
+    perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
+    assert perf["passed"] is True
+    assert perf["server_phase_latency_ms"]["decode"] == {
+        "available": True,
+        "count": 3,
+        "p50": 2.0,
+        "p95": 3.0,
+        "p99": 3.0,
+    }
+    assert perf["server_phase_latency_ms"]["infer"] == {
+        "available": True,
+        "count": 3,
+        "p50": 20.0,
+        "p95": 30.0,
+        "p99": 30.0,
+    }
+    assert perf["memory"] == {
+        "available": True,
+        "count": 3,
+        "min_bytes": 111,
+        "max_bytes": 222,
+        "last_bytes": 150,
+    }
+    assert perf["vram"] == {
+        "available": True,
+        "count": 3,
+        "device": 0,
+        "device_consistent": True,
+        "max_allocated_bytes": 3 * GIB,
+        "max_reserved_bytes": 3 * GIB,
+        "thresholds": {
+            "max_allocated_bytes_lte_4gib": True,
+            "max_reserved_bytes_lte_4gib": True,
+        },
+    }
+    assert perf["thresholds"]["results"]["vram_4gib"] is True
+
+
+@pytest.mark.asyncio
+async def test_server_metrics_jsonl_marks_mixed_vram_devices_inconsistent(
+    tmp_path,
+    monkeypatch,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+    metrics_jsonl = tmp_path / "artifacts" / "perf" / "server_metrics.jsonl"
+    metrics_written = False
+    phases = {
+        "decode": 1.0,
+        "infer": 2.0,
+        "postprocess": 3.0,
+        "tracking": 4.0,
+        "attention": 5.0,
+        "events": 6.0,
+        "response": 7.0,
+        "total": 28.0,
+    }
+
+    async def fake_replay_scene(**kwargs):
+        nonlocal metrics_written
+        write_fake_jsonl(kwargs["save_jsonl"])
+        if not metrics_written:
+            append_fake_server_metrics_jsonl(
+                metrics_jsonl,
+                [phases],
+                rss_bytes=[111],
+                allocated_bytes=[1 * GIB],
+                reserved_bytes=[2 * GIB],
+                device=0,
+            )
+            append_fake_server_metrics_jsonl(
+                metrics_jsonl,
+                [phases],
+                rss_bytes=[222],
+                allocated_bytes=[2 * GIB],
+                reserved_bytes=[3 * GIB],
+                device=1,
+            )
+            metrics_written = True
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--server-metrics-jsonl",
+            str(metrics_jsonl),
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 0
+    perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
+    assert perf["vram"]["available"] is True
+    assert perf["vram"]["count"] == 2
+    assert perf["vram"]["device"] is None
+    assert perf["vram"]["device_consistent"] is False
+
+
+@pytest.mark.asyncio
+async def test_server_metrics_jsonl_omitted_keeps_s8_fields_unavailable(
+    tmp_path,
+    monkeypatch,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+
+    async def fake_replay_scene(**kwargs):
+        write_fake_jsonl(kwargs["save_jsonl"])
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 0
+    perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
+    assert perf["server_phase_latency_ms"]["decode"] == {"available": False}
+    assert perf["server_phase_latency_ms"]["infer"] == {"available": False}
+    assert perf["server_phase_latency_ms"]["attention"] == {"available": False}
+    assert perf["vram"] == {"available": False}
+    assert perf["memory"] == {"available": False}
+
+
+@pytest.mark.parametrize("metrics_mode", ["missing", "empty", "malformed"])
+@pytest.mark.asyncio
+async def test_server_metrics_jsonl_without_valid_samples_fails(
+    tmp_path,
+    monkeypatch,
+    metrics_mode,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+    metrics_jsonl = tmp_path / "artifacts" / "perf" / "server_metrics.jsonl"
+    metrics_touched = False
+
+    async def fake_replay_scene(**kwargs):
+        nonlocal metrics_touched
+        write_fake_jsonl(kwargs["save_jsonl"])
+        if not metrics_touched:
+            metrics_jsonl.parent.mkdir(parents=True, exist_ok=True)
+            if metrics_mode == "empty":
+                metrics_jsonl.touch()
+            elif metrics_mode == "malformed":
+                metrics_jsonl.write_text(
+                    "not-json\n"
+                    + json.dumps(
+                        {
+                            "type": "frame_metrics",
+                            "phase_latencies_ms": {"decode": "not-a-number"},
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            metrics_touched = True
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--server-metrics-jsonl",
+            str(metrics_jsonl),
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 1
+    report = json.loads((out / "report.json").read_text())
+    perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
+    assert report["overall_pass"] is False
+    assert perf["passed"] is False
+    assert "server_metrics_unavailable" in perf["failure_reasons"]
+    assert "perf: server_metrics_unavailable" in report["failure_reasons"]
+    assert perf["server_phase_latency_ms"]["decode"]["available"] is False
+    assert perf["memory"]["available"] is False
+    assert perf["vram"]["available"] is False
+
+
+@pytest.mark.asyncio
+async def test_server_metrics_jsonl_resource_only_samples_fail_without_phase_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+    metrics_jsonl = tmp_path / "artifacts" / "perf" / "server_metrics.jsonl"
+    metrics_written = False
+
+    async def fake_replay_scene(**kwargs):
+        nonlocal metrics_written
+        write_fake_jsonl(kwargs["save_jsonl"])
+        if not metrics_written:
+            metrics_jsonl.parent.mkdir(parents=True, exist_ok=True)
+            metrics_jsonl.write_text(
+                json.dumps(
+                    {
+                        "type": "frame_metrics",
+                        "schema_version": 1,
+                        "camera": "front",
+                        "frame_id": 1,
+                        "frame_timestamp_ms": 1710000000000,
+                        "phase_latencies_ms": {},
+                        "resources": {
+                            "rss": {"available": True, "bytes": 256},
+                            "vram": {
+                                "available": True,
+                                "device": "cuda:0",
+                                "allocated_bytes": 1 * GIB,
+                                "reserved_bytes": 2 * GIB,
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            metrics_written = True
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--server-metrics-jsonl",
+            str(metrics_jsonl),
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 1
+    report = json.loads((out / "report.json").read_text())
+    perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
+    assert report["overall_pass"] is False
+    assert perf["passed"] is False
+    assert "server_metrics_unavailable" in perf["failure_reasons"]
+    assert "perf: server_metrics_unavailable" in report["failure_reasons"]
+    assert perf["server_phase_latency_ms"]["total"]["available"] is False
+    assert perf["memory"]["available"] is True
+    assert perf["vram"]["available"] is True
+
+
+@pytest.mark.asyncio
+async def test_server_metrics_jsonl_stale_file_is_cleared_before_replay(
+    tmp_path,
+    monkeypatch,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+    metrics_jsonl = tmp_path / "artifacts" / "perf" / "server_metrics.jsonl"
+    append_fake_server_metrics_jsonl(
+        metrics_jsonl,
+        [
+            {
+                "decode": 999.0,
+                "infer": 999.0,
+                "postprocess": 999.0,
+                "tracking": 999.0,
+                "attention": 999.0,
+                "events": 999.0,
+                "response": 999.0,
+                "total": 999.0,
+            }
+        ],
+        rss_bytes=[999],
+        allocated_bytes=[5 * GIB],
+        reserved_bytes=[5 * GIB],
+    )
+    metrics_written = False
+
+    async def fake_replay_scene(**kwargs):
+        nonlocal metrics_written
+        write_fake_jsonl(kwargs["save_jsonl"])
+        if not metrics_written:
+            assert not metrics_jsonl.exists()
+            append_fake_server_metrics_jsonl(
+                metrics_jsonl,
+                [
+                    {
+                        "decode": 1.0,
+                        "infer": 2.0,
+                        "postprocess": 3.0,
+                        "tracking": 4.0,
+                        "attention": 5.0,
+                        "events": 6.0,
+                        "response": 7.0,
+                        "total": 28.0,
+                    }
+                ],
+                rss_bytes=[321],
+                allocated_bytes=[1 * GIB],
+                reserved_bytes=[2 * GIB],
+            )
+            metrics_written = True
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--server-metrics-jsonl",
+            str(metrics_jsonl),
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "999" not in metrics_jsonl.read_text(encoding="utf-8")
+    perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
+    assert perf["server_phase_latency_ms"]["decode"] == {
+        "available": True,
+        "count": 1,
+        "p50": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+    }
+    assert perf["memory"]["max_bytes"] == 321
+    assert perf["vram"]["max_allocated_bytes"] == 1 * GIB
+    assert perf["thresholds"]["results"]["vram_4gib"] is True
 
 
 @pytest.mark.asyncio

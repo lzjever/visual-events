@@ -21,6 +21,11 @@ class InferenceConfig:
 
 
 @dataclass(frozen=True)
+class MetricsConfig:
+    jsonl_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8765
@@ -29,6 +34,7 @@ class ServerConfig:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     events: EventConfig = field(default_factory=EventConfig)
+    metrics: MetricsConfig = field(default_factory=MetricsConfig)
 
 
 def load_config(path: str | Path | None = None) -> ServerConfig:
@@ -54,6 +60,9 @@ def load_config(path: str | Path | None = None) -> ServerConfig:
     events_data = data.get("events", {})
     if not isinstance(events_data, dict):
         raise ValueError("[events] section must be an object")
+    metrics_data = data.get("metrics", {})
+    if not isinstance(metrics_data, dict):
+        raise ValueError("[metrics] section must be an object")
 
     return ServerConfig(
         host=str(server_data.get("host", ServerConfig.host)),
@@ -63,6 +72,7 @@ def load_config(path: str | Path | None = None) -> ServerConfig:
         tracking=_parse_tracking_config(tracking_data),
         attention=_parse_attention_config(attention_data),
         events=_parse_event_config(events_data),
+        metrics=_parse_metrics_config(metrics_data),
     )
 
 
@@ -105,6 +115,16 @@ def _parse_inference_config(
         imgsz=imgsz,
         conf=conf,
     )
+
+
+def _parse_metrics_config(data: dict[str, Any]) -> MetricsConfig:
+    jsonl_path = data.get("jsonl_path")
+    if jsonl_path is None:
+        return MetricsConfig()
+    jsonl_path_text = str(jsonl_path)
+    if not jsonl_path_text:
+        raise ValueError("[metrics].jsonl_path must be non-empty")
+    return MetricsConfig(jsonl_path=Path(jsonl_path_text))
 
 
 def _parse_tracking_config(data: dict[str, Any]) -> TrackingConfig:

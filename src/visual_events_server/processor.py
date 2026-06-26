@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 from .attention import AttentionConfig, AttentionResult, AttentionSelector
 from .events import EventConfig, EventEngine
 from .inference.base import InferBackend
+from .metrics import MetricsSink
 from .protocol import FrameMessage, SCHEMA_VERSION
 from .protocol import ProtocolError
 from .tracking import ByteTrackStyleTracker, TrackSnapshot, TrackingConfig
@@ -33,11 +35,15 @@ class BackendVisualFrameProcessor:
         tracking_config: TrackingConfig | None = None,
         attention_config: AttentionConfig | None = None,
         event_config: EventConfig | None = None,
+        metrics_sink: MetricsSink | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.backend = backend
         self.tracking_config = tracking_config or TrackingConfig()
         self.attention_config = attention_config or AttentionConfig()
         self.event_config = event_config or EventConfig()
+        self.metrics_sink = metrics_sink
+        self._clock = clock or time.perf_counter
         self._legacy_session: BackendVisualStreamSession | None = None
 
     def create_session(self) -> "BackendVisualStreamSession":
@@ -46,6 +52,8 @@ class BackendVisualFrameProcessor:
             tracker=ByteTrackStyleTracker(config=self.tracking_config),
             attention_selector=AttentionSelector(config=self.attention_config),
             event_engine=EventEngine(config=self.event_config),
+            metrics_sink=self.metrics_sink,
+            clock=self._clock,
         )
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
@@ -62,15 +70,23 @@ class BackendVisualStreamSession:
         tracker: ByteTrackStyleTracker,
         attention_selector: AttentionSelector,
         event_engine: EventEngine,
+        metrics_sink: MetricsSink | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.backend = backend
         self.tracker = tracker
         self.attention_selector = attention_selector
         self.event_engine = event_engine
+        self.metrics_sink = metrics_sink
+        self._clock = clock or time.perf_counter
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
+        total_start = self._clock()
+        phase_latencies_ms: dict[str, float] = {}
         try:
+            infer_start = self._clock()
             detections = await self.backend.infer(frame)
+            infer_elapsed_ms = _elapsed_ms(infer_start, self._clock)
         except Exception as exc:
             raise ProtocolError(
                 "backend_unavailable",
@@ -78,22 +94,58 @@ class BackendVisualStreamSession:
                 frame_id=frame.frame_id,
                 retryable=True,
             ) from exc
+
+        backend_phase_latencies = _consume_backend_phase_metrics(self.backend)
+        if backend_phase_latencies:
+            phase_latencies_ms.update(backend_phase_latencies)
+        else:
+            phase_latencies_ms["infer"] = infer_elapsed_ms
+
+        tracking_start = self._clock()
         tracks = self.tracker.update(frame, detections)
+        phase_latencies_ms["tracking"] = _elapsed_ms(tracking_start, self._clock)
+
+        attention_start = self._clock()
         attention = self.attention_selector.update(frame, tracks)
+        phase_latencies_ms["attention"] = _elapsed_ms(attention_start, self._clock)
+
+        events_start = self._clock()
         semantic_events = self.event_engine.update(frame, tracks, attention)
-        return build_visual_state(
+        phase_latencies_ms["events"] = _elapsed_ms(events_start, self._clock)
+
+        response_start = self._clock()
+        response = build_visual_state(
             frame,
             tracks,
             attention=attention,
             semantic_events=semantic_events,
         )
+        phase_latencies_ms["response"] = _elapsed_ms(response_start, self._clock)
+        phase_latencies_ms["total"] = _elapsed_ms(total_start, self._clock)
+        self._emit_metrics(frame, phase_latencies_ms)
+        return response
+
+    def _emit_metrics(
+        self,
+        frame: FrameMessage,
+        phase_latencies_ms: Mapping[str, float],
+    ) -> None:
+        if self.metrics_sink is None:
+            return
+        try:
+            self.metrics_sink.write_frame_metrics(frame, phase_latencies_ms)
+        except Exception:
+            return
 
 
 class MockVisualFrameProcessor:
-    def __init__(self) -> None:
+    def __init__(self, *, metrics_sink: MetricsSink | None = None) -> None:
         from .inference.mock import MockInferBackend
 
-        self._processor = BackendVisualFrameProcessor(MockInferBackend())
+        self._processor = BackendVisualFrameProcessor(
+            MockInferBackend(),
+            metrics_sink=metrics_sink,
+        )
 
     def create_session(self) -> BackendVisualStreamSession:
         return self._processor.create_session()
@@ -134,3 +186,27 @@ def build_visual_state(
         },
         "semantic_events": semantic_events or [],
     }
+
+
+def _elapsed_ms(start: float, clock: Callable[[], float]) -> float:
+    return max(0.0, (clock() - start) * 1000.0)
+
+
+def _consume_backend_phase_metrics(backend: InferBackend) -> dict[str, float]:
+    consume = getattr(backend, "consume_phase_metrics", None)
+    if not callable(consume):
+        return {}
+    try:
+        raw_phases = consume()
+    except Exception:
+        return {}
+    if not isinstance(raw_phases, Mapping):
+        return {}
+
+    phases: dict[str, float] = {}
+    for name, value in raw_phases.items():
+        try:
+            phases[str(name)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return phases

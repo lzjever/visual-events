@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import os
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from .config import ServerConfig, load_config
+from .config import MetricsConfig, ServerConfig, load_config
 from .inference.factory import create_infer_backend
+from .metrics import JsonlMetricsSink, MetricsSink
 from .processor import (
     BackendVisualFrameProcessor,
     MockVisualFrameProcessor,
@@ -106,6 +109,7 @@ def create_processor_from_config(config: ServerConfig) -> VisualFrameProcessor:
         tracking_config=config.tracking,
         attention_config=config.attention,
         event_config=config.events,
+        metrics_sink=_metrics_sink_from_config(config),
     )
 
 
@@ -118,14 +122,26 @@ def _session_factory_from_processor(
     return lambda: processor
 
 
+def _metrics_sink_from_config(config: ServerConfig) -> MetricsSink | None:
+    if config.metrics.jsonl_path is None:
+        return None
+    return JsonlMetricsSink(config.metrics.jsonl_path)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="visual-events-server")
     parser.add_argument("--config", help="Path to a JSON or TOML server config")
     parser.add_argument("--host", help="Override bind host")
     parser.add_argument("--port", type=int, help="Override bind port")
+    parser.add_argument("--metrics-jsonl", help="Write per-frame metrics to JSONL")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
+    if args.metrics_jsonl is not None:
+        config = replace(
+            config,
+            metrics=MetricsConfig(jsonl_path=Path(args.metrics_jsonl)),
+        )
     host = args.host or config.host
     port = args.port if args.port is not None else config.port
     try:

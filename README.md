@@ -1,13 +1,13 @@
 # visual-events
 
-视觉事件推理服务。当前 repo 已包含 S0-S6.3 server baseline：WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay/E2E 工具、S2 推理 backend 边界和 Ultralytics pose adapter、S3 项目内 ByteTrack-style IoU/TTL tracker baseline、S4 attention selector、S5 semantic events、支持 S6/S6.1/S6.3 E2E/perf/soak 和 semantic event first-trigger/timeline gate 的 `tools/run_val_data_e2e.py`，以及 release/runtime smoke verification 工具 `tools/run_runtime_smoke.py`。首个产品场景是商店门口揽客机器人。
+视觉事件推理服务。当前 repo 已包含 S0-S8 server baseline：WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay/E2E 工具、S2 推理 backend 边界和 Ultralytics pose adapter、S3 项目内 ByteTrack-style IoU/TTL tracker baseline、S4 attention selector、S5 semantic events、支持 S6/S6.1/S6.3/S8 E2E/perf/soak、semantic event first-trigger/timeline gate 和 opt-in server metrics evidence 的 `tools/run_val_data_e2e.py`，以及 release/runtime smoke verification 工具 `tools/run_runtime_smoke.py`。首个产品场景是商店门口揽客机器人。
 
 本 repo 计划包含两个运行单元，并包含开发/验证工具：
 
-- `visual-events-server`: 已有 S0-S6.3 baseline。局域网推理服务，接收机器人侧 JPEG 帧，输出 10Hz `visual_state` 和低频 `semantic_events`。
+- `visual-events-server`: 已有 S0-S8 baseline。局域网推理服务，接收机器人侧 JPEG 帧，输出 10Hz `visual_state` 和低频 `semantic_events`；metrics 默认关闭，显式配置后写 ignored JSONL。
 - `visual-events-cli`: 未来运行单元。Botified 启动的机器人后台 CLI，从 DDS 抓取图像，调用服务端，消费高频注视目标，并把低频语义事件转换成 Botified frame。
 - `tools/replay_val_data.py`: 已有开发/验证工具。按 server wire protocol 回放 `val-data` JPEG，不接 DDS，不输出 Botified frame。
-- `tools/run_val_data_e2e.py`: 已有 S6 E2E/perf gate，支持 S6.1 5-minute soak evidence gate 和 S6.3 semantic event first-trigger/timeline gate。对运行中的 server 回放 `stationary` 全量、`unknown` 全量 suppression、`moving` targeted suppression gates，输出 ignored artifacts。
+- `tools/run_val_data_e2e.py`: 已有 S6/S8 E2E/perf gate，支持 S6.1 5-minute soak evidence gate、S6.3 semantic event first-trigger/timeline gate 和 opt-in server metrics JSONL aggregation。对运行中的 server 回放 `stationary` 全量、`unknown` 全量 suppression、`moving` targeted suppression gates，输出 ignored artifacts。
 - `tools/run_runtime_smoke.py`: 已有 release/runtime verification 工具。它会同步 `runtime/venv`、启动 release/runtime server，并通过 `/healthz` 校验新进程身份；它不是产品 CLI，也不能替代 `val-data` E2E/soak。
 
 核心分层：
@@ -45,6 +45,7 @@ DDS JPEG @10Hz
 - 低频语义事件：Botified `<botified>...</botified>` request frame。
 - V1 事件：出现、离开、路过、靠近、停留、挥手、注视目标变化。
 - S6.3 event gate：在 `val-data/` 上检查 expected first trigger frame tolerance <= 3 frames、forbidden scene events，以及 `pic_walk_in_stop` 的 approaching-before-stopped ordering；它不是 dense per-frame manual annotation。
+- S8 metrics evidence：server metrics 默认关闭；通过 `[metrics].jsonl_path` 或 `--metrics-jsonl <path>` 开启后写 ignored JSONL，E2E runner 只在显式 `--server-metrics-jsonl <path>` 时聚合 phase latency、RSS 和 PyTorch CUDA allocated/reserved VRAM evidence。
 - RK3588 兼容：从第一版开始保留 `InferBackend` 边界，未来替换为 RKNN backend。
 
 开发原则：

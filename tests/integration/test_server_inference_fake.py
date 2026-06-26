@@ -7,6 +7,7 @@ from visual_events_server.inference.base import (
     PersonPoseDetection,
     PoseDetections,
 )
+from visual_events_server.metrics import JsonlMetricsSink
 from visual_events_server.processor import BackendVisualFrameProcessor
 from visual_events_server.protocol import encode_frame_message
 
@@ -73,6 +74,48 @@ def test_fake_backend_detections_drive_visual_state_scene_flags():
         "someone_near_center": False,
     }
     assert message["semantic_events"] == []
+
+
+def test_metrics_jsonl_enabled_writes_processed_frame_without_wire_change(tmp_path):
+    metrics_path = tmp_path / "metrics" / "frames.jsonl"
+    processor = BackendVisualFrameProcessor(
+        SequenceBackend([PoseDetections(persons=[person()])]),
+        metrics_sink=JsonlMetricsSink(
+            metrics_path,
+            resource_sampler=lambda: {
+                "rss": {"available": False, "reason": "rss_unavailable"},
+                "vram": {"available": False, "reason": "torch_unavailable"},
+            },
+        ),
+    )
+    client = TestClient(create_app(processor=processor))
+
+    with client.websocket_connect("/v1/stream") as websocket:
+        websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
+        message = json.loads(websocket.receive_text())
+
+    assert message["type"] == "visual_state"
+    assert "phase_latencies_ms" not in message
+    assert "resources" not in message
+    metrics_lines = metrics_path.read_text(encoding="utf-8").splitlines()
+    assert len(metrics_lines) == 1
+    metrics = json.loads(metrics_lines[0])
+    assert metrics["type"] == "frame_metrics"
+    assert metrics["camera"] == "front"
+    assert metrics["frame_id"] == 7
+    assert metrics["frame_timestamp_ms"] == 1710000000000
+    assert set(metrics["phase_latencies_ms"]) == {
+        "infer",
+        "tracking",
+        "attention",
+        "events",
+        "response",
+        "total",
+    }
+    assert metrics["resources"] == {
+        "rss": {"available": False, "reason": "rss_unavailable"},
+        "vram": {"available": False, "reason": "torch_unavailable"},
+    }
 
 
 def test_backend_error_is_retryable_and_next_frame_can_continue_on_same_connection():

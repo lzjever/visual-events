@@ -88,6 +88,58 @@ wave_window_ms = 1600
     assert config.events.wave_window_ms == 1600
 
 
+def test_metrics_config_is_disabled_by_default():
+    config = load_config()
+
+    assert config.metrics.jsonl_path is None
+
+
+def test_load_config_parses_metrics_jsonl_path(tmp_path):
+    metrics_path = tmp_path / "metrics" / "server.jsonl"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"""
+[metrics]
+jsonl_path = "{metrics_path}"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.metrics.jsonl_path == metrics_path
+
+
+def test_server_cli_metrics_jsonl_override_wires_config(tmp_path, monkeypatch):
+    from visual_events_server import app as app_module
+
+    captured: dict[str, object] = {}
+    metrics_path = tmp_path / "cli-metrics.jsonl"
+
+    def fake_create_processor_from_config(config):
+        captured["processor_config"] = config
+        return object()
+
+    def fake_uvicorn_run(app, *, host, port):
+        captured["app_config"] = app.state.config
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr(
+        app_module,
+        "create_processor_from_config",
+        fake_create_processor_from_config,
+    )
+    monkeypatch.setattr(app_module.uvicorn, "run", fake_uvicorn_run)
+
+    app_module.main(["--metrics-jsonl", str(metrics_path), "--port", "9911"])
+
+    assert captured["processor_config"].metrics.jsonl_path == metrics_path
+    assert captured["app_config"].metrics.jsonl_path == metrics_path
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 9911
+
+
 def test_load_config_rejects_invalid_attention_section(tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(

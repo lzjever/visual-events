@@ -4,7 +4,7 @@
 
 ## 1. Scope / Status
 
-本 handoff 只覆盖 `visual-events-server`。当前 server 已完成 S0-S6.3 baseline：WebSocket protocol、真实/Mock inference backend 边界、Ultralytics pose adapter、项目内 ByteTrack-style IoU/TTL tracker baseline、attention selector、semantic events、`val-data/` E2E runner、轻量 perf report、release/runtime smoke verification，以及 S6.3 semantic event first-trigger/timeline gate。`tools/run_val_data_e2e.py` 已支持 stationary 全量、unknown 全量 suppression、moving targeted suppression gates，并在 `val-data/` 上检查 expected first trigger frame tolerance <= 3 frames、forbidden scene events 和 `pic_walk_in_stop` event ordering。`tools/run_runtime_smoke.py` 已验证 `runtime/venv` server 可启动，并通过 `/healthz` 证明本次 server process identity。当前 handoff 已有 runtime server S6.3 full matrix 和 S6.1/S7 5-minute soak pass evidence；moving suppression 由 warm-up/full matrix 的 `__head_moving` artifacts 证明，不在 soak loop 内重复。对应 artifacts 仍在 ignored paths 下，不提交到 Git。
+本 handoff 只覆盖 `visual-events-server`。当前 server 已完成 S0-S8 baseline：WebSocket protocol、真实/Mock inference backend 边界、Ultralytics pose adapter、项目内 ByteTrack-style IoU/TTL tracker baseline、attention selector、semantic events、`val-data/` E2E runner、轻量 perf report、release/runtime smoke verification、S6.3 semantic event first-trigger/timeline gate，以及 S8 opt-in server metrics evidence。`tools/run_val_data_e2e.py` 已支持 stationary 全量、unknown 全量 suppression、moving targeted suppression gates，并在 `val-data/` 上检查 expected first trigger frame tolerance <= 3 frames、forbidden scene events 和 `pic_walk_in_stop` event ordering。`tools/run_runtime_smoke.py` 已验证 `runtime/venv` server 可启动，并通过 `/healthz` 证明本次 server process identity。当前 handoff 已有 runtime server S8 full matrix、metrics aggregation 和 5-minute soak pass evidence；moving suppression 由 warm-up/full matrix 的 `__head_moving` artifacts 证明，不在 soak loop 内重复。对应 artifacts 仍在 ignored paths 下，不提交到 Git。
 
 当前阶段没有正式 robot CLI：不接 DDS，不输出 Botified frame，不做头部控制闭环。`tools/replay_val_data.py`、`tools/run_val_data_e2e.py` 和 `tools/run_runtime_smoke.py` 是开发/验证工具，不是产品 CLI。`tools/run_runtime_smoke.py` 只验证 release/runtime 启动，不替代 `val-data` E2E/soak。
 
@@ -68,7 +68,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 该命令运行 full matrix：stationary 全量 7 scene、unknown 全量 suppression 7 scene、moving targeted suppression 5 scene。stationary `all` gate 包含 S6.3 first-trigger/timeline checks；moving targeted cases 使用 `__head_moving` artifact 目录并只跑 events gate。
 
-S6.1/S7 5-minute soak evidence gate：
+S6.1/S7/S8 5-minute soak evidence gate：
 
 ```bash
 SERVER_PID=<visual-events-server pid>
@@ -88,6 +88,25 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 ```
 
 Soak requires realtime playback. Do not add `--no-realtime`; the runner rejects that combination. Soak also requires `--response-timeout-ms` and `--server-pid` so a hung request or unreadable RSS sample fails with artifact evidence instead of silently passing. The warm-up/full matrix includes targeted `__head_moving` cases; the 300s soak loop intentionally excludes moving cases and only loops stationary + unknown.
+
+S8 server metrics are disabled by default. Enable them with config:
+
+```toml
+[metrics]
+jsonl_path = "artifacts/perf/server_metrics.jsonl"
+```
+
+or with server CLI:
+
+```bash
+runtime/venv/bin/visual-events-server \
+  --config runtime/config/s2.toml \
+  --host 127.0.0.1 \
+  --port 8767 \
+  --metrics-jsonl artifacts/perf/server_metrics.jsonl
+```
+
+The server writes one ignored JSONL `frame_metrics` line per successfully processed frame and does not change the `visual_state` wire protocol. The E2E runner consumes metrics only from an explicit `--server-metrics-jsonl <path>`; omitted means the old unavailable behavior. If that path is provided but has no usable `total` phase samples, E2E fails with `server_metrics_unavailable`; the runner clears any stale metrics file at start.
 
 ## 3. Runtime / Cache / Model Policy
 
@@ -142,11 +161,12 @@ Latest ignored artifacts:
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `artifacts/runtime-smoke/report.json` | `25d5081f130682da25d895bca86752a73598170958edaf36e46a11403d652b26` |
-| `artifacts/e2e/report.json` | `17bb701514e1f963fffbd0e891dc9fd2723b0ba9ec1984f902d8210a249796d0` |
-| `artifacts/perf/server_perf.json` | `db5baff4367b0e96ea97e64b3cab68b8cb3a1b74423acf4983ccafa6627997e4` |
+| `artifacts/runtime-smoke/report.json` | `58552d81b7f0a46741f626ddce373f5e50e7672ef7a5d1d3550aa9eae7750439` |
+| `artifacts/e2e/report.json` | `67deba187e11bf53382f379b039b840f7847d65695546fa615eb13caa3274d49` |
+| `artifacts/perf/server_perf.json` | `563a51402baa45db3662921b49a3e131364bf8b3b46f1e31214e8fd59b52fa41` |
+| `artifacts/perf/server_metrics.jsonl` | `9b059a2458111d6e6af575c164f89d1dfcca40b0cfb0c572fc1f1e922ac2170a` |
 
-Latest S6.3 runtime smoke evidence:
+Latest S8 runtime smoke evidence:
 
 - Status: pass; `passed == true`.
 - Command:
@@ -157,49 +177,69 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv run --group dev python to
 
 - Sync env: `runtime/cache/uv`, `runtime/venv`.
 - Server command: `/home/galbot/works/visual-events/runtime/venv/bin/visual-events-server --config /home/galbot/works/visual-events/runtime/config/s2.toml --host 127.0.0.1 --port 8767`.
-- Server pid in smoke report: 731370; healthz pid: 731370; `healthz_identity_verified == true`; elapsed 1.063045191578567s; stopped by the smoke tool.
+- Server pid in smoke report: 840437; healthz pid: 840437; `healthz_identity_verified == true`; elapsed 1.0514707476831973s; stopped by the smoke tool.
 - Artifact: `artifacts/runtime-smoke/report.json`; ignored and must not be committed.
 
-Latest runtime server S6.3 realtime warm-up/full-matrix report:
+Latest runtime server S8 E2E/soak invocation:
+
+- Server command: `runtime/venv/bin/visual-events-server --config runtime/config/s2.toml --host 127.0.0.1 --port 8767 --metrics-jsonl artifacts/perf/server_metrics.jsonl`.
+- Server pid: 841084.
+- Runner command:
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv run --group dev python tools/run_val_data_e2e.py --server ws://127.0.0.1:8767/v1/stream --data-dir val-data --out artifacts/e2e --camera front --fps 10 --response-timeout-ms 30000 --soak-seconds 300 --server-pid 841084 --soak-memory-growth-max-mb 64 --soak-sample-interval-s 10 --server-metrics-jsonl artifacts/perf/server_metrics.jsonl
+```
+
+Latest runtime server S8 warm-up/full-matrix report:
 
 - Status: pass; `overall_pass == true`.
 - Cases: 19 total = 7 stationary `all` + 7 unknown `events` + 5 moving targeted `events`.
 - Moving targeted cases passed: `pci_stand__head_moving`, `pic_1_l_to_r__head_moving`, `pic_1_r_to_l__head_moving`, `pic_persone_walk_in__head_moving`, `pic_walk_in_stop__head_moving`.
 - Frames: 1563 sent, 1563 ok
 - Errors: 0
-- Aggregate Hz: 9.832823576149348
-- Aggregate latency: p50 22.13482093065977 ms, p95 23.572090081870556 ms, p99 24.99155094847083 ms
+- Aggregate Hz: 9.9368711648818
+- Aggregate latency: p50 22.232437040656805 ms, p95 23.635465651750565 ms, p99 24.868441745638847 ms
 - Error rate: 0.0
 - Semantic event timeline gate: pass.
 - `pic_1_r_to_l` stationary events: `attention_target_changed:1`, `person_appeared:2`, `person_passing_by:1`; first `person_passing_by` = 47, expected first = 47; no `person_waving`; `timing_errors == 0`; `forbidden == {}`; `order_violations == 0`.
 - `pic_hello`: first `person_waving` = 12, expected first = 12.
 - `pic_walk_in_stop`: first `person_approaching_robot` = 9, first `person_stopped_near_robot` = 63; approaching-before-stopped ordering passes.
 - Waving rule fix: waving wrists must be clearly above the shoulder, closing the prior `pic_1_r_to_l` walking-arm-swing false positive while preserving `pic_hello` `person_waving` at frame 12.
-- Server phase latency, VRAM, and memory: unavailable by design in the S6 runner
 
-Latest runtime server S6.1/S7 soak evidence:
+Latest runtime server S8 soak evidence:
 
 - Status: pass.
-- Server command: `runtime/venv/bin/visual-events-server --config runtime/config/s2.toml --host 127.0.0.1 --port 8767`.
-- Server pid: 747934.
-- Runner command:
-
-```bash
-UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv run --group dev python tools/run_val_data_e2e.py --server ws://127.0.0.1:8767/v1/stream --data-dir val-data --out artifacts/e2e --camera front --fps 10 --response-timeout-ms 30000 --soak-seconds 300 --server-pid 747934 --soak-memory-growth-max-mb 64 --soak-sample-interval-s 10
-```
-
 - Report fields: `overall_pass == true`, `soak.enabled == true`, `soak.passed == true`.
 - Moving suppression evidence: present in warm-up/full matrix `__head_moving` artifacts; moving cases are intentionally excluded from the soak loop.
-- Soak duration: target 300s; passed.
+- Soak duration: target 300s; elapsed 347.898024847731s; passed.
 - Soak cases: 42 cases = 3 loops * 14 stationary + unknown cases.
 - Soak frames: 3456 sent, 3456 ok, 0 errors.
-- Soak Hz: 9.935899703858214.
-- Soak latency: p50 22.29967713356018 ms, p95 23.616538383066654 ms, p99 24.918572045862675 ms.
+- Soak Hz: 9.936939815800379.
+- Soak latency: p50 22.34238525852561 ms, p95 23.670367896556854 ms, p99 24.51172610744834 ms.
 - Soak error rate: 0.0.
-- Soak RSS growth: 4.03125 MB <= 64 MB.
+- Soak RSS: start 1677.96484375 MB, end 1690.7890625 MB, growth 12.82421875 MB <= 64 MB, samples 5.
 - Soak artifacts: `artifacts/e2e/soak/loop_0001/...` through `artifacts/e2e/soak/loop_0003/...`; these are ignored artifacts and must not be committed.
 
-Important caveat: the current S6 gate uses aggregate perf. Per-case latency is diagnostic. Decode/preprocess/infer/postprocess/tracking/events phase metrics, VRAM, and top-level memory metrics are unavailable until a future server metrics module exists. `server_perf.json.vram.available == false` is expected; it does not verify VRAM < 4GB. Soak RSS is process-level evidence from `/proc/<pid>/status`, not a complete metrics pipeline.
+Latest S8 server metrics evidence:
+
+- JSONL samples: 5019 `frame_metrics` lines = 1563 full matrix frames + 3456 soak frames.
+- Phase latency summary from `artifacts/perf/server_perf.json`:
+
+| Phase | Count | P50 ms | P95 ms | P99 ms |
+| --- | ---: | ---: | ---: | ---: |
+| `decode` | 5019 | 3.253 | 3.54 | 3.752 |
+| `infer` | 5019 | 6.469 | 7.01 | 7.591 |
+| `postprocess` | 5019 | 0.17 | 0.214 | 0.253 |
+| `tracking` | 5019 | 0.065 | 0.099 | 0.11 |
+| `attention` | 5019 | 0.011 | 0.015 | 0.017 |
+| `events` | 5019 | 0.137 | 0.294 | 0.326 |
+| `response` | 5019 | 0.008 | 0.011 | 0.013 |
+| `total` | 5019 | 10.385 | 11.213 | 11.929 |
+
+- Memory summary: available true; count 5019; min 1755070464 bytes; max 1775976448 bytes; last 1772920832 bytes.
+- VRAM summary: available true; count 5019; device `0`; device consistent true; max allocated 13242368 bytes; max reserved 327155712 bytes; both <= 4 GiB; `vram_4gib == true`.
+
+Important caveat: S8 metrics are available only when explicitly enabled and are evidence artifacts, not a full observability pipeline. Per-case latency is diagnostic. VRAM evidence is process PyTorch CUDA allocated/reserved memory, not RK3588 validation and not total board memory validation. `val-data/`, `runtime/`, `artifacts/`, metrics JSONL, model files, and caches remain ignored/untracked and must not be committed.
 
 ## 7. Known Limitations / Failure Scenarios
 
@@ -219,7 +259,7 @@ Current thresholds from the development plan:
 - GPU server aggregate latency target: p95 < 120 ms, p99 < 200 ms.
 - Error frame ratio target: < 1%.
 - S6.1/S7 soak target: `--soak-seconds 300`, `soak.hz >= 9`, `soak.total_latency_ms.p95 < 120`, `soak.total_latency_ms.p99 < 200`, `soak.error_rate < 1%`, RSS growth <= configured `soak.rss_mb.max_growth` default 64 MB.
-- VRAM < 4GB is a future GPU capacity / metrics evidence item, not a S6.1 soak pass condition.
+- S8 metrics target: when explicitly enabled, phase metrics have usable `total` samples and PyTorch CUDA allocated/reserved VRAM evidence is <= 4 GiB.
 - S6.3 first-trigger tolerance: <= 3 frames.
 
 ## 8. Handoff Checklist
@@ -239,6 +279,7 @@ Pass only if all required items are true:
 - Moving targeted suppression artifacts exist for the run being handed off: `artifacts/e2e/<scene>__head_moving/...` for the five targeted scenes.
 - S6.3 semantic event first-trigger/timeline gate passed: expected first trigger frame tolerance <= 3 frames, forbidden scene events empty, and `pic_walk_in_stop` ordering valid.
 - S6.1/S7 soak passed, `artifacts/e2e/soak/loop_0001/...` exists, and both reports contain `soak.enabled == true` and `soak.passed == true`.
+- S8 metrics evidence, if claimed, was produced by a metrics-enabled server and runner `--server-metrics-jsonl`; phase latency, RSS, and VRAM availability are explicit in `server_perf.json`.
 - Motion-sensitive events are suppressed for `head_motion=unknown` full coverage and `head_motion=moving` targeted coverage.
 - Server output conforms to `common/schema/protocol.md`.
 - Handoff notes include the model manifest, license status, known limitations, and perf caveats.
@@ -253,3 +294,4 @@ Fail handoff if any of these are true:
 - S6.3 event correctness is claimed without first-trigger/timeline evidence.
 - Product/release materials claim Ultralytics Enterprise licensing without confirmation.
 - A 5-minute soak pass is claimed without matching `artifacts/e2e/soak/...` files and matching `soak` summaries in both report files.
+- S8 phase/RSS/VRAM evidence is claimed without the ignored server metrics JSONL and matching `server_perf.json` aggregation.

@@ -113,7 +113,7 @@ artifacts/      # ignored: replay/e2e/perf outputs
 | `attention` | 选择最大稳定人物和 `target_uv` |
 | `events` | 基于 track history 生成 V1 `semantic_events` |
 | `tools/replay_val_data.py` | 测试回放客户端，不是产品 CLI |
-| `tools/run_val_data_e2e.py` | 当前 E2E/soak/event timeline 验证工具，输出轻量 `artifacts/perf/server_perf.json`；不是完整 server metrics module |
+| `tools/run_val_data_e2e.py` | 当前 E2E/soak/event timeline 验证工具，输出轻量 `artifacts/perf/server_perf.json`；S8 起可显式聚合 server metrics JSONL，但不是完整 observability pipeline |
 | `tools/run_runtime_smoke.py` | release/runtime 启动 smoke verification，不是产品 CLI，也不是 `val-data` E2E 替代品 |
 
 环境约束：
@@ -122,7 +122,7 @@ artifacts/      # ignored: replay/e2e/perf outputs
 - `tools/` 和 `tests/` 是开发/验证目录，不属于正式 robot CLI。
 - 开发环境使用项目内 `.venv/` 和 `.uv-cache/`。
 - release/runtime 环境使用项目内 `runtime/venv/` 和 `runtime/cache/uv/`。
-- 当前 runtime package 不包含 `metrics.py`。S6+ 性能证据来自 `tools/run_val_data_e2e.py` 输出的轻量 perf report；完整 server metrics module、phase latency、VRAM 和长期 metrics pipeline 是后续可观测性工作。
+- S8 server metrics 默认关闭；通过 `[metrics].jsonl_path` 或 `visual-events-server --metrics-jsonl <path>` 显式开启后，server 写 ignored JSONL，每个成功处理的 frame 一行，不改 `visual_state` wire protocol。
 - inference runtime cache 必须收敛在 `runtime/cache/*`；server 设置 `YOLO_CONFIG_DIR`、`TORCH_HOME`、`XDG_CACHE_HOME`、`MPLCONFIGDIR`，不改 `HOME`。
 - `val-data/`、`runtime/`、`artifacts/`、模型缓存和测试产物不得进入 Git。
 - `uv.lock` 必须进入 Git，用于 release/runtime 的 `--frozen` 安装。
@@ -331,7 +331,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 - `val-data/` 每个场景至少 95% 有效帧能完成推理并返回 `visual_state`。
 - 有人场景中 `scene_flags.has_person/person_count` 能反映 person detections。
-- 当前 runner 不采样 VRAM；显存 < 4GB 保留为后续 GPU capacity / metrics 验收项，不作为当前 S2/S6.1 gate 条件。
+- S2/S6.1 gate 本身不要求 VRAM；S8 通过显式 server metrics JSONL 提供 GPU capacity evidence。
 - 单帧错误不会中断连接。
 
 ### S3 Tracking
@@ -439,7 +439,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - Warm-up full matrix 继续输出 `artifacts/e2e/<case>/visual_state.jsonl`、`summary.json`、`summary.md`。`stationary` case 使用原 scene 名；`unknown` case 使用 `<scene>__head_unknown`；`moving` targeted case 使用 `<scene>__head_moving`。
 - Soak loop 输出 `artifacts/e2e/soak/loop_0001/<case>/visual_state.jsonl`、`summary.json`、`summary.md`；后续 loop 递增为 `loop_0002` 等。Soak loop 只应出现原 scene 名和 `<scene>__head_unknown` case，不应出现 `__head_moving` case。
 - `artifacts/e2e/report.json` 和 `artifacts/perf/server_perf.json` 都必须包含同一份 `soak` 摘要：`enabled`、`passed`、`failure_reasons`、`target_seconds`、`elapsed_s`、`loops_completed`、`cases_completed`、`frames`、`hz`、`error_rate`、`total_latency_ms`、`server_pid`、`rss_mb`。
-- top-level `server_phase_latency_ms` 仍显式标记为 unavailable；`server_perf.json.vram.available == false` 和 top-level memory metrics unavailable 是预期状态。当前阶段只有 soak 的 `rss_mb` 作为进程级内存增长证据。
+- S6.1/S7 soak 本身仍只要求 Hz、total latency、error rate 和 process RSS growth；S8 若额外提供 `--server-metrics-jsonl <path>`，runner 才聚合 server phase latency、RSS 和 PyTorch CUDA VRAM evidence。
 
 验收阈值：
 
@@ -454,7 +454,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 为什么不做完整 metrics/CLI/RK3588：
 
-- 完整 server metrics module 的 phase latency、VRAM 和长期 metrics pipeline 是后续 server 可观测性工作；S6.1/S7 只验证 300s realtime replay、Hz、total latency、error rate 和 process RSS growth。
+- S8 metrics 是轻量 opt-in evidence，不是长期 metrics pipeline、dashboard、DB 或 Prometheus；S6.1/S7 仍只验证 300s realtime replay、Hz、total latency、error rate 和 process RSS growth。
 - 正式 robot CLI、DDS 输入、Botified 输出和头部控制闭环不属于当前 server handoff。
 - RK3588 迁移未验证；当前只保留 `InferBackend` 边界，避免把 GPU server soak 和未来 RKNN runtime 混成同一个验收项。
 
@@ -506,7 +506,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - release/runtime sync 必须使用 `--frozen --no-dev --no-editable --extra inference --reinstall-package visual-events-server`。
 - sync cache 必须在 `runtime/cache/uv`，virtualenv 必须在 `runtime/venv`，不得改写 `HOME`。
 - 输出只能落在 `artifacts/runtime-smoke/`、`artifacts/e2e/`、`artifacts/perf/` 等 ignored paths，不得写入 `val-data/`。
-- 仍不开发正式 robot CLI、DDS 输入、Botified 输出或头部控制闭环。
+- 仍不开发正式 robot CLI、DDS 输入、Botified 输出、头部控制闭环或完整 observability pipeline。
 
 验收：
 
@@ -530,7 +530,35 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - `pic_walk_in_stop`：`person_approaching_robot` first = 9，`person_stopped_near_robot` first = 63，approaching-before-stopped ordering passes。
 - 挥手规则要求手腕清楚高于肩部，关闭 `pic_1_r_to_l` walking-arm-swing false positive，同时保留 `pic_hello` frame 12 true positive。
 
-Latest runtime release validation evidence is recorded in [`docs/server-handoff.md`](server-handoff.md): runtime smoke, full `val-data` E2E 19-case matrix, perf report, and 300s soak all passed with ignored artifact hashes.
+### S8 Lightweight Server Metrics & GPU Capacity Evidence
+
+目标：
+
+- 补齐 server-side metrics contract，避免 E2E runner 继续把 `server_phase_latency_ms`、VRAM 和 memory 硬编码为 unavailable。
+- Metrics 默认关闭；只有 config `[metrics].jsonl_path` 或 `visual-events-server --metrics-jsonl <path>` 显式开启时，server 才写 ignored JSONL。
+- 每帧 metrics 记录必须包含 frame identity、server phase latency 和可用资源快照；不可用资源必须显式标记 unavailable，而不是伪造数值。
+- E2E runner 只在显式传入 `--server-metrics-jsonl <path>` 时消费该 JSONL；未传入时保持旧的 unavailable 行为，不在 runner 内猜测 server 内部阶段耗时。
+
+范围：
+
+- 允许一个轻量 server metrics writer，写到 `artifacts/perf/server_metrics.jsonl` 或配置指定 ignored path。
+- Phase latency 只覆盖 server 已有处理链路：`decode`、`infer`、`postprocess`、`tracking`、`attention`、`events`、`response`、`total`。
+- Resource snapshot 只记录进程 RSS/memory 和 GPU VRAM 可用性；能采样则写数值，不能采样则写 `available=false` 和 reason。
+- 不改 `visual_state` wire protocol，不新增正式 robot CLI、DDS 输入、Botified 输出、头控、dashboard、Prometheus、DB、训练或 dense annotation tooling。
+
+验收：
+
+- Metrics disabled by default：默认启动不创建 metrics 文件；显式开启后才写 JSONL 到 ignored path。
+- 每行 JSONL 至少记录 `camera`、`frame_id`、`timestamp_ms`、`sequence` 或等价 frame identity，以及 per-phase latency samples。
+- 聚合报告能给出 `decode/infer/postprocess/tracking/attention/events/response/total` 的 `p50`、`p95`、`p99`、`count`；缺样 phase 必须显式 unavailable。
+- Memory/RSS availability 显式可见；VRAM availability/unavailability 显式可见，不能用缺字段表达未知。
+- Runner 启动时清理 stale metrics file；若传入 `--server-metrics-jsonl` 但没有 usable `total` phase samples，E2E 必须以 `server_metrics_unavailable` 失败。
+- Full `val-data` matrix 仍通过：7 stationary + 7 unknown + 5 moving targeted，S6.3 timeline gate 不退化。
+- Runtime smoke 仍通过；runtime server 300s soak 仍通过，并能把 metrics JSONL 聚合进 `server_perf.json`。
+- `val-data/`、`runtime/`、`artifacts/`、metrics JSONL、模型和 cache 保持 ignored/untracked；不得提交资源证据。
+- KISS/DRY/YAGNI：只有一种 server metrics 输出格式、一种 writer、一条 E2E 消费路径。
+
+Latest S8 runtime evidence is recorded in [`docs/server-handoff.md`](server-handoff.md): runtime smoke passed; full `val-data` E2E 19-case matrix passed with S6.3 timeline gate still passing; 300s soak passed; `artifacts/perf/server_metrics.jsonl` contains 5019 frame metrics lines and `server_perf.json` records phase latency, RSS, and PyTorch CUDA allocated/reserved VRAM evidence under the 4 GiB threshold.
 
 ## 9. 测试计划
 
@@ -633,10 +661,10 @@ S6.3 semantic event timeline gate 必须随 full matrix 通过；不能只用事
 
 - 输出频率：回放 10Hz 时 `visual_state` >= 9Hz。
 - GPU server latency：P95 < 120ms，P99 < 200ms。
-- 当前 runner 不采样 VRAM；`server_perf.json.vram.available == false` 是预期状态，不能据此声称显存 < 4GB 已验证。
+- 默认 runner 不采样 server internals；只有显式 `--server-metrics-jsonl <path>` 时聚合 server JSONL 中的 phase latency、RSS 和 PyTorch CUDA VRAM evidence。
 - 单场景连接不中断，error frame 比例 < 1%。
 - `stationary` + `unknown` 5 分钟 soak：用 `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 运行；`report.json` 和 `server_perf.json` 必须记录 `soak.passed == true`、latency/Hz/error/RSS growth 证据。`moving` targeted suppression 由同次 warm-up/full matrix 验证。
-- 显存 < 4GB 保留为后续 GPU capacity / metrics 验收项，不作为 S6.1 soak pass 条件。
+- S8 GPU capacity evidence 只表示当前 GPU server 进程的 PyTorch CUDA allocated/reserved VRAM <= 4 GiB；不验证 RK3588 或整板总内存。
 
 ## 10. 验证矩阵
 
@@ -661,6 +689,7 @@ S6.3 semantic event timeline gate 必须随 full matrix 通过；不能只用事
 | Attention | 最大稳定人物 | 全部 `val-data` | 存在稳定 visible person 或短暂 lost hold 时，`attention.target_track_id` 指向 selector 目标；无稳定目标且无 lost hold 时允许 `attention=null` |
 | Attention | 注视点合法 | 全部 `val-data` | `target_uv` 在图像范围内 |
 | 性能 | server GPU soak | `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 循环 `stationary` + `unknown` cases | `soak.passed == true`；Hz >= 9，P95 < 120ms，P99 < 200ms，error rate < 1%，RSS growth <= configured max；`cases_completed` 不包含 `__head_moving` |
+| 性能 | S8 server metrics evidence | server `--metrics-jsonl artifacts/perf/server_metrics.jsonl` + runner `--server-metrics-jsonl artifacts/perf/server_metrics.jsonl` | metrics JSONL 有 usable `total` phase samples；`server_perf.json` 聚合 phase p50/p95/p99/count、RSS bytes、PyTorch CUDA allocated/reserved bytes；VRAM <= 4 GiB |
 | Release/runtime | `runtime/venv` server smoke | `tools/run_runtime_smoke.py --config runtime/config/s2.toml` | `artifacts/runtime-smoke/report.json` 中 `passed == true`；`healthz_pid == server_pid`；`healthz_identity_verified == true`；sync env 指向 `runtime/cache/uv` 和 `runtime/venv`；server command 指向 `runtime/venv/bin/visual-events-server` |
 | Release/runtime | runtime server E2E/soak | `runtime/venv/bin/visual-events-server --config runtime/config/s2.toml` + `tools/run_val_data_e2e.py --soak-seconds 300` | full matrix 19 cases 通过；300s soak 通过；artifact hash 和关键指标写入 handoff |
 | 回归 | 固定数据回放 | 全部 `val-data` | 事件类型、数量、顺序稳定；S6.3 first trigger frame 偏差 <= 3 帧 |
@@ -745,8 +774,15 @@ artifacts/e2e/report.json
 artifacts/perf/server_perf.json
 ```
 
-S6 最小 runner 必须包含 total latency、Hz、error rate 和 frame counts。
-decode、preprocess、infer、postprocess、tracking、events、VRAM、memory 在当前阶段显式标记为 unavailable；`server_perf.json.vram.available == false` 是预期状态。完整 server metrics 模块和 GPU capacity 证据另列后续实现。
+S6 最小 runner 必须包含 total latency、Hz、error rate 和 frame counts。未传入 `--server-metrics-jsonl` 时，server phase latency、VRAM 和 memory 仍显式标记为 unavailable。
+
+S8 server metrics evidence must be a separate ignored JSONL written by the server only when explicitly enabled, for example:
+
+```text
+artifacts/perf/server_metrics.jsonl
+```
+
+The E2E runner aggregates that JSONL into `server_perf.json` only when `--server-metrics-jsonl <path>` is provided. It must not synthesize phase latency, RSS, memory, or VRAM values when server metrics evidence is missing; if the path is provided but usable `total` phase samples are absent, it fails with `server_metrics_unavailable`.
 
 Soak 摘要字段：
 

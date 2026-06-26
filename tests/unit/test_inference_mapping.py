@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import pytest
+
 from visual_events_server.inference.base import (
     COCO17_KEYPOINT_NAMES,
     bbox_area,
     clip_bbox,
 )
-from visual_events_server.inference.ultralytics_pose import result_to_pose_detections
+from visual_events_server.inference import ultralytics_pose
+from visual_events_server.inference.ultralytics_pose import (
+    UltralyticsPoseBackend,
+    result_to_pose_detections,
+)
+from visual_events_server.protocol import FrameMessage
 
 
 class FakeArray:
@@ -39,6 +46,14 @@ class FakeResult:
     def __init__(self, *, boxes=None, keypoints=None):
         self.boxes = boxes
         self.keypoints = keypoints
+
+
+class StepClock:
+    def __init__(self, values):
+        self.values = list(values)
+
+    def __call__(self):
+        return self.values.pop(0)
 
 
 def test_result_to_pose_detections_filters_persons_clamps_bbox_and_maps_keypoints():
@@ -134,3 +149,61 @@ def test_bbox_helpers_clip_and_report_invalid_area():
     )
     assert bbox_area((0.0, 20.0, 1280.0, 720.0)) == 896000.0
     assert bbox_area((5.0, 5.0, 5.0, 10.0)) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_ultralytics_backend_reports_decode_infer_postprocess_phase_metrics(
+    tmp_path,
+    monkeypatch,
+):
+    model_path = tmp_path / "model.pt"
+    model_path.write_bytes(b"fake model")
+    clock = StepClock([10.0, 10.001, 10.001, 10.006, 10.006, 10.008])
+    backend = UltralyticsPoseBackend(
+        model_path=model_path,
+        device=None,
+        imgsz=320,
+        conf=0.5,
+        clock=clock,
+    )
+    result = FakeResult(
+        boxes=FakeBoxes(
+            xyxy=[[1.0, 2.0, 11.0, 22.0]],
+            conf=[0.9],
+            cls=[0],
+        ),
+        keypoints=FakeKeypoints(xy=[[]], conf=[[]]),
+    )
+    predict_calls = []
+
+    class FakeModel:
+        def predict(self, **kwargs):
+            predict_calls.append(kwargs)
+            return [result]
+
+    monkeypatch.setattr(
+        ultralytics_pose,
+        "_decode_jpeg",
+        lambda jpeg_bytes: ("decoded-image", 100, 80),
+    )
+    backend._model = FakeModel()
+
+    detections = await backend.infer(
+        FrameMessage(
+            camera="front",
+            frame_id=1,
+            timestamp_ms=1000,
+            width=100,
+            height=80,
+            jpeg_bytes=b"\xff\xd8fake\xff\xd9",
+        )
+    )
+
+    assert len(detections.persons) == 1
+    assert predict_calls[0]["source"] == "decoded-image"
+    assert backend.consume_phase_metrics() == {
+        "decode": pytest.approx(1.0),
+        "infer": pytest.approx(5.0),
+        "postprocess": pytest.approx(2.0),
+    }
+    assert backend.consume_phase_metrics() == {}
