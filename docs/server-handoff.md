@@ -4,7 +4,7 @@
 
 ## 1. Scope / Status
 
-本 handoff 只覆盖 `visual-events-server`。当前 server 已完成 S0-S6 baseline：WebSocket protocol、真实/Mock inference backend 边界、Ultralytics pose adapter、项目内 ByteTrack-style IoU/TTL tracker baseline、attention selector、semantic events、`val-data/` E2E runner 和轻量 perf report。当前 handoff 已有 S6.1/S7 5-minute soak pass evidence；对应 artifacts 仍在 ignored paths 下，不提交到 Git。
+本 handoff 只覆盖 `visual-events-server`。当前 server 已完成 S0-S6 baseline：WebSocket protocol、真实/Mock inference backend 边界、Ultralytics pose adapter、项目内 ByteTrack-style IoU/TTL tracker baseline、attention selector、semantic events、`val-data/` E2E runner 和轻量 perf report。`tools/run_val_data_e2e.py` 已支持 stationary 全量、unknown 全量 suppression、moving targeted suppression gates。当前 handoff 已有新矩阵 S6.1/S7 5-minute soak pass evidence；moving suppression 由 warm-up/full matrix 的 `__head_moving` artifacts 证明，不在 soak loop 内重复。对应 artifacts 仍在 ignored paths 下，不提交到 Git。
 
 当前阶段没有正式 robot CLI：不接 DDS，不输出 Botified frame，不做头部控制闭环。`tools/replay_val_data.py` 和 `tools/run_val_data_e2e.py` 是开发/验证工具，不是产品 CLI。
 
@@ -55,6 +55,8 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   --out artifacts/e2e
 ```
 
+该命令运行 full matrix：stationary 全量 7 scene、unknown 全量 suppression 7 scene、moving targeted suppression 5 scene。moving targeted cases 使用 `__head_moving` artifact 目录并只跑 events gate。
+
 S6.1/S7 5-minute soak evidence gate：
 
 ```bash
@@ -74,7 +76,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   --soak-sample-interval-s 10
 ```
 
-Soak requires realtime playback. Do not add `--no-realtime`; the runner rejects that combination. Soak also requires `--response-timeout-ms` and `--server-pid` so a hung request or unreadable RSS sample fails with artifact evidence instead of silently passing.
+Soak requires realtime playback. Do not add `--no-realtime`; the runner rejects that combination. Soak also requires `--response-timeout-ms` and `--server-pid` so a hung request or unreadable RSS sample fails with artifact evidence instead of silently passing. The warm-up/full matrix includes targeted `__head_moving` cases; the 300s soak loop intentionally excludes moving cases and only loops stationary + unknown.
 
 ## 3. Runtime / Cache / Model Policy
 
@@ -129,17 +131,19 @@ Latest ignored artifacts:
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `artifacts/e2e/report.json` | `265c510db1a984f2f059494ed8aedf8643227b6795011eb6c6ba7dd4f28668d7` |
-| `artifacts/perf/server_perf.json` | `0d46913be696a380b53f9c467fff6e637dfefcd24c09b88a34bd875ef5b5b1bf` |
+| `artifacts/e2e/report.json` | `55b62f401d6670806e0b36bf82069868d4e43d436d73b2eec65791064ee0ad71` |
+| `artifacts/perf/server_perf.json` | `920246ae0a90eb336cd9ca829da0d2c8b551cd960b2c7e2a3b43bebc806b6bb8` |
 
 Latest S6 realtime warm-up/full-matrix report:
 
-- Cases: 14
-- Frames: 1152 sent, 1152 ok
+- Status: pass; `overall_pass == true`.
+- Cases: 19 total = 7 stationary `all` + 7 unknown `events` + 5 moving targeted `events`.
+- Moving targeted cases passed: `pci_stand__head_moving`, `pic_1_l_to_r__head_moving`, `pic_1_r_to_l__head_moving`, `pic_persone_walk_in__head_moving`, `pic_walk_in_stop__head_moving`.
+- Frames: 1563 sent, 1563 ok
 - Errors: 0
-- Aggregate Hz: 9.935054661031874
-- Aggregate latency p95: 23.527881130576134 ms
-- Aggregate latency p99: 24.289363995194435 ms
+- Aggregate Hz: 9.9365669151662
+- Aggregate latency p95: 23.517373017966747 ms
+- Aggregate latency p99: 24.8186937533319 ms
 - Error rate: 0.0
 - Server phase latency, VRAM, and memory: unavailable by design in the S6 runner
 
@@ -147,15 +151,21 @@ Latest S6.1/S7 soak evidence:
 
 - Status: pass.
 - Command environment: current source checkout with `.venv` server, `UV_CACHE_DIR=.uv-cache`, `UV_PROJECT_ENVIRONMENT=.venv`.
-- Command parameters: `--camera front --fps 10 --response-timeout-ms 30000 --soak-seconds 300 --server-pid 507273 --soak-memory-growth-max-mb 64 --soak-sample-interval-s 10`.
+- Command:
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv run --group dev python tools/run_val_data_e2e.py --server ws://127.0.0.1:8765/v1/stream --data-dir val-data --out artifacts/e2e --camera front --fps 10 --response-timeout-ms 30000 --soak-seconds 300 --server-pid 537710 --soak-memory-growth-max-mb 64 --soak-sample-interval-s 10
+```
+
 - Report fields: `overall_pass == true`, `soak.enabled == true`, `soak.passed == true`.
-- Soak duration: target 300s, elapsed 347.9469155697152s.
-- Soak loops/cases: 3 loops, 42 cases.
+- Moving suppression evidence: present in warm-up/full matrix `__head_moving` artifacts; moving cases are intentionally excluded from the soak loop.
+- Soak duration: target 300s, elapsed 347.98687677597627s.
+- Soak loops/cases: 3 loops, 42 cases = 3 loops * 14 stationary + unknown cases.
 - Soak frames: 3456 sent, 3456 ok, 0 errors.
-- Soak Hz: 9.935543594743722.
-- Soak latency: p95 23.538413923233747 ms, p99 24.733862839639187 ms.
+- Soak Hz: 9.934468570455106.
+- Soak latency: p95 23.44096777960658 ms, p99 24.396353866904974 ms.
 - Soak error rate: 0.0.
-- Soak RSS: start 1683.86328125 MB, end 1683.23828125 MB, growth 0.09375 MB, max growth 64 MB, samples 5.
+- Soak RSS: start 1685.9296875 MB, end 1681.31640625 MB, growth 0.0 MB, max growth 64 MB, samples 5.
 - Soak artifacts: `artifacts/e2e/soak/loop_0001/...` through `artifacts/e2e/soak/loop_0003/...`; these are ignored artifacts and must not be committed.
 
 Important caveat: the current S6 gate uses aggregate perf. Per-case latency is diagnostic. Decode/preprocess/infer/postprocess/tracking/events phase metrics, VRAM, and top-level memory metrics are unavailable until a future server metrics module exists. `server_perf.json.vram.available == false` is expected; it does not verify VRAM < 4GB. Soak RSS is process-level evidence from `/proc/<pid>/status`, not a complete metrics pipeline.
@@ -165,8 +175,9 @@ Important caveat: the current S6 gate uses aggregate perf. Per-case latency is d
 - No server DDS integration, Botified output, formal robot CLI, or gaze controller.
 - No face identity, face recognition, long-term identity, or gaze/eye-contact judgement.
 - Motion-sensitive events are suppressed when `head_motion.state` is `moving`, `unknown`, or missing: `person_passing_by`, `person_approaching_robot`, `person_stopped_near_robot`.
+- `head_motion=unknown` suppression is full 7-scene coverage; `head_motion=moving` suppression is targeted 5-scene coverage and only uses the events gate.
 - Event gates are scene-level smoke checks from `val-data/`; they are not manual frame-level annotations.
-- S6.1 soak pass evidence exists for this handoff, but it was collected on the current source `.venv` server and does not validate release/runtime packaging by itself.
+- Latest S6.1 soak pass evidence was collected on the current source `.venv` server and does not validate release/runtime packaging by itself.
 - RK3588 is not validated; only the `InferBackend` boundary is preserved for future migration.
 - Product release remains blocked until Ultralytics model/license status is resolved.
 - The pose baseline can miss people or keypoints; V1 response is to tune thresholds/tracker TTL and add validation evidence, not to train a new model in this repo.
@@ -189,10 +200,11 @@ Pass only if all required items are true:
 - Real backend startup fails clearly if the configured model file is missing.
 - Ultralytics cache env vars resolve under `runtime/cache/*` before model construction.
 - `val-data/` is present locally for E2E, but is not committed.
-- Full `val-data/` E2E was run against the real server.
+- Full matrix `val-data/` E2E was run against the real server.
 - `artifacts/e2e/report.json` and `artifacts/perf/server_perf.json` exist for the run being handed off.
+- Moving targeted suppression artifacts exist for the run being handed off: `artifacts/e2e/<scene>__head_moving/...` for the five targeted scenes.
 - S6.1/S7 soak passed, `artifacts/e2e/soak/loop_0001/...` exists, and both reports contain `soak.enabled == true` and `soak.passed == true`.
-- Motion-sensitive events are suppressed for `head_motion=unknown` and `head_motion=moving`.
+- Motion-sensitive events are suppressed for `head_motion=unknown` full coverage and `head_motion=moving` targeted coverage.
 - Server output conforms to `common/schema/protocol.md`.
 - Handoff notes include the model manifest, license status, known limitations, and perf caveats.
 

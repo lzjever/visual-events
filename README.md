@@ -7,7 +7,7 @@
 - `visual-events-server`: 已有 S0-S6 baseline。局域网推理服务，接收机器人侧 JPEG 帧，输出 10Hz `visual_state` 和低频 `semantic_events`。
 - `visual-events-cli`: 未来运行单元。Botified 启动的机器人后台 CLI，从 DDS 抓取图像，调用服务端，消费高频注视目标，并把低频语义事件转换成 Botified frame。
 - `tools/replay_val_data.py`: 已有开发/验证工具。按 server wire protocol 回放 `val-data` JPEG，不接 DDS，不输出 Botified frame。
-- `tools/run_val_data_e2e.py`: 已有 S6 E2E/perf gate，并支持 S6.1 5-minute soak evidence gate。对运行中的 server 回放全量 `val-data`，输出 ignored artifacts。
+- `tools/run_val_data_e2e.py`: 已有 S6 E2E/perf gate，并支持 S6.1 5-minute soak evidence gate。对运行中的 server 回放 `stationary` 全量、`unknown` 全量 suppression、`moving` targeted suppression gates，输出 ignored artifacts。
 
 核心分层：
 

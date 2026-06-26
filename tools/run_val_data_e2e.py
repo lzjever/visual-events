@@ -40,6 +40,14 @@ REQUIRED_SCENE_NAMES = (
     "pic_walk_in_stop",
 )
 
+MOVING_SUPPRESSION_SCENE_NAMES = (
+    "pci_stand",
+    "pic_1_l_to_r",
+    "pic_1_r_to_l",
+    "pic_persone_walk_in",
+    "pic_walk_in_stop",
+)
+
 DEFAULT_OUT = Path("artifacts/e2e")
 DEFAULT_CAMERA = "front"
 DEFAULT_FPS = 10.0
@@ -294,6 +302,7 @@ async def _run_full_matrix(
     out: Path,
     config: RunConfig,
     cases: list[CaseResult] | None = None,
+    include_moving: bool = True,
 ) -> list[CaseResult]:
     results: list[CaseResult] = [] if cases is None else cases
     for scene_dir in scene_dirs:
@@ -327,6 +336,24 @@ async def _run_full_matrix(
                 semantic_event_cooldown_ms=config.semantic_event_cooldown_ms,
             )
         )
+
+    if include_moving:
+        scene_dirs_by_name = {scene_dir.name: scene_dir for scene_dir in scene_dirs}
+        for scene_name in MOVING_SUPPRESSION_SCENE_NAMES:
+            results.append(
+                await _run_case(
+                    server=config.server,
+                    scene_dir=scene_dirs_by_name[scene_name],
+                    out=out,
+                    camera=config.camera,
+                    fps=config.fps,
+                    head_motion="moving",
+                    gate="events",
+                    realtime=config.realtime,
+                    response_timeout_ms=config.response_timeout_ms,
+                    semantic_event_cooldown_ms=config.semantic_event_cooldown_ms,
+                )
+            )
     return results
 
 
@@ -363,7 +390,12 @@ async def _run_soak(
     while True:
         loops_completed += 1
         loop_out = out / f"loop_{loops_completed:04d}"
-        loop_cases = await _run_full_matrix(scene_dirs, out=loop_out, config=config)
+        loop_cases = await _run_full_matrix(
+            scene_dirs,
+            out=loop_out,
+            config=config,
+            include_moving=False,
+        )
         cases_completed += len(loop_cases)
         for case in loop_cases:
             frames_sent += case.stats.frames_sent

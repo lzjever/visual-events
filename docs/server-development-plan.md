@@ -58,8 +58,9 @@ Server 的目标是接收符合 [protocol.md](../common/schema/protocol.md) 的 
 - 文件是 1280x720 JPEG。
 - 回放顺序按文件名排序。
 - 文件名中的数字按纳秒时间戳解析，转成 `timestamp_ms`；无法解析时使用回放序号和默认 10Hz 时间。
-- E2E 测试默认发送 `head_motion.state=stationary`。
-- 必须额外跑一组 `head_motion.state=unknown`，验证运动敏感事件不会触发。
+- E2E full matrix 包含三轮：`stationary` 全量 7 scene、`unknown` 全量 7 scene、`moving` targeted 5 scene。
+- `stationary` 全量轮跑完整 `all` gate；`unknown` 全量轮只验证运动敏感事件 suppression；`moving` targeted 轮只跑事件抑制 gate。
+- `moving` targeted scene 固定为：`pci_stand`、`pic_1_l_to_r`、`pic_1_r_to_l`、`pic_persone_walk_in`、`pic_walk_in_stop`。
 
 ## 4. 架构
 
@@ -380,7 +381,8 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 验收：
 
-- 全量 `val-data/` 必须跑完。
+- Full matrix 必须跑完：`stationary` 全量 7 scene、`unknown` 全量 7 scene、`moving` targeted 5 scene。
+- `moving` targeted cases 只作为 `head_motion=moving` 的事件抑制 gate，不作为 tracking、attention 或 correctness 长矩阵。
 - 生成 per-scene 事件摘要、latency 统计、错误帧统计。
 - 失败时返回非零 exit code。
 
@@ -388,9 +390,10 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 目标：
 
-- 把“全量 `val-data/` 循环 5 分钟”从裸要求变成 runner 可复现的证据门禁。
+- 把“`stationary` + `unknown` 长循环 5 分钟”从裸要求变成 runner 可复现的证据门禁。
 - 验证同一个运行中的 server 在真实 realtime replay 下不会崩溃，total latency、Hz、error rate 和 RSS 增长仍在阈值内。
-- 先跑普通 full matrix 作为 warm-up 和基础 E2E gate；warm-up 完成后读取 `--server-pid` 的 RSS，作为 soak memory baseline。
+- 先跑普通 full matrix 作为 warm-up 和基础 E2E gate；该 warm-up/full matrix 包含 `moving` targeted cases，可作为 moving suppression 证据。warm-up 完成后读取 `--server-pid` 的 RSS，作为 soak memory baseline。
+- 300s soak loop 只循环 `stationary` 全量 7 scene 和 `unknown` 全量 7 scene，不包含 `moving` targeted cases，避免把长期稳定性 gate 拉长成重复 correctness 检查。
 
 命令示例：
 
@@ -413,12 +416,13 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 - Soak 必须 realtime；带 `--soak-seconds` 时不允许 `--no-realtime`。
 - Soak 必须显式提供 `--response-timeout-ms` 和 `--server-pid`。
+- Soak loop 不包含 `head_motion=moving` cases；moving suppression 由 warm-up/full matrix 的 `__head_moving` artifacts 证明。
 - Soak 不改 wire protocol，不开发正式 robot CLI，不要求 DDS、Botified frame 或 gaze controller。
 
 产物：
 
-- Warm-up full matrix 继续输出 `artifacts/e2e/<case>/visual_state.jsonl`、`summary.json`、`summary.md`。
-- Soak loop 输出 `artifacts/e2e/soak/loop_0001/<case>/visual_state.jsonl`、`summary.json`、`summary.md`；后续 loop 递增为 `loop_0002` 等。
+- Warm-up full matrix 继续输出 `artifacts/e2e/<case>/visual_state.jsonl`、`summary.json`、`summary.md`。`stationary` case 使用原 scene 名；`unknown` case 使用 `<scene>__head_unknown`；`moving` targeted case 使用 `<scene>__head_moving`。
+- Soak loop 输出 `artifacts/e2e/soak/loop_0001/<case>/visual_state.jsonl`、`summary.json`、`summary.md`；后续 loop 递增为 `loop_0002` 等。Soak loop 只应出现原 scene 名和 `<scene>__head_unknown` case，不应出现 `__head_moving` case。
 - `artifacts/e2e/report.json` 和 `artifacts/perf/server_perf.json` 都必须包含同一份 `soak` 摘要：`enabled`、`passed`、`failure_reasons`、`target_seconds`、`elapsed_s`、`loops_completed`、`cases_completed`、`frames`、`hz`、`error_rate`、`total_latency_ms`、`server_pid`、`rss_mb`。
 - top-level `server_phase_latency_ms` 仍显式标记为 unavailable；`server_perf.json.vram.available == false` 和 top-level memory metrics unavailable 是预期状态。当前阶段只有 soak 的 `rss_mb` 作为进程级内存增长证据。
 
@@ -430,6 +434,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - `soak.total_latency_ms.p95 < 120`，`soak.total_latency_ms.p99 < 200`。
 - `soak.error_rate < 0.01`。
 - `soak.rss_mb.available == true` 且 `soak.rss_mb.growth <= soak.rss_mb.max_growth`；默认 max growth 为 64 MB，除非命令显式收紧或放宽。
+- `soak.cases_completed` 只统计 soak loop 内完成的 `stationary` + `unknown` cases，不包含 warm-up/full matrix 的 `__head_moving` cases。
 - 普通 full matrix 和 soak 任一阶段失败，都必须返回非零 exit code，并在 report/perf 的 `failure_reasons` 中留下原因。
 
 为什么不做完整 metrics/CLI/RK3588：
@@ -490,6 +495,12 @@ S6 最小 runner 额外输出：
 - `artifacts/e2e/report.json`
 - `artifacts/perf/server_perf.json`
 
+S6 full matrix case 目录规则：
+
+- `stationary` 全量 7 scene：`artifacts/e2e/<scene>/...`
+- `unknown` 全量 7 scene：`artifacts/e2e/<scene>__head_unknown/...`
+- `moving` targeted 5 scene：`artifacts/e2e/<scene>__head_moving/...`
+
 输出产物必须落在 `artifacts/` 下，不能写回 `val-data/`。
 
 S6.1/S7 5 分钟 soak 必须通过同一个 runner 运行：
@@ -509,7 +520,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   --soak-sample-interval-s 10
 ```
 
-声称 5 分钟 soak 通过时，必须同时有 `artifacts/e2e/soak/loop_0001/...` 证据、`artifacts/e2e/report.json` 的 `soak.passed == true`，以及 `artifacts/perf/server_perf.json` 的同名 `soak` 摘要。
+声称 5 分钟 soak 通过时，必须同时有 `artifacts/e2e/soak/loop_0001/...` 证据、`artifacts/e2e/report.json` 的 `soak.passed == true`，以及 `artifacts/perf/server_perf.json` 的同名 `soak` 摘要。Soak loop 证据不包含 `__head_moving`；moving suppression 证据来自同一次运行 warm-up/full matrix 下的 `artifacts/e2e/<scene>__head_moving/...` cases。
 
 ### Performance
 
@@ -521,7 +532,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - GPU server latency：P95 < 120ms，P99 < 200ms。
 - 当前 runner 不采样 VRAM；`server_perf.json.vram.available == false` 是预期状态，不能据此声称显存 < 4GB 已验证。
 - 单场景连接不中断，error frame 比例 < 1%。
-- 全量 `val-data/` 5 分钟 soak：用 `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 运行；`report.json` 和 `server_perf.json` 必须记录 `soak.passed == true`、latency/Hz/error/RSS growth 证据。
+- `stationary` + `unknown` 5 分钟 soak：用 `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 运行；`report.json` 和 `server_perf.json` 必须记录 `soak.passed == true`、latency/Hz/error/RSS growth 证据。`moving` targeted suppression 由同次 warm-up/full matrix 验证。
 - 显存 < 4GB 保留为后续 GPU capacity / metrics 验收项，不作为 S6.1 soak pass 条件。
 
 ## 10. 验证矩阵
@@ -540,11 +551,12 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 | 事件 | `person_stopped_near_robot` | `pic_walk_in_stop`、`pci_stand` | 稳定停留后触发 1 次；cooldown 内不重复 |
 | 事件 | `person_waving` | `pic_hello` | 触发 1 次；其他非挥手目录不得频繁误报 |
 | 事件 | `person_left` | `pic_leave` | track 丢失 TTL 后触发 1 次 |
-| 事件抑制 | 运动敏感事件抑制 | 路过/靠近/停留目录，`head_motion=moving/unknown` | 不触发 `passing_by/approaching/stopped` |
-| 事件 gate | replay events summary | 全部 `val-data` | `--gate events` 按场景期望检查 semantic event；`--gate all` 同时要求 tracking、attention、events 通过 |
+| 事件抑制 | `unknown` 全量运动敏感事件抑制 | 全部 `val-data`，`head_motion=unknown` | 不触发 `passing_by/approaching/stopped`；只作为 events gate |
+| 事件抑制 | `moving` targeted 运动敏感事件抑制 | `pci_stand`、`pic_1_l_to_r`、`pic_1_r_to_l`、`pic_persone_walk_in`、`pic_walk_in_stop`，`head_motion=moving` | 不触发 `passing_by/approaching/stopped`；只作为 events gate，输出 `__head_moving` artifacts |
+| 事件 gate | replay events summary | Full matrix：`stationary` 7 + `unknown` 7 + `moving` targeted 5 | `stationary` 用 `--gate all` 检查 tracking、attention、events；`unknown`/`moving` 用 `--gate events` 检查 suppression |
 | Attention | 最大稳定人物 | 全部 `val-data` | 存在稳定 visible person 或短暂 lost hold 时，`attention.target_track_id` 指向 selector 目标；无稳定目标且无 lost hold 时允许 `attention=null` |
 | Attention | 注视点合法 | 全部 `val-data` | `target_uv` 在图像范围内 |
-| 性能 | server GPU soak | `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 跑全部 `val-data` | `soak.passed == true`；Hz >= 9，P95 < 120ms，P99 < 200ms，error rate < 1%，RSS growth <= configured max |
+| 性能 | server GPU soak | `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 循环 `stationary` + `unknown` cases | `soak.passed == true`；Hz >= 9，P95 < 120ms，P99 < 200ms，error rate < 1%，RSS growth <= configured max；`cases_completed` 不包含 `__head_moving` |
 | 回归 | 固定数据回放 | 全部 `val-data` | 事件类型、数量、顺序稳定；触发帧偏差 <= 3 帧或 <= 300ms |
 
 ## 11. E2E 验收矩阵
@@ -565,6 +577,13 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - 不允许出现 `person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot`。
 - 仍允许 `person_appeared`、`person_left`、`person_waving`、`attention_target_changed`。
 
+第三轮 targeted gating：
+
+- 用 `pci_stand`、`pic_1_l_to_r`、`pic_1_r_to_l`、`pic_persone_walk_in`、`pic_walk_in_stop` 以 `--head-motion moving` 回放。
+- 只执行事件抑制 gate，不要求 moving 场景通过 tracking、attention 或 stationary correctness 检查。
+- 不允许出现 `person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot`。
+- 输出目录使用 `<scene>__head_moving`，handoff 中必须能从这些 artifacts 证明 moving suppression。
+
 ## 12. 测试产物格式
 
 S6 最小 runner 产物保持轻量：
@@ -574,6 +593,8 @@ S6 最小 runner 产物保持轻量：
 ```text
 artifacts/e2e/<case>/visual_state.jsonl
 ```
+
+`<case>` 为原 scene 名、`<scene>__head_unknown` 或 targeted `<scene>__head_moving`。
 
 每行一个 server 响应：
 
@@ -639,6 +660,8 @@ Soak 摘要字段：
 }
 ```
 
+`cases_completed` 示例中的 14 表示单个 soak loop 完成 `stationary` 7 + `unknown` 7；soak loop 不包含 `__head_moving`。同一次 S6.1 运行的 warm-up/full matrix 仍应生成 targeted `__head_moving` artifacts。
+
 未启用 soak 时，`soak` 为 disabled summary；不能据此声称 5 分钟 soak 通过。
 
 ## 13. Handoff 要求
@@ -650,7 +673,7 @@ Server handoff 必须包含：
 - 可运行 `visual-events-server`。
 - `tools/replay_val_data.py` 和 `tools/run_val_data_e2e.py`。
 - 单元测试和集成测试。
-- 全量 `val-data/` E2E 报告。
+- Full matrix `val-data/` E2E 报告：`stationary` 全量、`unknown` 全量 suppression、`moving` targeted suppression。
 - 性能报告。
 - 如 handoff 声称 S6.1/S7 5 分钟 soak 已通过，必须包含 runner 命令、`artifacts/e2e/soak/loop_0001/...` 证据路径、`report.json` 和 `server_perf.json` 中的 `soak` 摘要。
 - `docs/server-handoff.md` 中的模型权重和授权说明。
@@ -658,7 +681,7 @@ Server handoff 必须包含：
 
 不满足以下任一项，不可 handoff：
 
-- 未跑 `val-data/` 全量 E2E。
+- 未跑 `val-data/` full matrix E2E。
 - `val-data/` 缺失时用 mock 测试代替 E2E。
 - `val-data/` 被加入 Git。
 - 运动敏感事件在 `head_motion=unknown` 或 `moving` 时仍触发。

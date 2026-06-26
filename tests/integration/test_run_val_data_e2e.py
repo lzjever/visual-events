@@ -4,10 +4,25 @@ from pathlib import Path
 import pytest
 
 from tools.replay_val_data import ReplayStats
-from tools.run_val_data_e2e import REQUIRED_SCENE_NAMES, async_main
+from tools.run_val_data_e2e import (
+    MOVING_SUPPRESSION_SCENE_NAMES,
+    REQUIRED_SCENE_NAMES,
+    async_main,
+)
 
 
 JPEG_BYTES = b"\xff\xd8\xff\xe0minimal-jpeg\xff\xd9"
+EXPECTED_MOVING_SUPPRESSION_SCENE_NAMES = (
+    "pci_stand",
+    "pic_1_l_to_r",
+    "pic_1_r_to_l",
+    "pic_persone_walk_in",
+    "pic_walk_in_stop",
+)
+STATIONARY_UNKNOWN_CASE_COUNT = len(REQUIRED_SCENE_NAMES) * 2
+FULL_MATRIX_CASE_COUNT = STATIONARY_UNKNOWN_CASE_COUNT + len(
+    EXPECTED_MOVING_SUPPRESSION_SCENE_NAMES
+)
 
 
 def write_jpeg(path: Path) -> None:
@@ -163,7 +178,7 @@ async def test_preflight_rejects_unsafe_out_paths_without_replay(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_runner_replays_stationary_and_unknown_rounds_and_writes_artifacts(
+async def test_runner_replays_stationary_unknown_and_moving_rounds_and_writes_artifacts(
     tmp_path,
     monkeypatch,
 ):
@@ -199,19 +214,27 @@ async def test_runner_replays_stationary_and_unknown_rounds_and_writes_artifacts
     )
 
     assert exit_code == 0
-    assert len(calls) == len(REQUIRED_SCENE_NAMES) * 2
+    assert MOVING_SUPPRESSION_SCENE_NAMES == EXPECTED_MOVING_SUPPRESSION_SCENE_NAMES
+    assert len(calls) == FULL_MATRIX_CASE_COUNT
     assert [call["head_motion"] for call in calls] == (
         ["stationary"] * len(REQUIRED_SCENE_NAMES)
         + ["unknown"] * len(REQUIRED_SCENE_NAMES)
+        + ["moving"] * len(EXPECTED_MOVING_SUPPRESSION_SCENE_NAMES)
     )
 
     stationary_calls = calls[: len(REQUIRED_SCENE_NAMES)]
-    unknown_calls = calls[len(REQUIRED_SCENE_NAMES) :]
+    unknown_calls = calls[
+        len(REQUIRED_SCENE_NAMES) : STATIONARY_UNKNOWN_CASE_COUNT
+    ]
+    moving_calls = calls[STATIONARY_UNKNOWN_CASE_COUNT:]
     assert [Path(call["scene_dir"]).name for call in stationary_calls] == list(
         REQUIRED_SCENE_NAMES
     )
     assert [Path(call["scene_dir"]).name for call in unknown_calls] == list(
         REQUIRED_SCENE_NAMES
+    )
+    assert [Path(call["scene_dir"]).name for call in moving_calls] == list(
+        EXPECTED_MOVING_SUPPRESSION_SCENE_NAMES
     )
     assert all(call["server"] == "ws://127.0.0.1:8765/v1/stream" for call in calls)
     assert all(call["camera"] == "rear" for call in calls)
@@ -221,12 +244,14 @@ async def test_runner_replays_stationary_and_unknown_rounds_and_writes_artifacts
     assert all(call["realtime"] is False for call in calls)
     assert [
         call["save_jsonl"].relative_to(out)
-        for call in stationary_calls[:2] + unknown_calls[:2]
+        for call in stationary_calls[:2] + unknown_calls[:2] + moving_calls[:2]
     ] == [
         Path("pci_stand/visual_state.jsonl"),
         Path("pic_1_l_to_r/visual_state.jsonl"),
         Path("pci_stand__head_unknown/visual_state.jsonl"),
         Path("pic_1_l_to_r__head_unknown/visual_state.jsonl"),
+        Path("pci_stand__head_moving/visual_state.jsonl"),
+        Path("pic_1_l_to_r__head_moving/visual_state.jsonl"),
     ]
 
     for scene in REQUIRED_SCENE_NAMES:
@@ -242,13 +267,28 @@ async def test_runner_replays_stationary_and_unknown_rounds_and_writes_artifacts
             assert summary["gate"] == gate
             assert summary["passed"] is True
 
+    for scene in EXPECTED_MOVING_SUPPRESSION_SCENE_NAMES:
+        case_dir = out / f"{scene}__head_moving"
+        assert (case_dir / "visual_state.jsonl").is_file()
+        assert (case_dir / "summary.md").is_file()
+        summary = json.loads((case_dir / "summary.json").read_text())
+        assert summary["scene"] == scene
+        assert summary["head_motion"] == "moving"
+        assert summary["gate"] == "events"
+        assert summary["passed"] is True
+
     report = json.loads((out / "report.json").read_text())
     assert report["overall_pass"] is True
-    assert len(report["cases"]) == len(REQUIRED_SCENE_NAMES) * 2
+    assert len(report["cases"]) == FULL_MATRIX_CASE_COUNT
     assert report["thresholds"]["hz_min"] == 9.0
     assert report["cases"][0]["artifacts"]["visual_state_jsonl"].endswith(
         "pci_stand/visual_state.jsonl"
     )
+    assert report["cases"][STATIONARY_UNKNOWN_CASE_COUNT]["case"] == (
+        "pci_stand__head_moving"
+    )
+    assert report["cases"][STATIONARY_UNKNOWN_CASE_COUNT]["gate"] == "events"
+    assert report["cases"][STATIONARY_UNKNOWN_CASE_COUNT]["head_motion"] == "moving"
 
     perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
     assert perf["total_latency_ms"] == {
@@ -260,10 +300,10 @@ async def test_runner_replays_stationary_and_unknown_rounds_and_writes_artifacts
     assert perf["hz"] == 10.0
     assert perf["error_rate"] == 0.0
     assert perf["frames"] == {
-        "sent": len(REQUIRED_SCENE_NAMES) * 2 * 3,
-        "ok": len(REQUIRED_SCENE_NAMES) * 2 * 3,
+        "sent": FULL_MATRIX_CASE_COUNT * 3,
+        "ok": FULL_MATRIX_CASE_COUNT * 3,
         "errors": 0,
-        "latency_samples": len(REQUIRED_SCENE_NAMES) * 2 * 3,
+        "latency_samples": FULL_MATRIX_CASE_COUNT * 3,
     }
     assert perf["server_phase_latency_ms"]["infer"] == {"available": False}
     assert perf["vram"] == {"available": False}
@@ -398,8 +438,13 @@ async def test_perf_threshold_failure_returns_nonzero(tmp_path, monkeypatch):
     assert "total_latency_p95_ms" in perf["failure_reasons"]
 
 
+@pytest.mark.parametrize("head_motion", ["unknown", "moving"])
 @pytest.mark.asyncio
-async def test_unknown_motion_sensitive_failure_blocks_e2e(tmp_path, monkeypatch):
+async def test_non_stationary_motion_sensitive_failure_blocks_e2e(
+    tmp_path,
+    monkeypatch,
+    head_motion,
+):
     data_dir = make_val_data_root(tmp_path)
     out = tmp_path / "artifacts" / "e2e"
 
@@ -407,14 +452,14 @@ async def test_unknown_motion_sensitive_failure_blocks_e2e(tmp_path, monkeypatch
         scene = Path(kwargs["scene_dir"]).name
         write_fake_jsonl(kwargs["save_jsonl"])
         stats = passing_stats(scene, kwargs["head_motion"])
-        if kwargs["head_motion"] == "unknown" and scene == "pic_walk_in_stop":
+        if kwargs["head_motion"] == head_motion and scene == "pic_walk_in_stop":
             stats = ReplayStats(
                 scene=scene,
                 frames_sent=3,
                 frames_ok=3,
                 errors=0,
                 elapsed_s=0.3,
-                head_motion="unknown",
+                head_motion=head_motion,
                 semantic_event_motion_sensitive_count=1,
             )
         return stats
@@ -436,8 +481,8 @@ async def test_unknown_motion_sensitive_failure_blocks_e2e(tmp_path, monkeypatch
     assert exit_code == 1
     report = json.loads((out / "report.json").read_text())
     failed = [case for case in report["cases"] if not case["passed"]]
-    assert [case["case"] for case in failed] == ["pic_walk_in_stop__head_unknown"]
-    assert "motion-sensitive events emitted for unknown head motion" in failed[0][
+    assert [case["case"] for case in failed] == [f"pic_walk_in_stop__head_{head_motion}"]
+    assert f"motion-sensitive events emitted for {head_motion} head motion" in failed[0][
         "failure_reasons"
     ]
 
@@ -554,18 +599,24 @@ async def test_soak_runs_full_val_data_loops_until_wall_clock_target(
     )
 
     assert exit_code == 0
-    assert len(calls) == len(REQUIRED_SCENE_NAMES) * 2 * 3
-    assert [call["head_motion"] for call in calls[: len(REQUIRED_SCENE_NAMES) * 2]] == (
+    assert len(calls) == FULL_MATRIX_CASE_COUNT + STATIONARY_UNKNOWN_CASE_COUNT * 2
+    warm_up_calls = calls[:FULL_MATRIX_CASE_COUNT]
+    soak_loop_calls = calls[FULL_MATRIX_CASE_COUNT:]
+    assert [call["head_motion"] for call in warm_up_calls] == (
         ["stationary"] * len(REQUIRED_SCENE_NAMES)
         + ["unknown"] * len(REQUIRED_SCENE_NAMES)
+        + ["moving"] * len(EXPECTED_MOVING_SUPPRESSION_SCENE_NAMES)
     )
-    assert [call["head_motion"] for call in calls[-len(REQUIRED_SCENE_NAMES) * 2 :]] == (
-        ["stationary"] * len(REQUIRED_SCENE_NAMES)
-        + ["unknown"] * len(REQUIRED_SCENE_NAMES)
-    )
+    assert all(call["head_motion"] != "moving" for call in soak_loop_calls)
 
-    first_soak_loop = calls[len(REQUIRED_SCENE_NAMES) * 2 : len(REQUIRED_SCENE_NAMES) * 4]
-    second_soak_loop = calls[len(REQUIRED_SCENE_NAMES) * 4 :]
+    first_soak_loop = soak_loop_calls[:STATIONARY_UNKNOWN_CASE_COUNT]
+    second_soak_loop = soak_loop_calls[STATIONARY_UNKNOWN_CASE_COUNT:]
+    expected_soak_loop_motions = (
+        ["stationary"] * len(REQUIRED_SCENE_NAMES)
+        + ["unknown"] * len(REQUIRED_SCENE_NAMES)
+    )
+    assert [call["head_motion"] for call in first_soak_loop] == expected_soak_loop_motions
+    assert [call["head_motion"] for call in second_soak_loop] == expected_soak_loop_motions
     assert first_soak_loop[0]["save_jsonl"].relative_to(out) == Path(
         "soak/loop_0001/pci_stand/visual_state.jsonl"
     )
@@ -578,13 +629,16 @@ async def test_soak_runs_full_val_data_loops_until_wall_clock_target(
     assert all(call["response_timeout_ms"] == 250 for call in calls)
 
     assert (out / "pci_stand" / "visual_state.jsonl").is_file()
+    assert (out / "pci_stand__head_moving" / "visual_state.jsonl").is_file()
     assert (out / "soak" / "loop_0001" / "pci_stand" / "visual_state.jsonl").is_file()
     assert (out / "soak" / "loop_0002" / "pci_stand" / "visual_state.jsonl").is_file()
+    assert not (out / "soak" / "loop_0001" / "pci_stand__head_moving").exists()
+    assert not (out / "soak" / "loop_0002" / "pci_stand__head_moving").exists()
 
     report = json.loads((out / "report.json").read_text())
     perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
     assert report["overall_pass"] is True
-    soak_cases_completed = len(REQUIRED_SCENE_NAMES) * 2 * 2
+    soak_cases_completed = STATIONARY_UNKNOWN_CASE_COUNT * 2
     soak_frames = soak_cases_completed * 3
     soak_without_hz = {
         key: value for key, value in report["soak"].items() if key != "hz"
@@ -677,7 +731,7 @@ async def test_soak_rss_baseline_is_sampled_after_initial_full_matrix(
     )
 
     assert exit_code == 0
-    assert rss_call_replay_counts[0] == len(REQUIRED_SCENE_NAMES) * 2
+    assert rss_call_replay_counts[0] == FULL_MATRIX_CASE_COUNT
     report = json.loads((out / "report.json").read_text())
     assert report["soak"]["rss_mb"]["start"] == 512.0
     assert report["soak"]["rss_mb"]["growth"] == 3.0
@@ -786,7 +840,7 @@ async def test_soak_latency_threshold_failure_returns_nonzero(tmp_path, monkeypa
     assert exit_code == 1
     report = json.loads((out / "report.json").read_text())
     perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
-    soak_cases_completed = len(REQUIRED_SCENE_NAMES) * 2
+    soak_cases_completed = STATIONARY_UNKNOWN_CASE_COUNT
     soak_frames = soak_cases_completed * 3
 
     assert report["overall_pass"] is False
@@ -847,7 +901,7 @@ async def test_soak_replay_exception_writes_enabled_failed_soak_report(
     )
 
     assert exit_code == 1
-    assert len(calls) == len(REQUIRED_SCENE_NAMES) * 2 + 1
+    assert len(calls) == FULL_MATRIX_CASE_COUNT + 1
     report = json.loads((out / "report.json").read_text())
     perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
     assert report["overall_pass"] is False
@@ -902,7 +956,7 @@ async def test_soak_unreadable_server_pid_fails(tmp_path, monkeypatch):
     )
 
     assert exit_code == 1
-    assert len(calls) == len(REQUIRED_SCENE_NAMES) * 2
+    assert len(calls) == FULL_MATRIX_CASE_COUNT
     report = json.loads((out / "report.json").read_text())
     perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
     assert report["overall_pass"] is False
