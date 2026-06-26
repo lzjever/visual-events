@@ -4,6 +4,7 @@ import time
 from typing import Any, Protocol
 
 from .attention import AttentionConfig, AttentionResult, AttentionSelector
+from .events import EventConfig, EventEngine
 from .inference.base import InferBackend
 from .protocol import FrameMessage, SCHEMA_VERSION
 from .protocol import ProtocolError
@@ -31,10 +32,12 @@ class BackendVisualFrameProcessor:
         *,
         tracking_config: TrackingConfig | None = None,
         attention_config: AttentionConfig | None = None,
+        event_config: EventConfig | None = None,
     ) -> None:
         self.backend = backend
         self.tracking_config = tracking_config or TrackingConfig()
         self.attention_config = attention_config or AttentionConfig()
+        self.event_config = event_config or EventConfig()
         self._legacy_session: BackendVisualStreamSession | None = None
 
     def create_session(self) -> "BackendVisualStreamSession":
@@ -42,6 +45,7 @@ class BackendVisualFrameProcessor:
             self.backend,
             tracker=ByteTrackStyleTracker(config=self.tracking_config),
             attention_selector=AttentionSelector(config=self.attention_config),
+            event_engine=EventEngine(config=self.event_config),
         )
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
@@ -57,10 +61,12 @@ class BackendVisualStreamSession:
         *,
         tracker: ByteTrackStyleTracker,
         attention_selector: AttentionSelector,
+        event_engine: EventEngine,
     ) -> None:
         self.backend = backend
         self.tracker = tracker
         self.attention_selector = attention_selector
+        self.event_engine = event_engine
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
         try:
@@ -74,7 +80,13 @@ class BackendVisualStreamSession:
             ) from exc
         tracks = self.tracker.update(frame, detections)
         attention = self.attention_selector.update(frame, tracks)
-        return build_visual_state(frame, tracks, attention=attention)
+        semantic_events = self.event_engine.update(frame, tracks, attention)
+        return build_visual_state(
+            frame,
+            tracks,
+            attention=attention,
+            semantic_events=semantic_events,
+        )
 
 
 class MockVisualFrameProcessor:
@@ -95,6 +107,7 @@ def build_visual_state(
     tracks: list[TrackSnapshot],
     *,
     attention: AttentionResult | None = None,
+    semantic_events: list[dict[str, object]] | None = None,
 ) -> dict[str, Any]:
     protocol_tracks = [
         track.to_protocol(image_width=frame.width, image_height=frame.height)
@@ -119,5 +132,5 @@ def build_visual_state(
             ),
             "someone_near_center": False,
         },
-        "semantic_events": [],
+        "semantic_events": semantic_events or [],
     }

@@ -148,9 +148,10 @@ Track 字段规则：
 - `tracks` 是必填数组；S3 只包含 `class="person"` 的 track。
 - `tracks` 可以包含当前帧未匹配但仍在 lost TTL 内保留的 track。这类 track 的 `lost_ms > 0`，`bbox_xyxy`、`center_uv`、`head_uv`、`confidence`、`pose_confidence` 使用最近一次有效观测值；超过 TTL 后从数组移除。
 - `scene_flags.has_person` 和 `scene_flags.person_count` 只统计当前帧匹配/可见的 track，即 `lost_ms == 0`。lost track 不计入人数。
-- S4 可输出 attention；S5 前 `semantic_events` 仍为空数组。
+- S5 可输出 `semantic_events`；无事件帧必须输出空数组 `[]`。
 - 每个 track object 必须包含：`track_id` integer、`class` string、`bbox_xyxy` number[4]、`bbox_area_ratio` number、`center_uv` number[2]、`head_uv` number[2]、`velocity_uv_s` number[2]、`age_ms` integer、`lost_ms` integer、`confidence` number、`pose_confidence` number。
 - `pose_confidence` 是 keypoint confidence 的平均值；没有 keypoint 或没有 confidence 时为 `0.0`。
+- pose keypoints 可在 server 内部随 `TrackSnapshot` 保留，用于 `person_waving`；wire protocol 的 `tracks[]` 不输出 keypoints。
 - `head_uv` 优先使用 COCO nose/eyes/ears 中有效点的中心；没有有效 face keypoint 时 fallback 到 bbox 水平中心和 `bbox_top + 0.28 * bbox_height`。
 - `velocity_uv_s` 单位是像素/秒，来自同一 track 的近期有效观测；历史不足或时间间隔过小时可输出 `[0.0, 0.0]` 或保留上一速度，避免尖峰。
 - `age_ms`、`lost_ms` 不得为负数。服务端发现 `timestamp_ms` 或 `frame_id` 倒退时应 reset 当前连接的 tracker。
@@ -207,13 +208,16 @@ V1 event 枚举：
 - `person_approaching_robot`
 - `person_stopped_near_robot`
 
-这些事件只在 `head_motion.state=stationary` 时触发。
+这些事件只在 `head_motion.state=stationary` 时触发。`moving`、`unknown` 或缺失 `head_motion` 时，服务端不累积这些运动敏感事件的条件。
+
+`person_appeared` 只对 salient target 触发：优先使用当前 `attention.target_track_id`；没有 attention 时，从 visible stable tracks 中选择面积和置信度最高的 person。它不会对背景中所有 person 逐个刷屏。
 
 服务端负责：
 
 - rising-edge 触发。
-- 全局 5s cooldown。
-- 同 track 同事件去重。
+- 同类事件全局 5s cooldown。
+- 同 track 同事件 5s 去重。
+- 同帧可输出多个不同事件，按固定顺序：`person_appeared`、`person_left`、`person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot`、`person_waving`、`attention_target_changed`。
 - 生成稳定 `event_id`。
 
 CLI 只负责：

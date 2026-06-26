@@ -40,6 +40,16 @@ stable_min_age_ms = 350
 switch_area_ratio = 1.4
 switch_confirm_ms = 700
 lost_hold_ms = 800
+
+[events]
+history_ms = 2500
+cooldown_ms = 4500
+stable_min_hits = 3
+stable_min_age_ms = 400
+left_lost_ms = 1700
+stop_max_speed_px_s = 28.5
+passing_min_dx_ratio = 0.5
+wave_window_ms = 1600
 """.strip(),
         encoding="utf-8",
     )
@@ -66,6 +76,14 @@ lost_hold_ms = 800
     assert config.attention.switch_area_ratio == 1.4
     assert config.attention.switch_confirm_ms == 700
     assert config.attention.lost_hold_ms == 800
+    assert config.events.history_ms == 2500
+    assert config.events.cooldown_ms == 4500
+    assert config.events.stable_min_hits == 3
+    assert config.events.stable_min_age_ms == 400
+    assert config.events.left_lost_ms == 1700
+    assert config.events.stop_max_speed_px_s == 28.5
+    assert config.events.passing_min_dx_ratio == 0.5
+    assert config.events.wave_window_ms == 1600
 
 
 def test_load_config_rejects_invalid_attention_section(tmp_path):
@@ -79,6 +97,28 @@ stable_min_hits = 0
     )
 
     with pytest.raises(ValueError, match="stable_min_hits"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_invalid_events_section_value(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[events]
+cooldown_ms = -1
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="cooldown_ms"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_non_object_events_section(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"events": 1}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"\[events\] section"):
         load_config(config_path)
 
 

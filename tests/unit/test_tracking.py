@@ -168,6 +168,7 @@ def test_protocol_schema_fields_and_keypoint_head_priority_are_valid():
     )
 
     payload = protocol_track(tracks[0], source_frame)
+    assert tracks[0].keypoints == tuple(keypoints)
     assert set(payload) == {
         "track_id",
         "class",
@@ -192,6 +193,7 @@ def test_protocol_schema_fields_and_keypoint_head_priority_are_valid():
     assert payload["lost_ms"] == 0
     assert payload["confidence"] == 0.9
     assert payload["pose_confidence"] == pytest.approx(0.525)
+    assert "keypoints" not in payload
 
 
 def test_low_confidence_detection_does_not_create_track_but_updates_existing_track():

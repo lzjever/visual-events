@@ -10,6 +10,7 @@ from tools.replay_val_data import (
     async_main,
     discover_scene_dirs,
     iter_scene_frames,
+    parse_args,
     replay_scene,
 )
 from visual_events_server.protocol import decode_frame_message
@@ -145,6 +146,28 @@ def track_payload(
     }
 
 
+def event_payload(
+    event: str = "person_waving",
+    *,
+    event_id: str = "front:evt_000001",
+    camera: str = "front",
+    track_id: int = 1,
+    confidence: float = 0.9,
+    duration_ms: int = 1200,
+    text: str = "有人在挥手",
+) -> dict:
+    return {
+        "type": "semantic_event",
+        "event_id": event_id,
+        "event": event,
+        "camera": camera,
+        "track_id": track_id,
+        "confidence": confidence,
+        "duration_ms": duration_ms,
+        "text": text,
+    }
+
+
 def attention_payload(
     track_id: int,
     *,
@@ -161,13 +184,16 @@ def attention_payload(
 
 
 class SequenceResponseWebSocket(FakeWebSocket):
-    def __init__(self, response_tracks, response_attentions=None):
+    def __init__(self, response_tracks, response_attentions=None, response_events=None):
         super().__init__()
         self.response_tracks = list(response_tracks)
         self.response_attentions = (
             [None for _ in response_tracks]
             if response_attentions is None
             else list(response_attentions)
+        )
+        self.response_events = (
+            [[] for _ in response_tracks] if response_events is None else list(response_events)
         )
 
     async def recv(self):
@@ -176,6 +202,7 @@ class SequenceResponseWebSocket(FakeWebSocket):
         frame = decode_frame_message(self.sent_payloads[-1])
         tracks = self.response_tracks.pop(0)
         attention = self.response_attentions.pop(0)
+        events = self.response_events.pop(0)
         return json.dumps(
             {
                 "type": "visual_state",
@@ -193,14 +220,18 @@ class SequenceResponseWebSocket(FakeWebSocket):
                     "largest_person_stable": attention is not None,
                     "someone_near_center": False,
                 },
-                "semantic_events": [],
+                "semantic_events": events,
             }
         )
 
 
 class SequenceResponseConnect(FakeConnect):
-    def __init__(self, response_tracks, response_attentions=None):
-        self.websocket = SequenceResponseWebSocket(response_tracks, response_attentions)
+    def __init__(self, response_tracks, response_attentions=None, response_events=None):
+        self.websocket = SequenceResponseWebSocket(
+            response_tracks,
+            response_attentions,
+            response_events,
+        )
         self.urls = []
 
 
@@ -671,6 +702,326 @@ def test_non_stable_attention_scene_uses_generic_evidence_gate():
 
 
 @pytest.mark.asyncio
+async def test_replay_scene_summarizes_semantic_events_and_passes_events_gate(tmp_path):
+    scene = tmp_path / "pic_hello"
+    scene.mkdir()
+    write_jpeg(scene / "img_1710000000000000000.jpeg")
+    write_jpeg(scene / "img_1710000000100000000.jpeg")
+    connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400)], [track_payload(1, age_ms=500)]],
+        response_events=[
+            [],
+            [
+                event_payload(
+                    "person_waving",
+                    event_id="front:evt_000001",
+                    track_id=1,
+                )
+            ],
+        ],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.semantic_event_frames == 1
+    assert stats.semantic_event_count == 1
+    assert stats.semantic_event_counts_by_type == {"person_waving": 1}
+    assert stats.semantic_event_first_frame_by_type == {"person_waving": 1}
+    assert stats.semantic_event_expected_missing == 0
+    assert _stats_passed(stats, gate="events") is True
+
+
+@pytest.mark.asyncio
+async def test_replay_scene_counts_semantic_event_validation_errors(tmp_path):
+    scene = tmp_path / "pic_hello"
+    scene.mkdir()
+    write_jpeg(scene / "img_1710000000000000000.jpeg")
+    connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400)]],
+        response_events=[
+            [
+                {"type": "semantic_event", "event_id": "front:evt_000001"},
+                event_payload("robot_dancing", event_id="front:evt_000002"),
+                event_payload("attention_target_changed", event_id="bad-id"),
+                event_payload("person_waving", event_id="front:evt_000003"),
+                event_payload("person_appeared", event_id="front:evt_000003"),
+                event_payload("person_waving", event_id="front:evt_000004"),
+                event_payload(
+                    "person_left",
+                    event_id="front:evt_000005",
+                    confidence=1.2,
+                    track_id=99,
+                ),
+                event_payload(
+                    "person_approaching_robot",
+                    event_id="front:evt_000006",
+                    duration_ms=-1,
+                    track_id=99,
+                ),
+                event_payload(
+                    "person_stopped_near_robot",
+                    event_id="front:evt_000007",
+                    text="",
+                ),
+            ]
+        ],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.semantic_event_schema_errors == 1
+    assert stats.semantic_event_unknown_type_count == 1
+    assert stats.semantic_event_id_format_errors == 1
+    assert stats.semantic_event_duplicate_id_count == 1
+    assert stats.semantic_event_duplicate_track_event_count == 1
+    assert stats.semantic_event_type_cooldown_errors == 1
+    assert stats.semantic_event_confidence_errors == 1
+    assert stats.semantic_event_duration_errors == 1
+    assert stats.semantic_event_empty_text_count == 1
+    assert stats.semantic_event_track_missing_frames == 1
+    assert _stats_passed(stats, gate="events") is False
+
+
+@pytest.mark.asyncio
+async def test_events_gate_fails_same_event_type_across_tracks_within_cooldown(tmp_path):
+    scene = tmp_path / "pic_hello"
+    scene.mkdir()
+    write_jpeg(scene / "img_1710000000000000000.jpeg")
+    write_jpeg(scene / "img_1710000000100000000.jpeg")
+    connector = SequenceResponseConnect(
+        [
+            [
+                track_payload(1, age_ms=400),
+                track_payload(2, age_ms=400, bbox_xyxy=[300.0, 20.0, 400.0, 220.0]),
+            ],
+            [
+                track_payload(1, age_ms=500),
+                track_payload(2, age_ms=500, bbox_xyxy=[300.0, 20.0, 400.0, 220.0]),
+            ],
+        ],
+        response_events=[
+            [
+                event_payload(
+                    "person_waving",
+                    event_id="front:evt_000001",
+                    track_id=1,
+                )
+            ],
+            [
+                event_payload(
+                    "person_waving",
+                    event_id="front:evt_000002",
+                    track_id=2,
+                )
+            ],
+        ],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.semantic_event_count == 2
+    assert stats.semantic_event_duplicate_track_event_count == 0
+    assert stats.semantic_event_type_cooldown_errors == 1
+    assert _stats_passed(stats, gate="events") is False
+
+
+@pytest.mark.asyncio
+async def test_events_gate_uses_configured_semantic_event_cooldown(tmp_path):
+    scene = tmp_path / "pic_hello"
+    scene.mkdir()
+    write_jpeg(scene / "img_1710000000000000000.jpeg")
+    write_jpeg(scene / "img_1710000000100000000.jpeg")
+    connector = SequenceResponseConnect(
+        [
+            [
+                track_payload(1, age_ms=400),
+                track_payload(2, age_ms=400, bbox_xyxy=[300.0, 20.0, 400.0, 220.0]),
+            ],
+            [
+                track_payload(1, age_ms=500),
+                track_payload(2, age_ms=500, bbox_xyxy=[300.0, 20.0, 400.0, 220.0]),
+            ],
+        ],
+        response_events=[
+            [
+                event_payload(
+                    "person_waving",
+                    event_id="front:evt_000001",
+                    track_id=1,
+                )
+            ],
+            [
+                event_payload(
+                    "person_waving",
+                    event_id="front:evt_000002",
+                    track_id=2,
+                )
+            ],
+        ],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+        semantic_event_cooldown_ms=50,
+    )
+
+    assert stats.semantic_event_cooldown_ms == 50
+    assert stats.semantic_event_type_cooldown_errors == 0
+    assert _stats_passed(stats, gate="events") is True
+
+
+@pytest.mark.asyncio
+async def test_events_gate_checks_expected_missing_and_unexpected_by_scene(tmp_path):
+    scene = tmp_path / "pic_1_l_to_r"
+    scene.mkdir()
+    write_jpeg(scene / "img_1710000000000000000.jpeg")
+    connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400)]],
+        response_events=[
+            [
+                event_payload(
+                    "person_stopped_near_robot",
+                    event_id="front:evt_000001",
+                    track_id=1,
+                )
+            ]
+        ],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.semantic_event_expected_missing == 1
+    assert stats.semantic_event_unexpected_by_scene == 1
+    assert _stats_passed(stats, gate="events") is False
+
+
+@pytest.mark.asyncio
+async def test_events_gate_head_motion_unknown_skips_stationary_motion_expectations(
+    tmp_path,
+):
+    scene = tmp_path / "pic_walk_in_stop"
+    scene.mkdir()
+    write_jpeg(scene / "img_1710000000000000000.jpeg")
+    no_event_connector = SequenceResponseConnect([[track_payload(1, age_ms=400)]])
+    motion_event_connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400)]],
+        response_events=[
+            [
+                event_payload(
+                    "person_approaching_robot",
+                    event_id="front:evt_000001",
+                    track_id=1,
+                )
+            ]
+        ],
+    )
+
+    no_event_stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="unknown",
+        connector=no_event_connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+    motion_event_stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="moving",
+        connector=motion_event_connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert no_event_stats.semantic_event_expected_missing == 0
+    assert no_event_stats.semantic_event_motion_sensitive_count == 0
+    assert _stats_passed(no_event_stats, gate="events") is True
+    assert motion_event_stats.semantic_event_motion_sensitive_count == 1
+    assert _stats_passed(motion_event_stats, gate="events") is False
+
+
+def test_parse_args_accepts_events_gate_and_all_includes_events():
+    args = parse_args(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            "/tmp/val-data",
+            "--gate",
+            "events",
+            "--semantic-event-cooldown-ms",
+            "50",
+        ]
+    )
+    stats = ReplayStats(
+        scene="pic_hello",
+        frames_sent=2,
+        frames_ok=2,
+        errors=0,
+        elapsed_s=0.1,
+        track_frames=2,
+        visible_counts_by_id={"1": 2},
+        attention_frames=1,
+        attention_target_counts_by_id={"1": 1},
+        semantic_event_expected_missing=1,
+    )
+
+    assert args.gate == "events"
+    assert args.semantic_event_cooldown_ms == 50
+    assert _stats_passed(stats, gate="tracking") is True
+    assert _stats_passed(stats, gate="attention") is True
+    assert _stats_passed(stats, gate="events") is False
+    assert _stats_passed(stats, gate="all") is False
+
+
+@pytest.mark.asyncio
 async def test_replay_scene_response_timeout_records_error_and_returns(tmp_path):
     scene = tmp_path / "pic_hello"
     scene.mkdir()
@@ -761,8 +1112,27 @@ async def test_async_main_writes_summary_json(tmp_path, monkeypatch):
             "attention_target_lost_frames": 0,
             "attention_max_lost_hold_ms": 0,
             "attention_largest_bbox_disagreement_frames": 0,
+            "semantic_event_frames": 0,
+            "semantic_event_count": 0,
+            "semantic_event_counts_by_type": {},
+            "semantic_event_first_frame_by_type": {},
+            "semantic_event_schema_errors": 0,
+            "semantic_event_unknown_type_count": 0,
+            "semantic_event_id_format_errors": 0,
+            "semantic_event_duplicate_id_count": 0,
+            "semantic_event_duplicate_track_event_count": 0,
+            "semantic_event_cooldown_ms": 5000,
+            "semantic_event_type_cooldown_errors": 0,
+            "semantic_event_confidence_errors": 0,
+            "semantic_event_duration_errors": 0,
+            "semantic_event_empty_text_count": 0,
+            "semantic_event_track_missing_frames": 0,
+            "semantic_event_motion_sensitive_count": 0,
+            "semantic_event_expected_missing": 0,
+            "semantic_event_unexpected_by_scene": 0,
             "tracking_pass": False,
             "attention_pass": False,
+            "events_pass": False,
             "passed": False,
             "elapsed_s": 0.25,
         }

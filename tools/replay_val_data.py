@@ -24,6 +24,39 @@ _ASSOCIATION_IOU_THRESHOLD = 0.5
 _S4_STABLE_ATTENTION_SCENES = {"pci_stand", "pic_walk_in_stop"}
 _S4_STABLE_ATTENTION_MIN_COVERAGE = 0.85
 _S4_STABLE_ATTENTION_MAX_SWITCHES = 2
+DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS = 5000
+_SEMANTIC_EVENT_ID = re.compile(r"^[^:]+:evt_\d{6}$")
+_SEMANTIC_EVENT_TYPES = {
+    "person_appeared",
+    "person_left",
+    "person_passing_by",
+    "person_approaching_robot",
+    "person_stopped_near_robot",
+    "person_waving",
+    "attention_target_changed",
+}
+_MOTION_SENSITIVE_EVENT_TYPES = {
+    "person_passing_by",
+    "person_approaching_robot",
+    "person_stopped_near_robot",
+}
+_SCENE_EXPECTED_EVENTS = {
+    "pci_stand": {"person_appeared", "person_stopped_near_robot"},
+    "pic_1_l_to_r": {"person_passing_by"},
+    "pic_1_r_to_l": {"person_passing_by"},
+    "pic_hello": {"person_waving"},
+    "pic_leave": {"person_left"},
+    "pic_persone_walk_in": {"person_approaching_robot"},
+    "pic_walk_in_stop": {
+        "person_approaching_robot",
+        "person_stopped_near_robot",
+    },
+}
+_SCENE_UNEXPECTED_EVENTS = {
+    "pic_1_l_to_r": {"person_stopped_near_robot"},
+    "pic_1_r_to_l": {"person_stopped_near_robot"},
+    "pic_persone_walk_in": {"person_passing_by"},
+}
 
 
 @dataclass(frozen=True)
@@ -39,6 +72,7 @@ class ReplayStats:
     frames_ok: int
     errors: int
     elapsed_s: float
+    head_motion: str = "stationary"
     frames_with_person: int = 0
     frame_id_mismatch: int = 0
     track_frames: int = 0
@@ -63,6 +97,24 @@ class ReplayStats:
     attention_target_lost_frames: int = 0
     attention_max_lost_hold_ms: int = 0
     attention_largest_bbox_disagreement_frames: int = 0
+    semantic_event_frames: int = 0
+    semantic_event_count: int = 0
+    semantic_event_counts_by_type: dict[str, int] = field(default_factory=dict)
+    semantic_event_first_frame_by_type: dict[str, int] = field(default_factory=dict)
+    semantic_event_schema_errors: int = 0
+    semantic_event_unknown_type_count: int = 0
+    semantic_event_id_format_errors: int = 0
+    semantic_event_duplicate_id_count: int = 0
+    semantic_event_duplicate_track_event_count: int = 0
+    semantic_event_cooldown_ms: int = DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS
+    semantic_event_type_cooldown_errors: int = 0
+    semantic_event_confidence_errors: int = 0
+    semantic_event_duration_errors: int = 0
+    semantic_event_empty_text_count: int = 0
+    semantic_event_track_missing_frames: int = 0
+    semantic_event_motion_sensitive_count: int = 0
+    semantic_event_expected_missing: int = 0
+    semantic_event_unexpected_by_scene: int = 0
 
     @property
     def ok_rate(self) -> float:
@@ -149,7 +201,11 @@ async def replay_scene(
     connector: Callable[..., Any] | None = None,
     realtime: bool = True,
     response_timeout_ms: int | None = None,
+    semantic_event_cooldown_ms: int = DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS,
 ) -> ReplayStats:
+    if semantic_event_cooldown_ms < 0:
+        raise ValueError("semantic_event_cooldown_ms must be non-negative")
+
     frames = iter_scene_frames(
         scene_dir,
         camera=camera,
@@ -166,6 +222,11 @@ async def replay_scene(
     frame_id_mismatch = 0
     tracking_stats = _TrackingStatsAccumulator()
     attention_stats = _AttentionStatsAccumulator()
+    semantic_event_stats = _SemanticEventStatsAccumulator(
+        scene=Path(scene_dir).name,
+        head_motion=head_motion,
+        cooldown_ms=semantic_event_cooldown_ms,
+    )
 
     jsonl_file = None
     try:
@@ -221,6 +282,7 @@ async def replay_scene(
                         frame_id_mismatch += 1
                     tracking_stats.observe(response)
                     attention_stats.observe(response)
+                    semantic_event_stats.observe(response)
                 else:
                     errors += 1
 
@@ -249,12 +311,14 @@ async def replay_scene(
 
     tracking_summary = tracking_stats.summary()
     attention_summary = attention_stats.summary()
+    semantic_event_summary = semantic_event_stats.summary()
     return ReplayStats(
         scene=Path(scene_dir).name,
         frames_sent=frames_sent,
         frames_ok=frames_ok,
         errors=errors,
         elapsed_s=time.perf_counter() - start_s,
+        head_motion=head_motion,
         frames_with_person=frames_with_person,
         frame_id_mismatch=frame_id_mismatch,
         track_frames=tracking_summary["track_frames"],
@@ -287,6 +351,56 @@ async def replay_scene(
         attention_largest_bbox_disagreement_frames=attention_summary[
             "attention_largest_bbox_disagreement_frames"
         ],
+        semantic_event_frames=semantic_event_summary["semantic_event_frames"],
+        semantic_event_count=semantic_event_summary["semantic_event_count"],
+        semantic_event_counts_by_type=semantic_event_summary[
+            "semantic_event_counts_by_type"
+        ],
+        semantic_event_first_frame_by_type=semantic_event_summary[
+            "semantic_event_first_frame_by_type"
+        ],
+        semantic_event_schema_errors=semantic_event_summary[
+            "semantic_event_schema_errors"
+        ],
+        semantic_event_unknown_type_count=semantic_event_summary[
+            "semantic_event_unknown_type_count"
+        ],
+        semantic_event_id_format_errors=semantic_event_summary[
+            "semantic_event_id_format_errors"
+        ],
+        semantic_event_duplicate_id_count=semantic_event_summary[
+            "semantic_event_duplicate_id_count"
+        ],
+        semantic_event_duplicate_track_event_count=semantic_event_summary[
+            "semantic_event_duplicate_track_event_count"
+        ],
+        semantic_event_cooldown_ms=semantic_event_summary[
+            "semantic_event_cooldown_ms"
+        ],
+        semantic_event_type_cooldown_errors=semantic_event_summary[
+            "semantic_event_type_cooldown_errors"
+        ],
+        semantic_event_confidence_errors=semantic_event_summary[
+            "semantic_event_confidence_errors"
+        ],
+        semantic_event_duration_errors=semantic_event_summary[
+            "semantic_event_duration_errors"
+        ],
+        semantic_event_empty_text_count=semantic_event_summary[
+            "semantic_event_empty_text_count"
+        ],
+        semantic_event_track_missing_frames=semantic_event_summary[
+            "semantic_event_track_missing_frames"
+        ],
+        semantic_event_motion_sensitive_count=semantic_event_summary[
+            "semantic_event_motion_sensitive_count"
+        ],
+        semantic_event_expected_missing=semantic_event_summary[
+            "semantic_event_expected_missing"
+        ],
+        semantic_event_unexpected_by_scene=semantic_event_summary[
+            "semantic_event_unexpected_by_scene"
+        ],
     )
 
 
@@ -300,7 +414,11 @@ async def replay_data_dir(
     save_jsonl: Path | None,
     realtime: bool = True,
     response_timeout_ms: int | None = None,
+    semantic_event_cooldown_ms: int = DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS,
 ) -> list[ReplayStats]:
+    if semantic_event_cooldown_ms < 0:
+        raise ValueError("semantic_event_cooldown_ms must be non-negative")
+
     scene_dirs = discover_scene_dirs(data_dir)
     append_jsonl = False
     if save_jsonl is not None and len(scene_dirs) > 1:
@@ -321,6 +439,7 @@ async def replay_data_dir(
                 append_jsonl=append_jsonl,
                 realtime=realtime,
                 response_timeout_ms=response_timeout_ms,
+                semantic_event_cooldown_ms=semantic_event_cooldown_ms,
             )
         )
     return stats
@@ -358,9 +477,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--gate",
-        choices=("tracking", "attention", "all", "none"),
+        choices=("tracking", "attention", "events", "all", "none"),
         default="tracking",
         help="Validation gate to apply to the replay summary.",
+    )
+    parser.add_argument(
+        "--semantic-event-cooldown-ms",
+        type=int,
+        default=DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS,
+        help="Cooldown window used by replay event duplicate checks.",
     )
     return parser.parse_args(argv)
 
@@ -376,6 +501,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         save_jsonl=args.save_jsonl,
         realtime=not args.no_realtime,
         response_timeout_ms=args.response_timeout_ms,
+        semantic_event_cooldown_ms=args.semantic_event_cooldown_ms,
     )
     if args.summary_json is not None:
         args.summary_json.parent.mkdir(parents=True, exist_ok=True)
@@ -453,6 +579,7 @@ async def _recv_with_timeout(
 def _stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str, Any]:
     tracking_pass = _tracking_stats_passed(item)
     attention_pass = _attention_stats_passed(item)
+    events_pass = _events_stats_passed(item)
     return {
         "scene": item.scene,
         "frames_sent": item.frames_sent,
@@ -489,8 +616,35 @@ def _stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str,
         "attention_largest_bbox_disagreement_frames": (
             item.attention_largest_bbox_disagreement_frames
         ),
+        "semantic_event_frames": item.semantic_event_frames,
+        "semantic_event_count": item.semantic_event_count,
+        "semantic_event_counts_by_type": item.semantic_event_counts_by_type,
+        "semantic_event_first_frame_by_type": item.semantic_event_first_frame_by_type,
+        "semantic_event_schema_errors": item.semantic_event_schema_errors,
+        "semantic_event_unknown_type_count": item.semantic_event_unknown_type_count,
+        "semantic_event_id_format_errors": item.semantic_event_id_format_errors,
+        "semantic_event_duplicate_id_count": item.semantic_event_duplicate_id_count,
+        "semantic_event_duplicate_track_event_count": (
+            item.semantic_event_duplicate_track_event_count
+        ),
+        "semantic_event_cooldown_ms": item.semantic_event_cooldown_ms,
+        "semantic_event_type_cooldown_errors": (
+            item.semantic_event_type_cooldown_errors
+        ),
+        "semantic_event_confidence_errors": item.semantic_event_confidence_errors,
+        "semantic_event_duration_errors": item.semantic_event_duration_errors,
+        "semantic_event_empty_text_count": item.semantic_event_empty_text_count,
+        "semantic_event_track_missing_frames": (
+            item.semantic_event_track_missing_frames
+        ),
+        "semantic_event_motion_sensitive_count": (
+            item.semantic_event_motion_sensitive_count
+        ),
+        "semantic_event_expected_missing": item.semantic_event_expected_missing,
+        "semantic_event_unexpected_by_scene": item.semantic_event_unexpected_by_scene,
         "tracking_pass": tracking_pass,
         "attention_pass": attention_pass,
+        "events_pass": events_pass,
         "passed": _stats_passed(item, gate=gate),
         "elapsed_s": item.elapsed_s,
     }
@@ -501,11 +655,17 @@ def _stats_passed(item: ReplayStats, *, gate: str = "tracking") -> bool:
         return _tracking_stats_passed(item)
     if gate == "attention":
         return _attention_stats_passed(item)
+    if gate == "events":
+        return _events_stats_passed(item)
     if gate == "all":
-        return _tracking_stats_passed(item) and _attention_stats_passed(item)
+        return (
+            _tracking_stats_passed(item)
+            and _attention_stats_passed(item)
+            and _events_stats_passed(item)
+        )
     if gate == "none":
         return True
-    raise ValueError("gate must be one of: tracking, attention, all, none")
+    raise ValueError("gate must be one of: tracking, attention, events, all, none")
 
 
 def _tracking_stats_passed(item: ReplayStats) -> bool:
@@ -540,6 +700,173 @@ def _attention_stats_passed(item: ReplayStats) -> bool:
         item.attention_coverage >= _S4_STABLE_ATTENTION_MIN_COVERAGE
         and item.attention_target_switches <= _S4_STABLE_ATTENTION_MAX_SWITCHES
     )
+
+
+def _events_stats_passed(item: ReplayStats) -> bool:
+    base_pass = (
+        item.errors == 0
+        and item.frame_id_mismatch == 0
+        and item.frames_ok > 0
+        and item.semantic_event_schema_errors == 0
+        and item.semantic_event_unknown_type_count == 0
+        and item.semantic_event_id_format_errors == 0
+        and item.semantic_event_duplicate_id_count == 0
+        and item.semantic_event_duplicate_track_event_count == 0
+        and item.semantic_event_type_cooldown_errors == 0
+        and item.semantic_event_confidence_errors == 0
+        and item.semantic_event_duration_errors == 0
+        and item.semantic_event_empty_text_count == 0
+        and item.semantic_event_track_missing_frames == 0
+        and item.semantic_event_expected_missing == 0
+        and item.semantic_event_unexpected_by_scene == 0
+    )
+    if not base_pass:
+        return False
+    if item.head_motion in {"moving", "unknown"}:
+        return item.semantic_event_motion_sensitive_count == 0
+    return True
+
+
+@dataclass
+class _SemanticEventStatsAccumulator:
+    scene: str
+    head_motion: str
+    cooldown_ms: int
+    semantic_event_frames: int = 0
+    semantic_event_count: int = 0
+    semantic_event_schema_errors: int = 0
+    semantic_event_unknown_type_count: int = 0
+    semantic_event_id_format_errors: int = 0
+    semantic_event_duplicate_id_count: int = 0
+    semantic_event_duplicate_track_event_count: int = 0
+    semantic_event_type_cooldown_errors: int = 0
+    semantic_event_confidence_errors: int = 0
+    semantic_event_duration_errors: int = 0
+    semantic_event_empty_text_count: int = 0
+    semantic_event_track_missing_frames: int = 0
+    semantic_event_motion_sensitive_count: int = 0
+
+    def __post_init__(self) -> None:
+        self._counts_by_type: dict[str, int] = {}
+        self._first_frame_by_type: dict[str, int] = {}
+        self._seen_event_ids: set[str] = set()
+        self._last_track_event_ms: dict[tuple[int, str], int] = {}
+        self._last_event_type_ms: dict[str, int] = {}
+
+    def observe(self, response: dict[str, Any]) -> None:
+        raw_events = response.get("semantic_events", [])
+        if not isinstance(raw_events, list):
+            self.semantic_event_schema_errors += 1
+            return
+        if raw_events:
+            self.semantic_event_frames += 1
+
+        frame_id = response.get("frame_id", 0)
+        frame_index = int(frame_id) if _is_number(frame_id) else 0
+        timestamp_ms = response.get("frame_timestamp_ms", frame_index)
+        timestamp = int(timestamp_ms) if _is_number(timestamp_ms) else frame_index
+        valid_tracks = _valid_tracks_from_response(response)
+        visible_or_lost_track_ids = {int(track["track_id"]) for track in valid_tracks}
+        frame_has_missing_track_event = False
+
+        for raw_event in raw_events:
+            if not isinstance(raw_event, dict) or not _valid_semantic_event_schema(raw_event):
+                self.semantic_event_schema_errors += 1
+                continue
+
+            self.semantic_event_count += 1
+            event_name = str(raw_event["event"])
+            event_id = str(raw_event["event_id"])
+            track_id = int(raw_event["track_id"])
+            self._counts_by_type[event_name] = self._counts_by_type.get(event_name, 0) + 1
+            self._first_frame_by_type.setdefault(event_name, frame_index)
+
+            if event_name not in _SEMANTIC_EVENT_TYPES:
+                self.semantic_event_unknown_type_count += 1
+            if event_name in _MOTION_SENSITIVE_EVENT_TYPES:
+                self.semantic_event_motion_sensitive_count += 1
+
+            if not _SEMANTIC_EVENT_ID.fullmatch(event_id):
+                self.semantic_event_id_format_errors += 1
+            if event_id in self._seen_event_ids:
+                self.semantic_event_duplicate_id_count += 1
+            self._seen_event_ids.add(event_id)
+
+            track_event_key = (track_id, event_name)
+            previous_ms = self._last_track_event_ms.get(track_event_key)
+            if (
+                previous_ms is not None
+                and timestamp - previous_ms < self.cooldown_ms
+            ):
+                self.semantic_event_duplicate_track_event_count += 1
+            self._last_track_event_ms[track_event_key] = timestamp
+
+            previous_type_ms = self._last_event_type_ms.get(event_name)
+            if (
+                previous_type_ms is not None
+                and timestamp - previous_type_ms < self.cooldown_ms
+            ):
+                self.semantic_event_type_cooldown_errors += 1
+            self._last_event_type_ms[event_name] = timestamp
+
+            confidence = float(raw_event["confidence"])
+            if (
+                not math.isfinite(confidence)
+                or confidence < 0.0
+                or confidence > 1.0
+            ):
+                self.semantic_event_confidence_errors += 1
+            if int(raw_event["duration_ms"]) < 0:
+                self.semantic_event_duration_errors += 1
+            if str(raw_event["text"]).strip() == "":
+                self.semantic_event_empty_text_count += 1
+            if event_name != "person_left" and track_id not in visible_or_lost_track_ids:
+                frame_has_missing_track_event = True
+
+        if frame_has_missing_track_event:
+            self.semantic_event_track_missing_frames += 1
+
+    def summary(self) -> dict[str, Any]:
+        expected_events = set(_SCENE_EXPECTED_EVENTS.get(self.scene, set()))
+        if self.head_motion in {"moving", "unknown"}:
+            expected_events -= _MOTION_SENSITIVE_EVENT_TYPES
+        unexpected_events = set(_SCENE_UNEXPECTED_EVENTS.get(self.scene, set()))
+        return {
+            "semantic_event_frames": self.semantic_event_frames,
+            "semantic_event_count": self.semantic_event_count,
+            "semantic_event_counts_by_type": dict(sorted(self._counts_by_type.items())),
+            "semantic_event_first_frame_by_type": dict(
+                sorted(self._first_frame_by_type.items())
+            ),
+            "semantic_event_schema_errors": self.semantic_event_schema_errors,
+            "semantic_event_unknown_type_count": self.semantic_event_unknown_type_count,
+            "semantic_event_id_format_errors": self.semantic_event_id_format_errors,
+            "semantic_event_duplicate_id_count": self.semantic_event_duplicate_id_count,
+            "semantic_event_duplicate_track_event_count": (
+                self.semantic_event_duplicate_track_event_count
+            ),
+            "semantic_event_cooldown_ms": self.cooldown_ms,
+            "semantic_event_type_cooldown_errors": (
+                self.semantic_event_type_cooldown_errors
+            ),
+            "semantic_event_confidence_errors": self.semantic_event_confidence_errors,
+            "semantic_event_duration_errors": self.semantic_event_duration_errors,
+            "semantic_event_empty_text_count": self.semantic_event_empty_text_count,
+            "semantic_event_track_missing_frames": (
+                self.semantic_event_track_missing_frames
+            ),
+            "semantic_event_motion_sensitive_count": (
+                self.semantic_event_motion_sensitive_count
+            ),
+            "semantic_event_expected_missing": sum(
+                1 for event in expected_events if self._counts_by_type.get(event, 0) == 0
+            ),
+            "semantic_event_unexpected_by_scene": sum(
+                1
+                for event in unexpected_events
+                if self._counts_by_type.get(event, 0) > 0
+            ),
+        }
 
 
 @dataclass
@@ -844,6 +1171,32 @@ def _valid_attention_schema(attention: dict[str, Any]) -> bool:
     )
 
 
+def _valid_semantic_event_schema(event: dict[str, Any]) -> bool:
+    required = {
+        "type",
+        "event_id",
+        "event",
+        "camera",
+        "track_id",
+        "confidence",
+        "duration_ms",
+        "text",
+    }
+    if not required.issubset(event):
+        return False
+    return (
+        event["type"] == "semantic_event"
+        and isinstance(event["event_id"], str)
+        and isinstance(event["event"], str)
+        and isinstance(event["camera"], str)
+        and isinstance(event["track_id"], int)
+        and not isinstance(event["track_id"], bool)
+        and _is_number(event["confidence"])
+        and _non_bool_int(event["duration_ms"])
+        and isinstance(event["text"], str)
+    )
+
+
 def _uv_in_image(value: Any, *, image_size: list[Any]) -> bool:
     if not _number_list(value, length=2):
         return False
@@ -911,6 +1264,10 @@ def _number_list(value: Any, *, length: int) -> bool:
 
 def _non_negative_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _non_bool_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _is_number(value: Any) -> bool:

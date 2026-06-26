@@ -100,7 +100,10 @@ def test_fake_backend_multi_frame_stream_outputs_attention_after_stable_track():
         "confidence": third["tracks"][0]["confidence"],
     }
     assert third["scene_flags"]["largest_person_stable"] is True
-    assert third["semantic_events"] == []
+    assert [event["event"] for event in third["semantic_events"]] == [
+        "person_appeared"
+    ]
+    assert third["semantic_events"][0]["track_id"] == third["tracks"][0]["track_id"]
 
 
 def test_websocket_connections_have_isolated_attention_state():

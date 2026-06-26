@@ -57,6 +57,7 @@ class TrackSnapshot:
     hits: int
     misses: int
     class_name: str = "person"
+    keypoints: tuple[PoseKeypoint, ...] = ()
 
     @property
     def age_ms(self) -> int:
@@ -90,6 +91,7 @@ class _DetectionCandidate:
     detection: PersonPoseDetection
     pose_confidence: float
     head_uv: tuple[float, float]
+    keypoints: tuple[PoseKeypoint, ...]
 
     @property
     def bbox_xyxy(self) -> BBoxXYXY:
@@ -121,6 +123,7 @@ class _TrackState:
     hits: int = 1
     misses: int = 0
     class_name: str = "person"
+    keypoints: tuple[PoseKeypoint, ...] = ()
 
     @classmethod
     def create(
@@ -139,6 +142,7 @@ class _TrackState:
             confidence=candidate.confidence,
             pose_confidence=candidate.pose_confidence,
             head_uv=candidate.head_uv,
+            keypoints=candidate.keypoints,
             history=[_Observation(timestamp_ms=timestamp_ms, center_uv=center)],
         )
 
@@ -160,6 +164,7 @@ class _TrackState:
         self.confidence = candidate.confidence
         self.pose_confidence = candidate.pose_confidence
         self.head_uv = candidate.head_uv
+        self.keypoints = candidate.keypoints
         self.lost_ms = 0
         self.hits += 1
         self.misses = 0
@@ -192,6 +197,7 @@ class _TrackState:
             hits=self.hits,
             misses=self.misses,
             class_name=self.class_name,
+            keypoints=self.keypoints,
         )
 
     def _compute_velocity(
@@ -388,6 +394,7 @@ def _candidate_from_detection(
         detection=detection,
         pose_confidence=_pose_confidence(detection.keypoints),
         head_uv=_head_uv(detection),
+        keypoints=tuple(detection.keypoints),
     )
 
 

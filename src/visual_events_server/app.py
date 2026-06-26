@@ -104,6 +104,7 @@ def create_processor_from_config(config: ServerConfig) -> VisualFrameProcessor:
         backend,
         tracking_config=config.tracking,
         attention_config=config.attention,
+        event_config=config.events,
     )
 
 

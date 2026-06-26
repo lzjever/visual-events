@@ -205,12 +205,12 @@ V1 事件由 `EventEngine` 生成。
 
 | 事件 | 规则 |
 | --- | --- |
-| `person_appeared` | 新 track 稳定出现至少 2 帧 |
+| `person_appeared` | salient target 稳定出现至少 2 帧；attention target 优先，否则从 visible stable tracks 中按面积/置信度选择最高者 |
 | `person_left` | track lost 超过 TTL 后触发 |
 | `person_passing_by` | 横向位移明显，从画面一侧通过，未进入近区停留 |
 | `person_approaching_robot` | bbox 面积或高度持续增大，并向中心/近区移动至少 0.5s |
 | `person_stopped_near_robot` | bbox 足够大且中心速度低，持续至少 1.5s |
-| `person_waving` | 手腕在肩部附近或以上，并在 1-2s 内出现横向方向变化 |
+| `person_waving` | 使用 server 内部 keypoints：手腕在肩部附近或以上，并在 1-2s 内出现横向方向变化；keypoints 不进入 wire protocol |
 | `attention_target_changed` | attention target 稳定切换 |
 
 运动敏感事件：
@@ -219,7 +219,14 @@ V1 事件由 `EventEngine` 生成。
 - `person_approaching_robot`
 - `person_stopped_near_robot`
 
-这些事件只在 `head_motion.state=stationary` 时触发。`moving`、`unknown` 或缺失 `head_motion` 时不触发。
+这些事件只在 `head_motion.state=stationary` 时触发。`moving`、`unknown` 或缺失 `head_motion` 时不触发，也不累积运动敏感规则条件。
+
+事件抑制语义：
+
+- 同类事件全局 5s cooldown。
+- 同 track 同事件 5s 去重。
+- 同帧可输出多个不同事件，按固定顺序：`person_appeared`、`person_left`、`person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot`、`person_waving`、`attention_target_changed`。
+- `person_appeared` 不对背景所有人刷屏，只对当前 salient target 触发。
 
 ## 7. Attention
 
@@ -352,11 +359,12 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - `pic_1_l_to_r`、`pic_1_r_to_l` 触发 `person_passing_by`。
 - `pic_persone_walk_in` 触发 `person_approaching_robot`。
 - `pic_walk_in_stop` 触发 `person_approaching_robot` 后可触发 `person_stopped_near_robot`。
-- `pci_stand` 触发 `person_stopped_near_robot`。
+- `pci_stand` 触发 `person_appeared`、`person_stopped_near_robot`。
 - `pic_hello` 触发 `person_waving`。
 - `pic_leave` 触发 `person_left`。
 - `head_motion.state=unknown` 回放时不触发 `person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot`。
 - `head_motion.state=moving` 回放时同样不触发上述三类运动敏感事件。
+- `tools/replay_val_data.py --gate events` 检查事件 schema、id、重复、场景 expected/unexpected 和 head_motion gating；`--gate all` 等于 tracking + attention + events。
 
 ### S6 E2E Gate
 
@@ -451,6 +459,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 | 事件 | `person_waving` | `pic_hello` | 触发 1 次；其他非挥手目录不得频繁误报 |
 | 事件 | `person_left` | `pic_leave` | track 丢失 TTL 后触发 1 次 |
 | 事件抑制 | 运动敏感事件抑制 | 路过/靠近/停留目录，`head_motion=moving/unknown` | 不触发 `passing_by/approaching/stopped` |
+| 事件 gate | replay events summary | 全部 `val-data` | `--gate events` 按场景期望检查 semantic event；`--gate all` 同时要求 tracking、attention、events 通过 |
 | Attention | 最大稳定人物 | 全部 `val-data` | 存在稳定 visible person 或短暂 lost hold 时，`attention.target_track_id` 指向 selector 目标；无稳定目标且无 lost hold 时允许 `attention=null` |
 | Attention | 注视点合法 | 全部 `val-data` | `target_uv` 在图像范围内 |
 | 性能 | server GPU E2E | 全部 `val-data` 循环 5 分钟 | P95 < 120ms，P99 < 200ms |
@@ -549,6 +558,7 @@ Server handoff 必须包含：
 - `val-data/` 必须用于 E2E 验证，但不得提交到 Git。
 - 高频 `visual_state` 是 server 输出，不等于 Botified 事件。
 - `semantic_events` 由 server 生成；未来 CLI 只做 `event_id` 幂等输出，不重新实现规则。
+- `person_waving` 使用 server 内部 keypoints；keypoints 不输出到协议 tracks。
 - `head_motion` 缺失等价于 `unknown`。
 - `moving/unknown` 时不触发运动敏感事件。
 - `approaching_robot` 是基于图像 bbox/运动趋势的近似，不代表真实 3D 距离估计。

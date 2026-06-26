@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from visual_events_server.attention import AttentionConfig
+from visual_events_server.events import EventConfig
 from visual_events_server.tracking import TrackingConfig
 
 
@@ -27,6 +28,7 @@ class ServerConfig:
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     attention: AttentionConfig = field(default_factory=AttentionConfig)
+    events: EventConfig = field(default_factory=EventConfig)
 
 
 def load_config(path: str | Path | None = None) -> ServerConfig:
@@ -49,6 +51,9 @@ def load_config(path: str | Path | None = None) -> ServerConfig:
     attention_data = data.get("attention", {})
     if not isinstance(attention_data, dict):
         raise ValueError("[attention] section must be an object")
+    events_data = data.get("events", {})
+    if not isinstance(events_data, dict):
+        raise ValueError("[events] section must be an object")
 
     return ServerConfig(
         host=str(server_data.get("host", ServerConfig.host)),
@@ -57,6 +62,7 @@ def load_config(path: str | Path | None = None) -> ServerConfig:
         inference=_parse_inference_config(inference_data, runtime_dir=runtime_dir),
         tracking=_parse_tracking_config(tracking_data),
         attention=_parse_attention_config(attention_data),
+        events=_parse_event_config(events_data),
     )
 
 
@@ -130,4 +136,72 @@ def _parse_attention_config(data: dict[str, Any]) -> AttentionConfig:
             data.get("switch_confirm_ms", defaults.switch_confirm_ms)
         ),
         lost_hold_ms=int(data.get("lost_hold_ms", defaults.lost_hold_ms)),
+    )
+
+
+def _parse_event_config(data: dict[str, Any]) -> EventConfig:
+    defaults = EventConfig()
+    return EventConfig(
+        history_ms=int(data.get("history_ms", defaults.history_ms)),
+        cooldown_ms=int(data.get("cooldown_ms", defaults.cooldown_ms)),
+        stable_min_hits=int(data.get("stable_min_hits", defaults.stable_min_hits)),
+        stable_min_age_ms=int(
+            data.get("stable_min_age_ms", defaults.stable_min_age_ms)
+        ),
+        left_lost_ms=int(data.get("left_lost_ms", defaults.left_lost_ms)),
+        stop_duration_ms=int(
+            data.get("stop_duration_ms", defaults.stop_duration_ms)
+        ),
+        near_area_ratio=float(
+            data.get("near_area_ratio", defaults.near_area_ratio)
+        ),
+        near_height_ratio=float(
+            data.get("near_height_ratio", defaults.near_height_ratio)
+        ),
+        stop_max_speed_px_s=float(
+            data.get("stop_max_speed_px_s", defaults.stop_max_speed_px_s)
+        ),
+        approach_duration_ms=int(
+            data.get("approach_duration_ms", defaults.approach_duration_ms)
+        ),
+        approach_area_growth_ratio=float(
+            data.get(
+                "approach_area_growth_ratio",
+                defaults.approach_area_growth_ratio,
+            )
+        ),
+        approach_min_area_delta=float(
+            data.get("approach_min_area_delta", defaults.approach_min_area_delta)
+        ),
+        approach_min_current_area=float(
+            data.get(
+                "approach_min_current_area",
+                defaults.approach_min_current_area,
+            )
+        ),
+        passing_duration_ms=int(
+            data.get("passing_duration_ms", defaults.passing_duration_ms)
+        ),
+        passing_min_dx_ratio=float(
+            data.get("passing_min_dx_ratio", defaults.passing_min_dx_ratio)
+        ),
+        passing_min_abs_vx_px_s=float(
+            data.get(
+                "passing_min_abs_vx_px_s",
+                defaults.passing_min_abs_vx_px_s,
+            )
+        ),
+        keypoint_min_conf=float(
+            data.get("keypoint_min_conf", defaults.keypoint_min_conf)
+        ),
+        wave_window_ms=int(data.get("wave_window_ms", defaults.wave_window_ms)),
+        wave_min_x_span_px=float(
+            data.get("wave_min_x_span_px", defaults.wave_min_x_span_px)
+        ),
+        wave_min_x_span_bbox_ratio=float(
+            data.get(
+                "wave_min_x_span_bbox_ratio",
+                defaults.wave_min_x_span_bbox_ratio,
+            )
+        ),
     )
