@@ -57,7 +57,7 @@ visual-events/
 
 - `api`: WebSocket 接入、帧解析、连接生命周期。
 - `inference`: `InferBackend` 接口和 `UltralyticsPoseBackend`。
-- `tracking`: ByteTrack，只追踪 person。
+- `tracking`: 项目内 ByteTrack-style IoU/TTL tracker baseline，只追踪 person。
 - `events`: track history 和 V1 规则。
 - `attention`: 最大稳定人物选择和 `target_uv` 计算。
 
@@ -145,7 +145,7 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 
 产出：
 
-- ByteTrack 接入。
+- 项目内 ByteTrack-style IoU/TTL tracker baseline。
 - `attention.target_track_id` 和 `target_uv`。
 - 目标滞回、短暂丢失保持。
 
@@ -357,14 +357,14 @@ gaze:
 
 技术评审结论：
 
-- `YOLOv8n-pose + ByteTrack` 是当前兼顾服务端可用性和 RK3588 未来迁移的最好 baseline。
+- `YOLOv8n-pose + 项目内 ByteTrack-style IoU/TTL tracker baseline` 是当前兼顾服务端可用性和 RK3588 未来迁移的最好 baseline。
 - WebSocket streaming 比 gRPC 更适合 V1。
 - 服务端不接 DDS；机器人 CLI 是 DDS、Botified、头控的集成边界。
 - RK3588 迁移风险必须用 E2E spike 验证，不能只看 NPU inference benchmark。
 
 ## 9. 参考资料
 
-- Ultralytics tracking 文档：<https://docs.ultralytics.com/modes/track/>
+- Ultralytics tracking 文档仅作背景参考；S3 不使用 `model.track()`：<https://docs.ultralytics.com/modes/track/>
 - Ultralytics Rockchip RKNN 文档：<https://docs.ultralytics.com/integrations/rockchip-rknn/>
 - Rockchip RKNN Model Zoo：<https://github.com/airockchip/rknn_model_zoo>
 - RKNN Toolkit2：<https://github.com/rockchip-linux/rknn-toolkit2>

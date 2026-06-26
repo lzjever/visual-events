@@ -24,6 +24,15 @@ backend = "ultralytics"
 device = "0"
 imgsz = 320
 conf = 0.4
+
+[tracking]
+high_conf = 0.55
+low_conf = 0.12
+new_track_conf = 0.65
+match_iou = 0.25
+lost_ttl_ms = 1800
+history_ms = 3200
+velocity_window_ms = 900
 """.strip(),
         encoding="utf-8",
     )
@@ -38,6 +47,13 @@ conf = 0.4
     assert config.inference.device == "0"
     assert config.inference.imgsz == 320
     assert config.inference.conf == 0.4
+    assert config.tracking.high_conf == 0.55
+    assert config.tracking.low_conf == 0.12
+    assert config.tracking.new_track_conf == 0.65
+    assert config.tracking.match_iou == 0.25
+    assert config.tracking.lost_ttl_ms == 1800
+    assert config.tracking.history_ms == 3200
+    assert config.tracking.velocity_window_ms == 900
 
 
 def test_factory_mock_backend_does_not_touch_runtime_cache(tmp_path, monkeypatch):

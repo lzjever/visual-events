@@ -85,8 +85,7 @@ src/
       base.py
       ultralytics_pose.py
     tracking/
-      bytetrack.py
-      tracks.py
+      byte_tracker.py
     attention/
       selector.py
     events/
@@ -109,7 +108,7 @@ artifacts/      # ignored: replay/e2e/perf outputs
 | --- | --- |
 | `protocol` | 解析 binary WebSocket frame，校验 header/JPEG，序列化 `visual_state` 和 error |
 | `inference` | 加载 `YOLOv8n-pose`，输出项目内部 `PoseDetections` |
-| `tracking` | 只追踪 person，输出稳定 `track_id`、速度、age、lost |
+| `tracking` | 项目内 ByteTrack-style IoU/TTL tracker baseline，只追踪 person，输出稳定 `track_id`、速度、age、lost |
 | `attention` | 选择最大稳定人物和 `target_uv` |
 | `events` | 基于 track history 生成 V1 `semantic_events` |
 | `metrics` | 输出 latency、FPS、事件统计、错误统计 |
@@ -172,7 +171,7 @@ KISS 约束：
 - 一个运行入口：`visual-events-server --config <path>`。
 - 一个 protocol schema：`common/schema/protocol.md`。
 - 一个推理模型 baseline：`YOLOv8n-pose`。
-- 一个 tracker baseline：ByteTrack。
+- 一个 tracker baseline：项目内 ByteTrack-style IoU/TTL tracker baseline；不使用 Ultralytics `model.track()`，不依赖上游 ByteTrack package。
 - 一个事件引擎：服务端负责 rising-edge、cooldown、同 track 去重。
 - 不把 Ultralytics result 对象传到 tracking/events；进入 server 内部后统一转换为项目自己的结构。
 
@@ -313,14 +312,19 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 产出：
 
-- ByteTrack 接入。
+- 项目内 ByteTrack-style IoU/TTL tracker baseline。
+- 每条 WebSocket 连接独立 tracker/history；inference backend/model 可以全局共享。
 - Track history。
 - 速度、age、lost_ms。
+- `visual_state.tracks` 和 tracking-derived `scene_flags.has_person/person_count`；`attention` 仍为 `null`，`semantic_events` 仍为空。
+- 低置信 detection 不创建新 track，但可更新已有 track；真实 ByteTrack-style rescue 要求 inference backend 的 `conf` 不高于 `tracking.low_conf`，否则低置信候选不会进入 tracker。
 
 验收：
 
-- `val-data/` 回放中单人主 track 不应频繁换 ID。
-- 短暂漏检不应立即触发 `person_left`。
+- `val-data/` 回放中可见 person track 不应频繁换 ID。
+- 短暂漏检不删除、不重分配 track，并输出 `lost_ms > 0` 的 lost state；S3 不触发 `person_left`。
+- `tools/replay_val_data.py` summary 输出 S3 tracking smoke 指标：`track_frames`、`duplicate_track_id_frames`、`single_visible_id_switches`、`adjacent_track_matches`、`association_id_switches`、`visible_counts_by_id`、`track_schema_errors`、`age_monotonic_violations`。
+- `largest_bbox_track_switches`、`largest_bbox_track_id`、`largest_bbox_track_coverage`、`largest_bbox_track_max_gap_ms` 只作为 S4 attention/target 诊断，不作为 S3 tracking ID 稳定性 gate。
 
 ### S4 Attention
 
@@ -438,9 +442,9 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 | 协议 | header 过大、非法 JSON、非 JPEG、unsupported encoding | 构造帧 | 返回协议定义的 `error.code`，服务不崩溃 |
 | 协议 | one in-flight | replay client 强制等待响应 | server 不积压队列，乱序响应为 0 |
 | 推理 | person bbox/keypoints | 全部 `val-data` | 有人场景中 `scene_flags.has_person` 非空率 >= 85%，`person_count` 来自 detections |
-| 推理 | image_size/坐标合法性 | 全部 `val-data` | 内部 `PoseDetections` bbox 坐标在图像范围内，`bbox_area` 在图像面积范围内；`bbox_area_ratio` 留到 S3 tracks 输出后验证 |
-| 追踪 | 单人稳定 track | `pci_stand`、`pic_walk_in_stop` | 主 track 在可见区间 ID 切换 <= 1 次 |
-| 追踪 | 路过轨迹连续 | `pic_1_l_to_r`、`pic_1_r_to_l` | 主 track 横向速度方向与场景一致，轨迹中断不超过 1s |
+| 推理 | image_size/坐标合法性 | 全部 `val-data` | 内部 `PoseDetections` bbox 坐标在图像范围内，`bbox_area` 在图像面积范围内；S3 `tracks[].bbox_area_ratio` 合法 |
+| 追踪 | 可见 person ID 稳定性 | `pci_stand`、`pic_walk_in_stop` | replay summary 中 `track_frames > 0`、`visible_counts_by_id` 非空、`single_visible_id_switches == 0`、`association_id_switches == 0`、`duplicate_track_id_frames == 0`、`track_schema_errors == 0`、`age_monotonic_violations == 0` |
+| 追踪 | 路过轨迹连续 | `pic_1_l_to_r`、`pic_1_r_to_l` | 可见 person track 横向速度方向与场景一致；相邻 bbox 匹配 `adjacent_track_matches > 0` 且 `association_id_switches == 0` |
 | 事件 | `person_passing_by` | `pic_1_l_to_r`、`pic_1_r_to_l` | 每段触发 1 次，不能触发 `person_stopped_near_robot` |
 | 事件 | `person_approaching_robot` | `pic_persone_walk_in` | 触发 1 次，触发点应在 bbox 面积/高度连续增大之后 |
 | 事件 | `person_stopped_near_robot` | `pic_walk_in_stop`、`pci_stand` | 稳定停留后触发 1 次；cooldown 内不重复 |
@@ -560,7 +564,7 @@ Server handoff 必须包含：
 | --- | --- |
 | `val-data/` 没有人工标注 | V1 使用场景级期望和事件摘要验收；必要时后续增加轻量 annotation |
 | pose 模型漏检导致事件漏报 | 先调阈值和 track TTL，不训练模型 |
-| ByteTrack ID switch 影响事件 | 加 track 稳定帧数和 cooldown，避免一抖就发事件 |
+| Tracker ID switch 影响事件 | 加 track 稳定帧数和 cooldown，避免一抖就发事件 |
 | 头部运动状态缺失 | 按协议视为 `unknown`，禁用运动敏感事件 |
 | 挥手规则误报 | 规则保守，要求关键点可见和短时间方向变化 |
 | Ultralytics 授权 | 授权未确认前仅做内部 POC/性能验证 |

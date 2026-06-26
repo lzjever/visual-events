@@ -62,7 +62,9 @@ def test_fake_backend_detections_drive_visual_state_scene_flags():
 
     assert message["type"] == "visual_state"
     assert message["frame_id"] == 7
-    assert message["tracks"] == []
+    assert len(message["tracks"]) == 1
+    assert message["tracks"][0]["track_id"] == 1
+    assert message["tracks"][0]["lost_ms"] == 0
     assert message["attention"] is None
     assert message["scene_flags"] == {
         "has_person": True,

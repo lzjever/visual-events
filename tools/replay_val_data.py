@@ -5,7 +5,7 @@ import asyncio
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,6 +19,7 @@ DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 720
 _JPEG_GLOBS = ("*.jpeg", "*.jpg")
 _FILENAME_NUMBER = re.compile(r"(\d+)")
+_ASSOCIATION_IOU_THRESHOLD = 0.5
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,18 @@ class ReplayStats:
     elapsed_s: float
     frames_with_person: int = 0
     frame_id_mismatch: int = 0
+    track_frames: int = 0
+    largest_bbox_track_switches: int = 0
+    largest_bbox_track_id: int | None = None
+    largest_bbox_track_coverage: float = 0.0
+    largest_bbox_track_max_gap_ms: int = 0
+    duplicate_track_id_frames: int = 0
+    single_visible_id_switches: int = 0
+    adjacent_track_matches: int = 0
+    association_id_switches: int = 0
+    visible_counts_by_id: dict[str, int] = field(default_factory=dict)
+    track_schema_errors: int = 0
+    age_monotonic_violations: int = 0
 
     @property
     def ok_rate(self) -> float:
@@ -131,6 +144,7 @@ async def replay_scene(
     errors = 0
     frames_with_person = 0
     frame_id_mismatch = 0
+    tracking_stats = _TrackingStatsAccumulator()
 
     jsonl_file = None
     try:
@@ -184,6 +198,7 @@ async def replay_scene(
                         frames_with_person += 1
                     if response.get("frame_id") != frame.header["frame_id"]:
                         frame_id_mismatch += 1
+                    tracking_stats.observe(response)
                 else:
                     errors += 1
 
@@ -210,6 +225,7 @@ async def replay_scene(
         if jsonl_file is not None:
             jsonl_file.close()
 
+    tracking_summary = tracking_stats.summary()
     return ReplayStats(
         scene=Path(scene_dir).name,
         frames_sent=frames_sent,
@@ -218,6 +234,20 @@ async def replay_scene(
         elapsed_s=time.perf_counter() - start_s,
         frames_with_person=frames_with_person,
         frame_id_mismatch=frame_id_mismatch,
+        track_frames=tracking_summary["track_frames"],
+        largest_bbox_track_switches=tracking_summary["largest_bbox_track_switches"],
+        largest_bbox_track_id=tracking_summary["largest_bbox_track_id"],
+        largest_bbox_track_coverage=tracking_summary["largest_bbox_track_coverage"],
+        largest_bbox_track_max_gap_ms=tracking_summary[
+            "largest_bbox_track_max_gap_ms"
+        ],
+        duplicate_track_id_frames=tracking_summary["duplicate_track_id_frames"],
+        single_visible_id_switches=tracking_summary["single_visible_id_switches"],
+        adjacent_track_matches=tracking_summary["adjacent_track_matches"],
+        association_id_switches=tracking_summary["association_id_switches"],
+        visible_counts_by_id=tracking_summary["visible_counts_by_id"],
+        track_schema_errors=tracking_summary["track_schema_errors"],
+        age_monotonic_violations=tracking_summary["age_monotonic_violations"],
     )
 
 
@@ -385,12 +415,277 @@ def _stats_to_summary(item: ReplayStats) -> dict[str, Any]:
         "frames_with_person": item.frames_with_person,
         "person_frame_rate": item.person_frame_rate,
         "frame_id_mismatch": item.frame_id_mismatch,
+        "track_frames": item.track_frames,
+        "largest_bbox_track_switches": item.largest_bbox_track_switches,
+        "largest_bbox_track_id": item.largest_bbox_track_id,
+        "largest_bbox_track_coverage": item.largest_bbox_track_coverage,
+        "largest_bbox_track_max_gap_ms": item.largest_bbox_track_max_gap_ms,
+        "duplicate_track_id_frames": item.duplicate_track_id_frames,
+        "single_visible_id_switches": item.single_visible_id_switches,
+        "adjacent_track_matches": item.adjacent_track_matches,
+        "association_id_switches": item.association_id_switches,
+        "visible_counts_by_id": item.visible_counts_by_id,
+        "track_schema_errors": item.track_schema_errors,
+        "age_monotonic_violations": item.age_monotonic_violations,
         "elapsed_s": item.elapsed_s,
     }
 
 
 def _stats_passed(item: ReplayStats) -> bool:
-    return item.errors == 0 and item.frame_id_mismatch == 0
+    return (
+        item.errors == 0
+        and item.frame_id_mismatch == 0
+        and item.track_frames > 0
+        and bool(item.visible_counts_by_id)
+        and item.track_schema_errors == 0
+        and item.age_monotonic_violations == 0
+        and item.duplicate_track_id_frames == 0
+        and item.single_visible_id_switches == 0
+        and item.association_id_switches == 0
+    )
+
+
+@dataclass
+class _TrackingStatsAccumulator:
+    track_frames: int = 0
+    largest_bbox_track_switches: int = 0
+    duplicate_track_id_frames: int = 0
+    single_visible_id_switches: int = 0
+    adjacent_track_matches: int = 0
+    association_id_switches: int = 0
+    track_schema_errors: int = 0
+    age_monotonic_violations: int = 0
+
+    def __post_init__(self) -> None:
+        self._last_largest_bbox_track_id: int | None = None
+        self._largest_bbox_counts: dict[int, int] = {}
+        self._largest_bbox_timestamps_by_id: dict[int, list[int]] = {}
+        self._last_age_by_id: dict[int, int] = {}
+        self._previous_visible_tracks: list[dict[str, Any]] = []
+        self._previous_single_visible_id: int | None = None
+        self._visible_counts_by_id: dict[str, int] = {}
+
+    def observe(self, response: dict[str, Any]) -> None:
+        timestamp_ms = response.get("frame_timestamp_ms")
+        if not _is_number(timestamp_ms):
+            timestamp_ms = response.get("frame_id", 0)
+        timestamp_ms = int(timestamp_ms) if _is_number(timestamp_ms) else 0
+
+        raw_tracks = response.get("tracks", [])
+        if not isinstance(raw_tracks, list):
+            self.track_schema_errors += 1
+            self._observe_visible_tracks([], timestamp_ms=timestamp_ms)
+            return
+
+        valid_tracks: list[dict[str, Any]] = []
+        for raw_track in raw_tracks:
+            if not isinstance(raw_track, dict) or not _valid_track_schema(raw_track):
+                self.track_schema_errors += 1
+                continue
+            track_id = int(raw_track["track_id"])
+            age_ms = int(raw_track["age_ms"])
+            previous_age = self._last_age_by_id.get(track_id)
+            if previous_age is not None and age_ms < previous_age:
+                self.age_monotonic_violations += 1
+            self._last_age_by_id[track_id] = age_ms
+            valid_tracks.append(raw_track)
+
+        if not valid_tracks:
+            self._observe_visible_tracks([], timestamp_ms=timestamp_ms)
+            return
+
+        self.track_frames += 1
+        self._observe_duplicate_track_ids(valid_tracks)
+        visible_tracks = [
+            track for track in valid_tracks if int(track.get("lost_ms", 0)) == 0
+        ]
+        self._observe_visible_tracks(visible_tracks, timestamp_ms=timestamp_ms)
+
+    def summary(self) -> dict[str, Any]:
+        largest_bbox_track_id: int | None = None
+        largest_bbox_count = 0
+        if self._largest_bbox_counts:
+            largest_bbox_track_id, largest_bbox_count = max(
+                self._largest_bbox_counts.items(),
+                key=lambda item: (item[1], -item[0]),
+            )
+        timestamps = (
+            self._largest_bbox_timestamps_by_id.get(largest_bbox_track_id, [])
+            if largest_bbox_track_id is not None
+            else []
+        )
+        max_gap_ms = 0
+        if len(timestamps) > 1:
+            max_gap_ms = max(
+                int(timestamps[index] - timestamps[index - 1])
+                for index in range(1, len(timestamps))
+            )
+        coverage = (
+            largest_bbox_count / self.track_frames
+            if self.track_frames > 0 and largest_bbox_track_id is not None
+            else 0.0
+        )
+        return {
+            "track_frames": self.track_frames,
+            "largest_bbox_track_switches": self.largest_bbox_track_switches,
+            "largest_bbox_track_id": largest_bbox_track_id,
+            "largest_bbox_track_coverage": coverage,
+            "largest_bbox_track_max_gap_ms": max_gap_ms,
+            "duplicate_track_id_frames": self.duplicate_track_id_frames,
+            "single_visible_id_switches": self.single_visible_id_switches,
+            "adjacent_track_matches": self.adjacent_track_matches,
+            "association_id_switches": self.association_id_switches,
+            "visible_counts_by_id": dict(sorted(self._visible_counts_by_id.items())),
+            "track_schema_errors": self.track_schema_errors,
+            "age_monotonic_violations": self.age_monotonic_violations,
+        }
+
+    def _observe_visible_tracks(
+        self,
+        visible_tracks: list[dict[str, Any]],
+        *,
+        timestamp_ms: int,
+    ) -> None:
+        visible_ids = [int(track["track_id"]) for track in visible_tracks]
+        unique_visible_ids = set(visible_ids)
+        for track_id in unique_visible_ids:
+            key = str(track_id)
+            self._visible_counts_by_id[key] = self._visible_counts_by_id.get(key, 0) + 1
+
+        if len(visible_tracks) == 1:
+            current_id = int(visible_tracks[0]["track_id"])
+            if (
+                self._previous_single_visible_id is not None
+                and current_id != self._previous_single_visible_id
+            ):
+                self.single_visible_id_switches += 1
+            self._previous_single_visible_id = current_id
+        else:
+            self._previous_single_visible_id = None
+
+        for previous, current in _associate_adjacent_tracks(
+            self._previous_visible_tracks,
+            visible_tracks,
+        ):
+            self.adjacent_track_matches += 1
+            if int(previous["track_id"]) != int(current["track_id"]):
+                self.association_id_switches += 1
+        self._previous_visible_tracks = visible_tracks
+
+        if not visible_tracks:
+            self._last_largest_bbox_track_id = None
+            return
+
+        largest = max(visible_tracks, key=lambda track: float(track["bbox_area_ratio"]))
+        largest_id = int(largest["track_id"])
+        if (
+            self._last_largest_bbox_track_id is not None
+            and largest_id != self._last_largest_bbox_track_id
+        ):
+            self.largest_bbox_track_switches += 1
+        self._last_largest_bbox_track_id = largest_id
+        self._largest_bbox_counts[largest_id] = (
+            self._largest_bbox_counts.get(largest_id, 0) + 1
+        )
+        self._largest_bbox_timestamps_by_id.setdefault(largest_id, []).append(
+            timestamp_ms
+        )
+
+    def _observe_duplicate_track_ids(self, valid_tracks: list[dict[str, Any]]) -> None:
+        track_ids = [int(track["track_id"]) for track in valid_tracks]
+        if len(track_ids) != len(set(track_ids)):
+            self.duplicate_track_id_frames += 1
+
+
+def _valid_track_schema(track: dict[str, Any]) -> bool:
+    required = {
+        "track_id",
+        "class",
+        "bbox_xyxy",
+        "bbox_area_ratio",
+        "center_uv",
+        "head_uv",
+        "velocity_uv_s",
+        "age_ms",
+        "lost_ms",
+        "confidence",
+        "pose_confidence",
+    }
+    if not required.issubset(track):
+        return False
+    return (
+        isinstance(track["track_id"], int)
+        and not isinstance(track["track_id"], bool)
+        and isinstance(track["class"], str)
+        and _number_list(track["bbox_xyxy"], length=4)
+        and _is_number(track["bbox_area_ratio"])
+        and float(track["bbox_area_ratio"]) >= 0.0
+        and _number_list(track["center_uv"], length=2)
+        and _number_list(track["head_uv"], length=2)
+        and _number_list(track["velocity_uv_s"], length=2)
+        and _non_negative_int(track["age_ms"])
+        and _non_negative_int(track["lost_ms"])
+        and _is_number(track["confidence"])
+        and _is_number(track["pose_confidence"])
+    )
+
+
+def _associate_adjacent_tracks(
+    previous_tracks: list[dict[str, Any]],
+    current_tracks: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    pairs: list[tuple[float, int, int]] = []
+    for previous_index, previous in enumerate(previous_tracks):
+        for current_index, current in enumerate(current_tracks):
+            iou = _bbox_iou(previous["bbox_xyxy"], current["bbox_xyxy"])
+            if iou >= _ASSOCIATION_IOU_THRESHOLD:
+                pairs.append((iou, previous_index, current_index))
+
+    pairs.sort(key=lambda item: (-item[0], item[1], item[2]))
+    used_previous: set[int] = set()
+    used_current: set[int] = set()
+    matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for _iou, previous_index, current_index in pairs:
+        if previous_index in used_previous or current_index in used_current:
+            continue
+        used_previous.add(previous_index)
+        used_current.add(current_index)
+        matches.append((previous_tracks[previous_index], current_tracks[current_index]))
+    return matches
+
+
+def _bbox_iou(first: list[Any], second: list[Any]) -> float:
+    ax1, ay1, ax2, ay2 = [float(value) for value in first]
+    bx1, by1, bx2, by2 = [float(value) for value in second]
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_width = max(0.0, inter_x2 - inter_x1)
+    inter_height = max(0.0, inter_y2 - inter_y1)
+    intersection = inter_width * inter_height
+    if intersection <= 0.0:
+        return 0.0
+    first_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    second_area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = first_area + second_area - intersection
+    return intersection / union if union > 0.0 else 0.0
+
+
+def _number_list(value: Any, *, length: int) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == length
+        and all(_is_number(item) for item in value)
+    )
+
+
+def _non_negative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _default_connector() -> Callable[..., Any]:

@@ -4,7 +4,7 @@
 
 本文档是 `visual-events-server` 的 wire protocol 事实来源。V1 只有一条主通道：WebSocket streaming。
 
-S0/S1 当前实现范围是 server WebSocket 协议、mock `visual_state` 和 `tools/replay_val_data.py` 回放工具。本文中提到的 robot CLI、DDS、gaze controller 和 Botified frame 行为是未来客户端侧约定，不是当前 S0/S1 server 实现范围。
+S0-S3 当前实现范围是 server WebSocket 协议、mock/推理 `visual_state`、项目内 ByteTrack-style IoU/TTL tracker baseline 和 `tools/replay_val_data.py` 回放工具。本文中提到的 robot CLI、DDS、gaze controller 和 Botified frame 行为是未来客户端侧约定，不是当前 server 实现范围。
 
 ## 1. 连接
 
@@ -142,6 +142,18 @@ V1 规则：`moving` 或 `unknown` 时，服务端暂停 `person_passing_by`、`
   "semantic_events": []
 }
 ```
+
+Track 字段规则：
+
+- `tracks` 是必填数组；S3 只包含 `class="person"` 的 track。
+- `tracks` 可以包含当前帧未匹配但仍在 lost TTL 内保留的 track。这类 track 的 `lost_ms > 0`，`bbox_xyxy`、`center_uv`、`head_uv`、`confidence`、`pose_confidence` 使用最近一次有效观测值；超过 TTL 后从数组移除。
+- `scene_flags.has_person` 和 `scene_flags.person_count` 只统计当前帧匹配/可见的 track，即 `lost_ms == 0`。lost track 不计入人数。
+- S3 不输出 attention 或 semantic events：`attention` 为 `null`，`semantic_events` 为空数组。后续 S4/S5 才填充这些字段。
+- 每个 track object 必须包含：`track_id` integer、`class` string、`bbox_xyxy` number[4]、`bbox_area_ratio` number、`center_uv` number[2]、`head_uv` number[2]、`velocity_uv_s` number[2]、`age_ms` integer、`lost_ms` integer、`confidence` number、`pose_confidence` number。
+- `pose_confidence` 是 keypoint confidence 的平均值；没有 keypoint 或没有 confidence 时为 `0.0`。
+- `head_uv` 优先使用 COCO nose/eyes/ears 中有效点的中心；没有有效 face keypoint 时 fallback 到 bbox 水平中心和 `bbox_top + 0.28 * bbox_height`。
+- `velocity_uv_s` 单位是像素/秒，来自同一 track 的近期有效观测；历史不足或时间间隔过小时可输出 `[0.0, 0.0]` 或保留上一速度，避免尖峰。
+- `age_ms`、`lost_ms` 不得为负数。服务端发现 `timestamp_ms` 或 `frame_id` 倒退时应 reset 当前连接的 tracker。
 
 ## 4. 坐标与时间
 

@@ -57,7 +57,7 @@ DDS JPEG @10Hz
   -> LAN WebSocket stream
   -> visual-events-server
       -> YOLOv8n-pose
-      -> ByteTrack
+      -> ByteTrack-style IoU/TTL tracker
       -> EventEngine
       -> AttentionTarget
   -> visual_state @10Hz
@@ -77,14 +77,14 @@ DDS JPEG @10Hz
 
 ## 5. 模型与追踪决策
 
-V1 baseline 使用 `YOLOv8n-pose + ByteTrack`。
+V1 baseline 使用 `YOLOv8n-pose + 项目内 ByteTrack-style IoU/TTL tracker baseline`。当前 S3 不使用 Ultralytics `model.track()`，也不声明接入上游 ByteTrack package。
 
 选择原因：
 
 - Ultralytics 模型体系成熟，开发入口简单。
 - `YOLOv8n-pose` 同时提供 person bbox 和人体关键点，足够支撑挥手、停留、最大人物、头部区域注视等规则。
 - Rockchip `rknn_model_zoo` 已包含 `yolov8n-pose`，并给出 RK3588 INT8 推理性能数据，作为未来 RK3588 本地化的现实起点。
-- ByteTrack 简单、快、无 ReID 额外模型，适合 10Hz 和 KISS 约束。
+- ByteTrack-style IoU/TTL baseline 简单、快、无 ReID 额外模型，适合 10Hz 和 KISS 约束；真实低置信 rescue 依赖 inference conf 覆盖到 tracking `low_conf`。
 
 不选择 YOLO11/YOLO26 pose 作为 V1 baseline：
 
@@ -350,7 +350,7 @@ Botified：
 
 ## 11. 参考资料
 
-- Ultralytics tracking 文档：<https://docs.ultralytics.com/modes/track/>
+- Ultralytics tracking 文档仅作背景参考；S3 不使用 `model.track()`：<https://docs.ultralytics.com/modes/track/>
 - Ultralytics Rockchip RKNN 文档：<https://docs.ultralytics.com/integrations/rockchip-rknn/>
 - Rockchip RKNN Model Zoo：<https://github.com/airockchip/rknn_model_zoo>
 - RKNN Toolkit2：<https://github.com/rockchip-linux/rknn-toolkit2>

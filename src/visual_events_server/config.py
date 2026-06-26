@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from visual_events_server.tracking import TrackingConfig
+
 
 @dataclass(frozen=True)
 class InferenceConfig:
@@ -22,6 +24,7 @@ class ServerConfig:
     port: int = 8765
     runtime_dir: Path = Path("runtime")
     inference: InferenceConfig = field(default_factory=InferenceConfig)
+    tracking: TrackingConfig = field(default_factory=TrackingConfig)
 
 
 def load_config(path: str | Path | None = None) -> ServerConfig:
@@ -38,12 +41,16 @@ def load_config(path: str | Path | None = None) -> ServerConfig:
     inference_data = data.get("inference", {})
     if not isinstance(inference_data, dict):
         raise ValueError("[inference] section must be an object")
+    tracking_data = data.get("tracking", {})
+    if not isinstance(tracking_data, dict):
+        raise ValueError("[tracking] section must be an object")
 
     return ServerConfig(
         host=str(server_data.get("host", ServerConfig.host)),
         port=int(server_data.get("port", ServerConfig.port)),
         runtime_dir=runtime_dir,
         inference=_parse_inference_config(inference_data, runtime_dir=runtime_dir),
+        tracking=_parse_tracking_config(tracking_data),
     )
 
 
@@ -85,4 +92,19 @@ def _parse_inference_config(
         device=device,
         imgsz=imgsz,
         conf=conf,
+    )
+
+
+def _parse_tracking_config(data: dict[str, Any]) -> TrackingConfig:
+    defaults = TrackingConfig()
+    return TrackingConfig(
+        high_conf=float(data.get("high_conf", defaults.high_conf)),
+        low_conf=float(data.get("low_conf", defaults.low_conf)),
+        new_track_conf=float(data.get("new_track_conf", defaults.new_track_conf)),
+        match_iou=float(data.get("match_iou", defaults.match_iou)),
+        lost_ttl_ms=int(data.get("lost_ttl_ms", defaults.lost_ttl_ms)),
+        history_ms=int(data.get("history_ms", defaults.history_ms)),
+        velocity_window_ms=int(
+            data.get("velocity_window_ms", defaults.velocity_window_ms)
+        ),
     )

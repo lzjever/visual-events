@@ -12,6 +12,7 @@ from .processor import (
     BackendVisualFrameProcessor,
     MockVisualFrameProcessor,
     VisualFrameProcessor,
+    VisualStreamSessionFactory,
 )
 from .protocol import (
     ProtocolError,
@@ -25,11 +26,14 @@ from .protocol import (
 def create_app(
     *,
     processor: VisualFrameProcessor | None = None,
+    session_factory: VisualStreamSessionFactory | None = None,
     config: ServerConfig | None = None,
 ) -> FastAPI:
     app = FastAPI(title="visual-events-server", version="0.1.0")
     app.state.config = config or ServerConfig()
-    app.state.processor = processor or MockVisualFrameProcessor()
+    app.state.session_factory = session_factory or _session_factory_from_processor(
+        processor or MockVisualFrameProcessor()
+    )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, bool]:
@@ -39,6 +43,7 @@ def create_app(
     async def stream(websocket: WebSocket) -> None:
         await websocket.accept()
         stream_camera: str | None = None
+        processor_session = app.state.session_factory()
         while True:
             try:
                 message = await websocket.receive()
@@ -74,7 +79,7 @@ def create_app(
                     )
                     await websocket.close(code=1008)
                     return
-                response = await app.state.processor.process_frame(frame)
+                response = await processor_session.process_frame(frame)
             except ProtocolError as exc:
                 await websocket.send_text(serialize_protocol_error(exc))
                 continue
@@ -95,7 +100,16 @@ def create_app(
 
 def create_processor_from_config(config: ServerConfig) -> VisualFrameProcessor:
     backend = create_infer_backend(config.inference, runtime_dir=config.runtime_dir)
-    return BackendVisualFrameProcessor(backend)
+    return BackendVisualFrameProcessor(backend, tracking_config=config.tracking)
+
+
+def _session_factory_from_processor(
+    processor: VisualFrameProcessor,
+) -> VisualStreamSessionFactory:
+    create_session = getattr(processor, "create_session", None)
+    if callable(create_session):
+        return create_session
+    return lambda: processor
 
 
 def main(argv: list[str] | None = None) -> None:
