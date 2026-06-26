@@ -1,4 +1,6 @@
 import os
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -155,3 +157,57 @@ def test_factory_ultralytics_sets_cache_env_and_fails_clearly_for_missing_model(
     assert Path(os.environ["XDG_CACHE_HOME"]) == runtime_dir / "cache" / "xdg"
     assert Path(os.environ["MPLCONFIGDIR"]) == runtime_dir / "cache" / "matplotlib"
     assert os.environ["HOME"] == original_home
+
+
+def test_ultralytics_backend_loads_explicit_model_path_with_cache_env_ready(
+    tmp_path,
+    monkeypatch,
+):
+    runtime_dir = tmp_path / "runtime"
+    model_path = runtime_dir / "models" / "yolov8n-pose.pt"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_bytes(b"fake model")
+    for key in ("YOLO_CONFIG_DIR", "TORCH_HOME", "XDG_CACHE_HOME", "MPLCONFIGDIR"):
+        monkeypatch.delenv(key, raising=False)
+
+    constructor_calls: list[dict[str, object]] = []
+
+    class FakeYOLO:
+        def __init__(self, path: str) -> None:
+            constructor_calls.append(
+                {
+                    "path": path,
+                    "env": {
+                        "YOLO_CONFIG_DIR": os.environ.get("YOLO_CONFIG_DIR"),
+                        "TORCH_HOME": os.environ.get("TORCH_HOME"),
+                        "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME"),
+                        "MPLCONFIGDIR": os.environ.get("MPLCONFIGDIR"),
+                    },
+                }
+            )
+
+    fake_ultralytics = types.ModuleType("ultralytics")
+    fake_ultralytics.YOLO = FakeYOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", fake_ultralytics)
+
+    backend = create_infer_backend(
+        InferenceConfig(
+            backend="ultralytics",
+            model_path=model_path,
+        ),
+        runtime_dir=runtime_dir,
+    )
+
+    assert backend._load_model() is backend._load_model()
+    assert constructor_calls == [
+        {
+            "path": str(model_path),
+            "env": {
+                "YOLO_CONFIG_DIR": str(runtime_dir / "cache" / "yolo"),
+                "TORCH_HOME": str(runtime_dir / "cache" / "torch"),
+                "XDG_CACHE_HOME": str(runtime_dir / "cache" / "xdg"),
+                "MPLCONFIGDIR": str(runtime_dir / "cache" / "matplotlib"),
+            },
+        }
+    ]
+    assert constructor_calls[0]["path"] != "yolov8n-pose.pt"
