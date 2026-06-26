@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from typing import Any
 
 import uvicorn
@@ -36,8 +37,8 @@ def create_app(
     )
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, bool]:
-        return {"ok": True}
+    async def healthz() -> dict[str, bool | int]:
+        return {"ok": True, "pid": os.getpid()}
 
     @app.websocket("/v1/stream")
     async def stream(websocket: WebSocket) -> None:

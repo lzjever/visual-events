@@ -92,10 +92,10 @@ src/
     events/
       history.py
       engine.py
-    metrics.py
 tools/
   replay_val_data.py
   run_val_data_e2e.py
+  run_runtime_smoke.py
 tests/
   unit/
   integration/
@@ -112,8 +112,9 @@ artifacts/      # ignored: replay/e2e/perf outputs
 | `tracking` | 项目内 ByteTrack-style IoU/TTL tracker baseline，只追踪 person，输出稳定 `track_id`、速度、age、lost |
 | `attention` | 选择最大稳定人物和 `target_uv` |
 | `events` | 基于 track history 生成 V1 `semantic_events` |
-| `metrics` | 输出 latency、FPS、事件统计、错误统计 |
 | `tools/replay_val_data.py` | 测试回放客户端，不是产品 CLI |
+| `tools/run_val_data_e2e.py` | 当前 E2E/soak 验证工具，输出轻量 `artifacts/perf/server_perf.json`；不是完整 server metrics module |
+| `tools/run_runtime_smoke.py` | release/runtime 启动 smoke verification，不是产品 CLI，也不是 `val-data` E2E 替代品 |
 
 环境约束：
 
@@ -121,6 +122,7 @@ artifacts/      # ignored: replay/e2e/perf outputs
 - `tools/` 和 `tests/` 是开发/验证目录，不属于正式 robot CLI。
 - 开发环境使用项目内 `.venv/` 和 `.uv-cache/`。
 - release/runtime 环境使用项目内 `runtime/venv/` 和 `runtime/cache/uv/`。
+- 当前 runtime package 不包含 `metrics.py`。S6/S6.1/S6.2 的性能证据来自 `tools/run_val_data_e2e.py` 输出的轻量 perf report；完整 server metrics module、phase latency、VRAM 和长期 metrics pipeline 是后续可观测性工作。
 - inference runtime cache 必须收敛在 `runtime/cache/*`；server 设置 `YOLO_CONFIG_DIR`、`TORCH_HOME`、`XDG_CACHE_HOME`、`MPLCONFIGDIR`，不改 `HOME`。
 - `val-data/`、`runtime/`、`artifacts/`、模型缓存和测试产物不得进入 Git。
 - `uv.lock` 必须进入 Git，用于 release/runtime 的 `--frozen` 安装。
@@ -145,12 +147,23 @@ release/runtime 最小部署命令：
 UV_CACHE_DIR=runtime/cache/uv UV_PROJECT_ENVIRONMENT=runtime/venv \
   uv sync --frozen --no-dev --no-editable --extra inference \
   --reinstall-package visual-events-server
-runtime/venv/bin/visual-events-server --config runtime/config.toml
+runtime/venv/bin/visual-events-server --config runtime/config/s2.toml
 ```
 
 `--reinstall-package visual-events-server` 用于开发/交付阶段确保项目 version 不变时也刷新当前项目 wheel 到 `runtime/venv`；不改变 `uv.lock`、`--frozen`、`--no-dev`、`--no-editable` 的依赖管理原则。
 
 release 产物应保持简单：Python runtime venv、server 代码、锁定依赖、本地 config、后续模型缓存和运行输出都留在 `runtime/` 或 `artifacts/`，不写入 Git。
+
+release/runtime smoke verification：
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/run_runtime_smoke.py \
+  --config runtime/config/s2.toml \
+  --port 8767
+```
+
+`tools/run_runtime_smoke.py` 是开发/交付验证工具：它内部使用 repo-local `runtime/cache/uv` 和 `runtime/venv` 执行 release sync，启动 `runtime/venv/bin/visual-events-server`，轮询 `/healthz` 并校验 `healthz_pid == server_pid`，然后输出 `artifacts/runtime-smoke/report.json`。它不接 DDS，不输出 Botified frame，不做头控，也不能替代 `tools/run_val_data_e2e.py` 的真实 `val-data` full matrix 和 soak。
 
 真实推理配置示例：
 
@@ -439,9 +452,66 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 为什么不做完整 metrics/CLI/RK3588：
 
-- 完整 `metrics.py` 的 phase latency、VRAM 和长期 metrics pipeline 是后续 server 可观测性工作；S6.1/S7 只验证 300s realtime replay、Hz、total latency、error rate 和 process RSS growth。
+- 完整 server metrics module 的 phase latency、VRAM 和长期 metrics pipeline 是后续 server 可观测性工作；S6.1/S7 只验证 300s realtime replay、Hz、total latency、error rate 和 process RSS growth。
 - 正式 robot CLI、DDS 输入、Botified 输出和头部控制闭环不属于当前 server handoff。
 - RK3588 迁移未验证；当前只保留 `InferBackend` 边界，避免把 GPU server soak 和未来 RKNN runtime 混成同一个验收项。
+
+### S6.2 Release/Runtime Validation
+
+目标：
+
+- 验证 release/runtime 环境和开发 `.venv` 分离后仍能启动真实 server。
+- 验证 `runtime/venv/bin/visual-events-server`、显式 runtime config、repo-local runtime cache/model policy 可以复现 handoff。
+- 在同一个 runtime server 上继续运行 `val-data` full matrix + 300s soak，避免只用 source `.venv` 证据完成 handoff。
+
+命令示例：
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/run_runtime_smoke.py \
+  --config runtime/config/s2.toml \
+  --port 8767
+```
+
+runtime server E2E/soak 命令示例：
+
+```bash
+runtime/venv/bin/visual-events-server \
+  --config runtime/config/s2.toml \
+  --host 127.0.0.1 \
+  --port 8767
+
+SERVER_PID=<runtime visual-events-server pid>
+
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/run_val_data_e2e.py \
+  --server ws://127.0.0.1:8767/v1/stream \
+  --data-dir val-data \
+  --out artifacts/e2e \
+  --camera front \
+  --fps 10 \
+  --response-timeout-ms 30000 \
+  --soak-seconds 300 \
+  --server-pid "$SERVER_PID" \
+  --soak-memory-growth-max-mb 64 \
+  --soak-sample-interval-s 10
+```
+
+约束：
+
+- `tools/run_runtime_smoke.py` 只验证 release sync、server process 和 `/healthz` process identity，不是产品 CLI，也不是 `val-data` E2E/soak 的替代品。
+- `/healthz` 验收必须证明本次启动的 runtime server 身份：`healthz_pid == server_pid` 且 `healthz_identity_verified == true`；不能只接受 HTTP 200。
+- release/runtime sync 必须使用 `--frozen --no-dev --no-editable --extra inference --reinstall-package visual-events-server`。
+- sync cache 必须在 `runtime/cache/uv`，virtualenv 必须在 `runtime/venv`，不得改写 `HOME`。
+- 输出只能落在 `artifacts/runtime-smoke/`、`artifacts/e2e/`、`artifacts/perf/` 等 ignored paths，不得写入 `val-data/`。
+- 仍不开发正式 robot CLI、DDS 输入、Botified 输出或头部控制闭环。
+
+验收：
+
+- `artifacts/runtime-smoke/report.json` 存在，`passed == true`，且记录 sync command/env、server command、config path、healthz URL、server pid、healthz pid 和 identity verification result。
+- runtime server full matrix 通过：19 cases = 7 stationary + 7 unknown + 5 moving targeted；5 个 `__head_moving` case 都通过。
+- runtime server 300s soak 通过：`soak.enabled == true`、`soak.passed == true`、Hz >= 9、p95 < 120ms、p99 < 200ms、error rate < 1%、RSS growth <= configured max。
+- `val-data/`、`runtime/`、`artifacts/`、模型文件和 cache 仍未被 Git 跟踪。
 
 ## 9. 测试计划
 
@@ -522,6 +592,17 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 声称 5 分钟 soak 通过时，必须同时有 `artifacts/e2e/soak/loop_0001/...` 证据、`artifacts/e2e/report.json` 的 `soak.passed == true`，以及 `artifacts/perf/server_perf.json` 的同名 `soak` 摘要。Soak loop 证据不包含 `__head_moving`；moving suppression 证据来自同一次运行 warm-up/full matrix 下的 `artifacts/e2e/<scene>__head_moving/...` cases。
 
+S6.2 release/runtime smoke 必须验证 `runtime/venv` server 能启动：
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/run_runtime_smoke.py \
+  --config runtime/config/s2.toml \
+  --port 8767
+```
+
+该 smoke 只证明 release/runtime server 可启动，并且 `/healthz` 返回的 `pid` 与本次启动的 server process 一致；最终 handoff 仍必须用同一个 runtime server 跑上面的 `val-data` full matrix + 300s soak。
+
 ### Performance
 
 统计范围：server 收到完整 frame 到发出 response。
@@ -557,6 +638,8 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 | Attention | 最大稳定人物 | 全部 `val-data` | 存在稳定 visible person 或短暂 lost hold 时，`attention.target_track_id` 指向 selector 目标；无稳定目标且无 lost hold 时允许 `attention=null` |
 | Attention | 注视点合法 | 全部 `val-data` | `target_uv` 在图像范围内 |
 | 性能 | server GPU soak | `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 循环 `stationary` + `unknown` cases | `soak.passed == true`；Hz >= 9，P95 < 120ms，P99 < 200ms，error rate < 1%，RSS growth <= configured max；`cases_completed` 不包含 `__head_moving` |
+| Release/runtime | `runtime/venv` server smoke | `tools/run_runtime_smoke.py --config runtime/config/s2.toml` | `artifacts/runtime-smoke/report.json` 中 `passed == true`；`healthz_pid == server_pid`；`healthz_identity_verified == true`；sync env 指向 `runtime/cache/uv` 和 `runtime/venv`；server command 指向 `runtime/venv/bin/visual-events-server` |
+| Release/runtime | runtime server E2E/soak | `runtime/venv/bin/visual-events-server --config runtime/config/s2.toml` + `tools/run_val_data_e2e.py --soak-seconds 300` | full matrix 19 cases 通过；300s soak 通过；artifact hash 和关键指标写入 handoff |
 | 回归 | 固定数据回放 | 全部 `val-data` | 事件类型、数量、顺序稳定；触发帧偏差 <= 3 帧或 <= 300ms |
 
 ## 11. E2E 验收矩阵
@@ -671,11 +754,13 @@ Server handoff 的 canonical 交付文档是 [`docs/server-handoff.md`](server-h
 Server handoff 必须包含：
 
 - 可运行 `visual-events-server`。
-- `tools/replay_val_data.py` 和 `tools/run_val_data_e2e.py`。
+- `tools/replay_val_data.py`、`tools/run_val_data_e2e.py` 和 `tools/run_runtime_smoke.py`。
 - 单元测试和集成测试。
+- Release/runtime smoke 报告：`artifacts/runtime-smoke/report.json`，证明 `runtime/venv` server 可启动，并且 `/healthz` 返回的 pid 与本次 server process 一致。
 - Full matrix `val-data/` E2E 报告：`stationary` 全量、`unknown` 全量 suppression、`moving` targeted suppression。
 - 性能报告。
 - 如 handoff 声称 S6.1/S7 5 分钟 soak 已通过，必须包含 runner 命令、`artifacts/e2e/soak/loop_0001/...` 证据路径、`report.json` 和 `server_perf.json` 中的 `soak` 摘要。
+- 如 handoff 声称 release/runtime 已验证，full matrix 和 soak 必须跑在 `runtime/venv/bin/visual-events-server` 上，不能只使用 source `.venv` server。
 - `docs/server-handoff.md` 中的模型权重和授权说明。
 - `docs/server-handoff.md` 中的已知失败场景和阈值说明。
 
@@ -684,6 +769,7 @@ Server handoff 必须包含：
 - 未跑 `val-data/` full matrix E2E。
 - `val-data/` 缺失时用 mock 测试代替 E2E。
 - `val-data/` 被加入 Git。
+- 声称 release/runtime 已验证，但没有 `artifacts/runtime-smoke/report.json` 或没有 runtime server E2E/soak 证据。
 - 运动敏感事件在 `head_motion=unknown` 或 `moving` 时仍触发。
 - server 输出不符合 [protocol.md](../common/schema/protocol.md)。
 - server 内部事件规则依赖正式 robot CLI。
@@ -694,6 +780,7 @@ Server handoff 必须包含：
 
 - “server 端开发”不包含正式 robot CLI。
 - replay client 是测试工具，不是产品 CLI。
+- runtime smoke 是 release/runtime 启动验证工具；它必须校验 `/healthz` process identity，不是产品 CLI，也不是 `val-data` E2E 替代品。
 - `val-data/` 必须用于 E2E 验证，但不得提交到 Git。
 - 高频 `visual_state` 是 server 输出，不等于 Botified 事件。
 - `semantic_events` 由 server 生成；未来 CLI 只做 `event_id` 幂等输出，不重新实现规则。

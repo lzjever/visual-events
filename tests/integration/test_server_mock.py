@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,13 +28,13 @@ def frame_header(**overrides):
     return header
 
 
-def test_healthz_returns_ok():
+def test_healthz_returns_ok_and_process_identity():
     client = TestClient(create_app())
 
     response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    assert response.json() == {"ok": True, "pid": os.getpid()}
 
 
 def test_websocket_stream_returns_mock_visual_state_for_valid_frame():
