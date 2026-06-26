@@ -24,6 +24,7 @@ DDS JPEG @10Hz
 
 - [产品设计](docs/product-design.md)
 - [开发与测试计划](docs/development-test-plan.md)
+- [Server 开发计划](docs/server-development-plan.md)
 - [协议草案](common/schema/protocol.md)
 
 当前基线决策：
