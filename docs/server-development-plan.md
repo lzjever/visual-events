@@ -425,8 +425,12 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 - `visual_state.jsonl`
 - `summary.json`
-- `metrics.json`
 - `summary.md`
+
+S6 最小 runner 额外输出：
+
+- `artifacts/e2e/report.json`
+- `artifacts/perf/server_perf.json`
 
 输出产物必须落在 `artifacts/` 下，不能写回 `val-data/`。
 
@@ -485,7 +489,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 ## 12. 测试产物格式
 
-每次 E2E 只保留三类产物，避免过重治理：
+S6 最小 runner 产物保持轻量：
 
 原始响应：
 
@@ -503,6 +507,7 @@ artifacts/e2e/<case>/visual_state.jsonl
 
 ```text
 artifacts/e2e/<case>/summary.json
+artifacts/e2e/<case>/summary.md
 ```
 
 示例字段：
@@ -521,13 +526,20 @@ artifacts/e2e/<case>/summary.json
 }
 ```
 
+E2E 汇总报告：
+
+```text
+artifacts/e2e/report.json
+```
+
 性能报告：
 
 ```text
 artifacts/perf/server_perf.json
 ```
 
-必须包含 decode、preprocess、infer、postprocess、tracking、events、total latency、显存峰值。
+S6 最小 runner 必须包含 total latency、Hz、error rate 和 frame counts。
+decode、preprocess、infer、postprocess、tracking、events、VRAM、memory 在当前阶段显式标记为 unavailable；完整 server metrics 模块另列后续实现。
 
 ## 13. Handoff 要求
 

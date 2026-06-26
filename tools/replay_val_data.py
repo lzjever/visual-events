@@ -516,12 +516,12 @@ async def async_main(argv: list[str] | None = None) -> int:
     for item in stats:
         print(
             json.dumps(
-                _stats_to_summary(item, gate=args.gate),
+                stats_to_summary(item, gate=args.gate),
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
         )
-    return 0 if all(_stats_passed(item, gate=args.gate) for item in stats) else 1
+    return 0 if all(stats_passed(item, gate=args.gate) for item in stats) else 1
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -576,7 +576,7 @@ async def _recv_with_timeout(
         raise TimeoutError("timed out waiting for server response") from exc
 
 
-def _stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str, Any]:
+def stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str, Any]:
     tracking_pass = _tracking_stats_passed(item)
     attention_pass = _attention_stats_passed(item)
     events_pass = _events_stats_passed(item)
@@ -645,12 +645,12 @@ def _stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str,
         "tracking_pass": tracking_pass,
         "attention_pass": attention_pass,
         "events_pass": events_pass,
-        "passed": _stats_passed(item, gate=gate),
+        "passed": stats_passed(item, gate=gate),
         "elapsed_s": item.elapsed_s,
     }
 
 
-def _stats_passed(item: ReplayStats, *, gate: str = "tracking") -> bool:
+def stats_passed(item: ReplayStats, *, gate: str = "tracking") -> bool:
     if gate == "tracking":
         return _tracking_stats_passed(item)
     if gate == "attention":
@@ -666,6 +666,14 @@ def _stats_passed(item: ReplayStats, *, gate: str = "tracking") -> bool:
     if gate == "none":
         return True
     raise ValueError("gate must be one of: tracking, attention, events, all, none")
+
+
+def _stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str, Any]:
+    return stats_to_summary(item, gate=gate)
+
+
+def _stats_passed(item: ReplayStats, *, gate: str = "tracking") -> bool:
+    return stats_passed(item, gate=gate)
 
 
 def _tracking_stats_passed(item: ReplayStats) -> bool:

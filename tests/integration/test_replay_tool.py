@@ -7,11 +7,14 @@ import pytest
 from tools.replay_val_data import (
     ReplayStats,
     _stats_passed,
+    _stats_to_summary,
     async_main,
     discover_scene_dirs,
     iter_scene_frames,
     parse_args,
     replay_scene,
+    stats_passed,
+    stats_to_summary,
 )
 from visual_events_server.protocol import decode_frame_message
 
@@ -1019,6 +1022,27 @@ def test_parse_args_accepts_events_gate_and_all_includes_events():
     assert _stats_passed(stats, gate="attention") is True
     assert _stats_passed(stats, gate="events") is False
     assert _stats_passed(stats, gate="all") is False
+
+
+def test_public_stats_wrappers_match_private_aliases():
+    stats = ReplayStats(
+        scene="pic_hello",
+        frames_sent=2,
+        frames_ok=2,
+        errors=0,
+        elapsed_s=0.2,
+        track_frames=2,
+        visible_counts_by_id={"1": 2},
+    )
+
+    assert stats_passed(stats, gate="tracking") == _stats_passed(
+        stats,
+        gate="tracking",
+    )
+    assert stats_to_summary(stats, gate="tracking") == _stats_to_summary(
+        stats,
+        gate="tracking",
+    )
 
 
 @pytest.mark.asyncio
