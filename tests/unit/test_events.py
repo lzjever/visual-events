@@ -82,6 +82,8 @@ def events_of(events: list[dict], name: str) -> list[dict]:
 def keypoints(
     *,
     wrist_x: float,
+    wrist_y: float = 300.0,
+    shoulder_y: float = 320.0,
     wrist_confidence: float = 0.9,
     side: str = "left",
 ) -> tuple[PoseKeypoint, ...]:
@@ -89,13 +91,13 @@ def keypoints(
         PoseKeypoint(
             name=f"{side}_shoulder",
             x=500.0,
-            y=320.0,
+            y=shoulder_y,
             confidence=0.9,
         ),
         PoseKeypoint(
             name=f"{side}_wrist",
             x=wrist_x,
-            y=300.0,
+            y=wrist_y,
             confidence=wrist_confidence,
         ),
     )
@@ -357,6 +359,36 @@ def test_person_waving_rejects_low_confidence_keypoints():
     events = make_wave_history(subject, wrist_confidence=0.2)
 
     assert "person_waving" not in event_names(events)
+
+
+def test_person_waving_rejects_walking_arm_swing_near_or_below_shoulder():
+    subject = EventEngine()
+    emitted: list[dict] = []
+
+    for index, (wrist_x, wrist_y) in enumerate(
+        (
+            (460.0, 318.0),
+            (545.0, 330.0),
+            (465.0, 319.0),
+        )
+    ):
+        timestamp_ms = 1000 + (index * 600)
+        emitted.extend(
+            subject.update(
+                frame(frame_id=1 + index, timestamp_ms=timestamp_ms),
+                [
+                    track(
+                        1,
+                        timestamp_ms=timestamp_ms,
+                        bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
+                        keypoints=keypoints(wrist_x=wrist_x, wrist_y=wrist_y),
+                    )
+                ],
+                attention(1),
+            )
+        )
+
+    assert "person_waving" not in event_names(emitted)
 
 
 def test_attention_target_changed_requires_previous_and_current_non_null_targets():

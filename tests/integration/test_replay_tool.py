@@ -26,6 +26,12 @@ def write_jpeg(path: Path) -> None:
     path.write_bytes(JPEG_BYTES)
 
 
+def write_scene_frames(scene: Path, count: int) -> None:
+    scene.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        write_jpeg(scene / f"img_{1710000000000000000 + (index * 100000000)}.jpeg")
+
+
 def test_iter_scene_frames_sorts_by_filename_timestamp_and_builds_headers(tmp_path):
     scene = tmp_path / "pic_hello"
     scene.mkdir()
@@ -707,21 +713,18 @@ def test_non_stable_attention_scene_uses_generic_evidence_gate():
 @pytest.mark.asyncio
 async def test_replay_scene_summarizes_semantic_events_and_passes_events_gate(tmp_path):
     scene = tmp_path / "pic_hello"
-    scene.mkdir()
-    write_jpeg(scene / "img_1710000000000000000.jpeg")
-    write_jpeg(scene / "img_1710000000100000000.jpeg")
+    write_scene_frames(scene, 13)
+    response_events = [[] for _ in range(13)]
+    response_events[12] = [
+        event_payload(
+            "person_waving",
+            event_id="front:evt_000001",
+            track_id=1,
+        )
+    ]
     connector = SequenceResponseConnect(
-        [[track_payload(1, age_ms=400)], [track_payload(1, age_ms=500)]],
-        response_events=[
-            [],
-            [
-                event_payload(
-                    "person_waving",
-                    event_id="front:evt_000001",
-                    track_id=1,
-                )
-            ],
-        ],
+        [[track_payload(1, age_ms=400 + index * 100)] for index in range(13)],
+        response_events=response_events,
     )
 
     stats = await replay_scene(
@@ -738,9 +741,233 @@ async def test_replay_scene_summarizes_semantic_events_and_passes_events_gate(tm
     assert stats.semantic_event_frames == 1
     assert stats.semantic_event_count == 1
     assert stats.semantic_event_counts_by_type == {"person_waving": 1}
-    assert stats.semantic_event_first_frame_by_type == {"person_waving": 1}
+    assert stats.semantic_event_first_frame_by_type == {"person_waving": 12}
     assert stats.semantic_event_expected_missing == 0
     assert _stats_passed(stats, gate="events") is True
+
+
+@pytest.mark.asyncio
+async def test_events_gate_accepts_trigger_frame_within_tolerance(tmp_path):
+    scene = tmp_path / "pic_hello"
+    write_scene_frames(scene, 15)
+    response_events = [[] for _ in range(15)]
+    response_events[14] = [
+        event_payload(
+            "person_waving",
+            event_id="front:evt_000001",
+            track_id=1,
+        )
+    ]
+    connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400 + index * 100)] for index in range(15)],
+        response_events=response_events,
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+    summary = stats_to_summary(stats, gate="events")
+
+    assert stats.semantic_event_first_frame_by_type == {"person_waving": 14}
+    assert stats.semantic_event_trigger_timing_errors == 0
+    assert summary["semantic_event_first_frame_diagnostics"]["person_waving"] == {
+        "expected_frame": 12,
+        "actual_frame": 14,
+        "delta_frames": 2,
+        "within_tolerance": True,
+    }
+    assert _stats_passed(stats, gate="events") is True
+
+
+@pytest.mark.asyncio
+async def test_events_gate_rejects_trigger_frame_outside_tolerance(tmp_path):
+    scene = tmp_path / "pic_hello"
+    write_scene_frames(scene, 21)
+    response_events = [[] for _ in range(21)]
+    response_events[20] = [
+        event_payload(
+            "person_waving",
+            event_id="front:evt_000001",
+            track_id=1,
+        )
+    ]
+    connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400 + index * 100)] for index in range(21)],
+        response_events=response_events,
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+    summary = stats_to_summary(stats, gate="events")
+
+    assert stats.semantic_event_trigger_timing_errors == 1
+    assert summary["semantic_event_first_frame_diagnostics"]["person_waving"] == {
+        "expected_frame": 12,
+        "actual_frame": 20,
+        "delta_frames": 8,
+        "within_tolerance": False,
+    }
+    assert summary["semantic_event_timeline_violations"] == [
+        {
+            "code": "trigger_frame_outside_tolerance",
+            "event": "person_waving",
+            "expected_frame": 12,
+            "actual_frame": 20,
+            "delta_frames": 8,
+            "tolerance_frames": 3,
+        }
+    ]
+    assert _stats_passed(stats, gate="events") is False
+
+
+@pytest.mark.asyncio
+async def test_events_gate_rejects_missing_expected_trigger_frame(tmp_path):
+    scene = tmp_path / "pic_hello"
+    write_scene_frames(scene, 3)
+    connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400 + index * 100)] for index in range(3)]
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+    summary = stats_to_summary(stats, gate="events")
+
+    assert stats.semantic_event_expected_missing == 1
+    assert stats.semantic_event_trigger_timing_errors == 1
+    assert summary["semantic_event_first_frame_diagnostics"]["person_waving"] == {
+        "expected_frame": 12,
+        "actual_frame": None,
+        "delta_frames": None,
+        "within_tolerance": False,
+    }
+    assert summary["semantic_event_timeline_violations"] == [
+        {
+            "code": "expected_trigger_missing",
+            "event": "person_waving",
+            "expected_frame": 12,
+            "actual_frame": None,
+            "delta_frames": None,
+            "tolerance_frames": 3,
+        }
+    ]
+    assert _stats_passed(stats, gate="events") is False
+
+
+@pytest.mark.asyncio
+async def test_events_gate_rejects_forbidden_non_hello_waving(tmp_path):
+    scene = tmp_path / "pic_1_r_to_l"
+    write_scene_frames(scene, 48)
+    response_events = [[] for _ in range(48)]
+    response_events[10] = [
+        event_payload(
+            "person_waving",
+            event_id="front:evt_000001",
+            track_id=1,
+        )
+    ]
+    response_events[47] = [
+        event_payload(
+            "person_passing_by",
+            event_id="front:evt_000002",
+            track_id=1,
+        )
+    ]
+    connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400 + index * 100)] for index in range(48)],
+        response_events=response_events,
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.semantic_event_expected_missing == 0
+    assert stats.semantic_event_unexpected_by_scene == 1
+    assert stats.semantic_event_forbidden_events_by_type == {"person_waving": 1}
+    assert _stats_passed(stats, gate="events") is False
+
+
+@pytest.mark.asyncio
+async def test_events_gate_rejects_pic_walk_in_stop_order_violation(tmp_path):
+    scene = tmp_path / "pic_walk_in_stop"
+    write_scene_frames(scene, 64)
+    response_events = [[] for _ in range(64)]
+    response_events[9] = [
+        event_payload(
+            "person_stopped_near_robot",
+            event_id="front:evt_000001",
+            track_id=1,
+        )
+    ]
+    response_events[63] = [
+        event_payload(
+            "person_approaching_robot",
+            event_id="front:evt_000002",
+            track_id=1,
+        )
+    ]
+    connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400 + index * 100)] for index in range(64)],
+        response_events=response_events,
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+    summary = stats_to_summary(stats, gate="events")
+
+    assert stats.semantic_event_order_violations == 1
+    assert summary["semantic_event_order_diagnostics"] == [
+        {
+            "before_event": "person_approaching_robot",
+            "after_event": "person_stopped_near_robot",
+            "before_frame": 63,
+            "after_frame": 9,
+            "passed": False,
+        }
+    ]
+    assert any(
+        violation["code"] == "event_order_violation"
+        for violation in summary["semantic_event_timeline_violations"]
+    )
+    assert _stats_passed(stats, gate="events") is False
 
 
 @pytest.mark.asyncio
@@ -858,36 +1085,35 @@ async def test_events_gate_fails_same_event_type_across_tracks_within_cooldown(t
 @pytest.mark.asyncio
 async def test_events_gate_uses_configured_semantic_event_cooldown(tmp_path):
     scene = tmp_path / "pic_hello"
-    scene.mkdir()
-    write_jpeg(scene / "img_1710000000000000000.jpeg")
-    write_jpeg(scene / "img_1710000000100000000.jpeg")
+    write_scene_frames(scene, 15)
+    response_events = [[] for _ in range(15)]
+    response_events[12] = [
+        event_payload(
+            "person_waving",
+            event_id="front:evt_000001",
+            track_id=1,
+        )
+    ]
+    response_events[14] = [
+        event_payload(
+            "person_waving",
+            event_id="front:evt_000002",
+            track_id=2,
+        )
+    ]
     connector = SequenceResponseConnect(
         [
             [
-                track_payload(1, age_ms=400),
-                track_payload(2, age_ms=400, bbox_xyxy=[300.0, 20.0, 400.0, 220.0]),
-            ],
-            [
-                track_payload(1, age_ms=500),
-                track_payload(2, age_ms=500, bbox_xyxy=[300.0, 20.0, 400.0, 220.0]),
-            ],
+                track_payload(1, age_ms=400 + index * 100),
+                track_payload(
+                    2,
+                    age_ms=400 + index * 100,
+                    bbox_xyxy=[300.0, 20.0, 400.0, 220.0],
+                ),
+            ]
+            for index in range(15)
         ],
-        response_events=[
-            [
-                event_payload(
-                    "person_waving",
-                    event_id="front:evt_000001",
-                    track_id=1,
-                )
-            ],
-            [
-                event_payload(
-                    "person_waving",
-                    event_id="front:evt_000002",
-                    track_id=2,
-                )
-            ],
-        ],
+        response_events=response_events,
     )
 
     stats = await replay_scene(
@@ -988,6 +1214,60 @@ async def test_events_gate_head_motion_unknown_skips_stationary_motion_expectati
     assert _stats_passed(no_event_stats, gate="events") is True
     assert motion_event_stats.semantic_event_motion_sensitive_count == 1
     assert _stats_passed(motion_event_stats, gate="events") is False
+
+
+@pytest.mark.parametrize("head_motion", ["unknown", "moving"])
+@pytest.mark.asyncio
+async def test_events_gate_non_stationary_skips_motion_timing_but_keeps_forbidden(
+    tmp_path,
+    head_motion,
+):
+    scene = tmp_path / "pic_walk_in_stop"
+    write_scene_frames(scene, 1)
+    no_event_connector = SequenceResponseConnect([[track_payload(1, age_ms=400)]])
+    forbidden_connector = SequenceResponseConnect(
+        [[track_payload(1, age_ms=400)]],
+        response_events=[
+            [
+                event_payload(
+                    "person_waving",
+                    event_id="front:evt_000001",
+                    track_id=1,
+                )
+            ]
+        ],
+    )
+
+    no_event_stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion=head_motion,
+        connector=no_event_connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+    forbidden_stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion=head_motion,
+        connector=forbidden_connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert no_event_stats.semantic_event_expected_first_frame_by_type == {}
+    assert no_event_stats.semantic_event_trigger_timing_errors == 0
+    assert _stats_passed(no_event_stats, gate="events") is True
+    assert forbidden_stats.semantic_event_motion_sensitive_count == 0
+    assert forbidden_stats.semantic_event_unexpected_by_scene == 1
+    assert forbidden_stats.semantic_event_forbidden_events_by_type == {
+        "person_waving": 1
+    }
+    assert _stats_passed(forbidden_stats, gate="events") is False
 
 
 def test_parse_args_accepts_events_gate_and_all_includes_events():
@@ -1154,6 +1434,14 @@ async def test_async_main_writes_summary_json(tmp_path, monkeypatch):
             "semantic_event_motion_sensitive_count": 0,
             "semantic_event_expected_missing": 0,
             "semantic_event_unexpected_by_scene": 0,
+            "semantic_event_first_frame_tolerance": 3,
+            "semantic_event_expected_first_frame_by_type": {},
+            "semantic_event_first_frame_diagnostics": {},
+            "semantic_event_trigger_timing_errors": 0,
+            "semantic_event_forbidden_events_by_type": {},
+            "semantic_event_order_violations": 0,
+            "semantic_event_order_diagnostics": [],
+            "semantic_event_timeline_violations": [],
             "tracking_pass": False,
             "attention_pass": False,
             "events_pass": False,

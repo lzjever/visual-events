@@ -884,10 +884,14 @@ def failure_reasons_for(
             reasons.append(
                 f"motion-sensitive events emitted for {stats.head_motion} head motion"
             )
+        elif summary.get("semantic_event_unexpected_by_scene", 0):
+            reasons.append("unexpected semantic events emitted")
+        elif summary.get("semantic_event_trigger_timing_errors", 0):
+            reasons.append("semantic event trigger timing outside tolerance")
+        elif summary.get("semantic_event_order_violations", 0):
+            reasons.append("semantic event order violation")
         elif stats.semantic_event_expected_missing:
             reasons.append("expected semantic events missing")
-        elif stats.semantic_event_unexpected_by_scene:
-            reasons.append("unexpected semantic events emitted")
         else:
             reasons.append("events gate failed")
     if not reasons:

@@ -40,6 +40,7 @@ _MOTION_SENSITIVE_EVENT_TYPES = {
     "person_approaching_robot",
     "person_stopped_near_robot",
 }
+SEMANTIC_EVENT_FIRST_FRAME_TOLERANCE = 3
 _SCENE_EXPECTED_EVENTS = {
     "pci_stand": {"person_appeared", "person_stopped_near_robot"},
     "pic_1_l_to_r": {"person_passing_by"},
@@ -52,10 +53,30 @@ _SCENE_EXPECTED_EVENTS = {
         "person_stopped_near_robot",
     },
 }
+_SCENE_EXPECTED_EVENT_FIRST_FRAMES = {
+    "pci_stand": {"person_stopped_near_robot": 44},
+    "pic_1_l_to_r": {"person_passing_by": 40},
+    "pic_1_r_to_l": {"person_passing_by": 47},
+    "pic_hello": {"person_waving": 12},
+    "pic_leave": {"person_left": 75},
+    "pic_persone_walk_in": {"person_approaching_robot": 39},
+    "pic_walk_in_stop": {
+        "person_approaching_robot": 9,
+        "person_stopped_near_robot": 63,
+    },
+}
 _SCENE_UNEXPECTED_EVENTS = {
-    "pic_1_l_to_r": {"person_stopped_near_robot"},
-    "pic_1_r_to_l": {"person_stopped_near_robot"},
-    "pic_persone_walk_in": {"person_passing_by"},
+    "pci_stand": {"person_waving"},
+    "pic_1_l_to_r": {"person_stopped_near_robot", "person_waving"},
+    "pic_1_r_to_l": {"person_stopped_near_robot", "person_waving"},
+    "pic_leave": {"person_waving"},
+    "pic_persone_walk_in": {"person_passing_by", "person_waving"},
+    "pic_walk_in_stop": {"person_waving"},
+}
+_SCENE_EVENT_ORDER_REQUIREMENTS = {
+    "pic_walk_in_stop": (
+        ("person_approaching_robot", "person_stopped_near_robot"),
+    ),
 }
 
 
@@ -115,6 +136,24 @@ class ReplayStats:
     semantic_event_motion_sensitive_count: int = 0
     semantic_event_expected_missing: int = 0
     semantic_event_unexpected_by_scene: int = 0
+    semantic_event_first_frame_tolerance: int = SEMANTIC_EVENT_FIRST_FRAME_TOLERANCE
+    semantic_event_expected_first_frame_by_type: dict[str, int] = field(
+        default_factory=dict
+    )
+    semantic_event_first_frame_diagnostics: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
+    semantic_event_trigger_timing_errors: int = 0
+    semantic_event_forbidden_events_by_type: dict[str, int] = field(
+        default_factory=dict
+    )
+    semantic_event_order_violations: int = 0
+    semantic_event_order_diagnostics: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+    semantic_event_timeline_violations: list[dict[str, Any]] = field(
+        default_factory=list
+    )
 
     @property
     def ok_rate(self) -> float:
@@ -401,6 +440,30 @@ async def replay_scene(
         semantic_event_unexpected_by_scene=semantic_event_summary[
             "semantic_event_unexpected_by_scene"
         ],
+        semantic_event_first_frame_tolerance=semantic_event_summary[
+            "semantic_event_first_frame_tolerance"
+        ],
+        semantic_event_expected_first_frame_by_type=semantic_event_summary[
+            "semantic_event_expected_first_frame_by_type"
+        ],
+        semantic_event_first_frame_diagnostics=semantic_event_summary[
+            "semantic_event_first_frame_diagnostics"
+        ],
+        semantic_event_trigger_timing_errors=semantic_event_summary[
+            "semantic_event_trigger_timing_errors"
+        ],
+        semantic_event_forbidden_events_by_type=semantic_event_summary[
+            "semantic_event_forbidden_events_by_type"
+        ],
+        semantic_event_order_violations=semantic_event_summary[
+            "semantic_event_order_violations"
+        ],
+        semantic_event_order_diagnostics=semantic_event_summary[
+            "semantic_event_order_diagnostics"
+        ],
+        semantic_event_timeline_violations=semantic_event_summary[
+            "semantic_event_timeline_violations"
+        ],
     )
 
 
@@ -642,6 +705,26 @@ def stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str, 
         ),
         "semantic_event_expected_missing": item.semantic_event_expected_missing,
         "semantic_event_unexpected_by_scene": item.semantic_event_unexpected_by_scene,
+        "semantic_event_first_frame_tolerance": (
+            item.semantic_event_first_frame_tolerance
+        ),
+        "semantic_event_expected_first_frame_by_type": (
+            item.semantic_event_expected_first_frame_by_type
+        ),
+        "semantic_event_first_frame_diagnostics": (
+            item.semantic_event_first_frame_diagnostics
+        ),
+        "semantic_event_trigger_timing_errors": (
+            item.semantic_event_trigger_timing_errors
+        ),
+        "semantic_event_forbidden_events_by_type": (
+            item.semantic_event_forbidden_events_by_type
+        ),
+        "semantic_event_order_violations": item.semantic_event_order_violations,
+        "semantic_event_order_diagnostics": item.semantic_event_order_diagnostics,
+        "semantic_event_timeline_violations": (
+            item.semantic_event_timeline_violations
+        ),
         "tracking_pass": tracking_pass,
         "attention_pass": attention_pass,
         "events_pass": events_pass,
@@ -727,12 +810,135 @@ def _events_stats_passed(item: ReplayStats) -> bool:
         and item.semantic_event_track_missing_frames == 0
         and item.semantic_event_expected_missing == 0
         and item.semantic_event_unexpected_by_scene == 0
+        and item.semantic_event_trigger_timing_errors == 0
+        and item.semantic_event_order_violations == 0
     )
     if not base_pass:
         return False
     if item.head_motion in {"moving", "unknown"}:
         return item.semantic_event_motion_sensitive_count == 0
     return True
+
+
+def _active_expected_first_frames(scene: str, head_motion: str) -> dict[str, int]:
+    expected = dict(_SCENE_EXPECTED_EVENT_FIRST_FRAMES.get(scene, {}))
+    if head_motion in {"moving", "unknown"}:
+        expected = {
+            event: frame
+            for event, frame in expected.items()
+            if event not in _MOTION_SENSITIVE_EVENT_TYPES
+        }
+    return dict(sorted(expected.items()))
+
+
+def _semantic_event_contract_summary(
+    *,
+    scene: str,
+    head_motion: str,
+    counts_by_type: dict[str, int],
+    first_frame_by_type: dict[str, int],
+) -> dict[str, Any]:
+    expected_events = set(_SCENE_EXPECTED_EVENTS.get(scene, set()))
+    if head_motion in {"moving", "unknown"}:
+        expected_events -= _MOTION_SENSITIVE_EVENT_TYPES
+    forbidden_events = set(_SCENE_UNEXPECTED_EVENTS.get(scene, set()))
+    expected_first_frames = _active_expected_first_frames(scene, head_motion)
+
+    first_frame_diagnostics: dict[str, dict[str, Any]] = {}
+    timeline_violations: list[dict[str, Any]] = []
+    trigger_timing_errors = 0
+    for event, expected_frame in expected_first_frames.items():
+        actual_frame = first_frame_by_type.get(event)
+        delta_frames = (
+            None if actual_frame is None else int(actual_frame) - int(expected_frame)
+        )
+        within_tolerance = (
+            delta_frames is not None
+            and abs(delta_frames) <= SEMANTIC_EVENT_FIRST_FRAME_TOLERANCE
+        )
+        first_frame_diagnostics[event] = {
+            "expected_frame": expected_frame,
+            "actual_frame": actual_frame,
+            "delta_frames": delta_frames,
+            "within_tolerance": within_tolerance,
+        }
+        if within_tolerance:
+            continue
+
+        trigger_timing_errors += 1
+        timeline_violations.append(
+            {
+                "code": (
+                    "expected_trigger_missing"
+                    if actual_frame is None
+                    else "trigger_frame_outside_tolerance"
+                ),
+                "event": event,
+                "expected_frame": expected_frame,
+                "actual_frame": actual_frame,
+                "delta_frames": delta_frames,
+                "tolerance_frames": SEMANTIC_EVENT_FIRST_FRAME_TOLERANCE,
+            }
+        )
+
+    forbidden_events_by_type = {
+        event: counts_by_type[event]
+        for event in sorted(forbidden_events)
+        if counts_by_type.get(event, 0) > 0
+    }
+
+    order_diagnostics: list[dict[str, Any]] = []
+    order_violations = 0
+    for before_event, after_event in _SCENE_EVENT_ORDER_REQUIREMENTS.get(scene, ()):
+        if head_motion in {"moving", "unknown"} and (
+            before_event in _MOTION_SENSITIVE_EVENT_TYPES
+            or after_event in _MOTION_SENSITIVE_EVENT_TYPES
+        ):
+            continue
+        before_frame = first_frame_by_type.get(before_event)
+        after_frame = first_frame_by_type.get(after_event)
+        if before_frame is None or after_frame is None:
+            continue
+        passed = before_frame < after_frame
+        order_diagnostics.append(
+            {
+                "before_event": before_event,
+                "after_event": after_event,
+                "before_frame": before_frame,
+                "after_frame": after_frame,
+                "passed": passed,
+            }
+        )
+        if passed:
+            continue
+
+        order_violations += 1
+        timeline_violations.append(
+            {
+                "code": "event_order_violation",
+                "before_event": before_event,
+                "after_event": after_event,
+                "before_frame": before_frame,
+                "after_frame": after_frame,
+            }
+        )
+
+    return {
+        "semantic_event_expected_missing": sum(
+            1 for event in expected_events if counts_by_type.get(event, 0) == 0
+        ),
+        "semantic_event_unexpected_by_scene": len(forbidden_events_by_type),
+        "semantic_event_first_frame_tolerance": (
+            SEMANTIC_EVENT_FIRST_FRAME_TOLERANCE
+        ),
+        "semantic_event_expected_first_frame_by_type": expected_first_frames,
+        "semantic_event_first_frame_diagnostics": first_frame_diagnostics,
+        "semantic_event_trigger_timing_errors": trigger_timing_errors,
+        "semantic_event_forbidden_events_by_type": forbidden_events_by_type,
+        "semantic_event_order_violations": order_violations,
+        "semantic_event_order_diagnostics": order_diagnostics,
+        "semantic_event_timeline_violations": timeline_violations,
+    }
 
 
 @dataclass
@@ -835,10 +1041,12 @@ class _SemanticEventStatsAccumulator:
             self.semantic_event_track_missing_frames += 1
 
     def summary(self) -> dict[str, Any]:
-        expected_events = set(_SCENE_EXPECTED_EVENTS.get(self.scene, set()))
-        if self.head_motion in {"moving", "unknown"}:
-            expected_events -= _MOTION_SENSITIVE_EVENT_TYPES
-        unexpected_events = set(_SCENE_UNEXPECTED_EVENTS.get(self.scene, set()))
+        contract_summary = _semantic_event_contract_summary(
+            scene=self.scene,
+            head_motion=self.head_motion,
+            counts_by_type=self._counts_by_type,
+            first_frame_by_type=self._first_frame_by_type,
+        )
         return {
             "semantic_event_frames": self.semantic_event_frames,
             "semantic_event_count": self.semantic_event_count,
@@ -866,14 +1074,7 @@ class _SemanticEventStatsAccumulator:
             "semantic_event_motion_sensitive_count": (
                 self.semantic_event_motion_sensitive_count
             ),
-            "semantic_event_expected_missing": sum(
-                1 for event in expected_events if self._counts_by_type.get(event, 0) == 0
-            ),
-            "semantic_event_unexpected_by_scene": sum(
-                1
-                for event in unexpected_events
-                if self._counts_by_type.get(event, 0) > 0
-            ),
+            **contract_summary,
         }
 
 

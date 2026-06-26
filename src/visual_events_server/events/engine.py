@@ -35,6 +35,9 @@ _EVENT_TEXT = {
     "attention_target_changed": "注意目标已切换",
 }
 
+_WAVE_WRIST_ABOVE_SHOULDER_MIN_PX = 4.0
+_WAVE_WRIST_ABOVE_SHOULDER_MIN_BBOX_RATIO = 0.03
+
 
 @dataclass(frozen=True)
 class EventConfig:
@@ -638,10 +641,12 @@ class EventEngine:
                 wrist = _keypoint_by_name(observation.keypoints, f"{side}_wrist")
                 if shoulder is None or wrist is None:
                     continue
-                if not self._valid_keypoint(shoulder) or not self._valid_keypoint(wrist):
-                    continue
                 bbox_height = _bbox_height(observation.bbox_xyxy)
-                if wrist.y > shoulder.y + (bbox_height * 0.15):
+                if not self._is_wave_pose_sample(
+                    shoulder=shoulder,
+                    wrist=wrist,
+                    bbox_height=bbox_height,
+                ):
                     continue
                 samples.append(
                     (
@@ -664,6 +669,21 @@ class EventEngine:
                 continue
             return samples[-1][0] - samples[0][0], sum(sample[2] for sample in samples) / len(samples)
         return None
+
+    def _is_wave_pose_sample(
+        self,
+        *,
+        shoulder: PoseKeypoint,
+        wrist: PoseKeypoint,
+        bbox_height: float,
+    ) -> bool:
+        if not self._valid_keypoint(shoulder) or not self._valid_keypoint(wrist):
+            return False
+        min_vertical_clearance = max(
+            _WAVE_WRIST_ABOVE_SHOULDER_MIN_PX,
+            float(bbox_height) * _WAVE_WRIST_ABOVE_SHOULDER_MIN_BBOX_RATIO,
+        )
+        return float(wrist.y) <= float(shoulder.y) - min_vertical_clearance
 
     def _valid_keypoint(self, keypoint: PoseKeypoint) -> bool:
         confidence = keypoint.confidence

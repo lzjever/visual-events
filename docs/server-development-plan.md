@@ -1,6 +1,6 @@
 # Visual Events Server 开发计划
 
-日期：2026-06-26
+日期：2026-06-27
 
 ## 1. 目标
 
@@ -16,7 +16,7 @@ Server 的目标是接收符合 [protocol.md](../common/schema/protocol.md) 的 
 - `person_waving`
 - `attention_target_changed`
 
-`val-data/` 是本阶段端到端验证的强制数据源。任何 server 端 handoff 都必须用 `val-data/` 跑通协议、推理、追踪、事件、attention 和性能测试。`val-data/` 已在 `.gitignore` 中，不允许提交到 Git。缺失 `val-data/` 时 E2E 必须 fail，不能自动降级成 mock pass。
+`val-data/` 是本阶段端到端验证的强制数据源。任何 server 端 handoff 都必须用 `val-data/` 跑通协议、推理、追踪、事件、attention 和性能测试。S6.3 在 `val-data/` 上增加 semantic event first-trigger/timeline gate。`val-data/` 已在 `.gitignore` 中，不允许提交到 Git。缺失 `val-data/` 时 E2E 必须 fail，不能自动降级成 mock pass。
 
 ## 2. 非目标
 
@@ -59,7 +59,7 @@ Server 的目标是接收符合 [protocol.md](../common/schema/protocol.md) 的 
 - 回放顺序按文件名排序。
 - 文件名中的数字按纳秒时间戳解析，转成 `timestamp_ms`；无法解析时使用回放序号和默认 10Hz 时间。
 - E2E full matrix 包含三轮：`stationary` 全量 7 scene、`unknown` 全量 7 scene、`moving` targeted 5 scene。
-- `stationary` 全量轮跑完整 `all` gate；`unknown` 全量轮只验证运动敏感事件 suppression；`moving` targeted 轮只跑事件抑制 gate。
+- `stationary` 全量轮跑完整 `all` gate，并包含 S6.3 semantic event first-trigger/timeline gate；`unknown` 全量轮只验证运动敏感事件 suppression；`moving` targeted 轮只跑事件抑制 gate。
 - `moving` targeted scene 固定为：`pci_stand`、`pic_1_l_to_r`、`pic_1_r_to_l`、`pic_persone_walk_in`、`pic_walk_in_stop`。
 
 ## 4. 架构
@@ -113,7 +113,7 @@ artifacts/      # ignored: replay/e2e/perf outputs
 | `attention` | 选择最大稳定人物和 `target_uv` |
 | `events` | 基于 track history 生成 V1 `semantic_events` |
 | `tools/replay_val_data.py` | 测试回放客户端，不是产品 CLI |
-| `tools/run_val_data_e2e.py` | 当前 E2E/soak 验证工具，输出轻量 `artifacts/perf/server_perf.json`；不是完整 server metrics module |
+| `tools/run_val_data_e2e.py` | 当前 E2E/soak/event timeline 验证工具，输出轻量 `artifacts/perf/server_perf.json`；不是完整 server metrics module |
 | `tools/run_runtime_smoke.py` | release/runtime 启动 smoke verification，不是产品 CLI，也不是 `val-data` E2E 替代品 |
 
 环境约束：
@@ -122,7 +122,7 @@ artifacts/      # ignored: replay/e2e/perf outputs
 - `tools/` 和 `tests/` 是开发/验证目录，不属于正式 robot CLI。
 - 开发环境使用项目内 `.venv/` 和 `.uv-cache/`。
 - release/runtime 环境使用项目内 `runtime/venv/` 和 `runtime/cache/uv/`。
-- 当前 runtime package 不包含 `metrics.py`。S6/S6.1/S6.2 的性能证据来自 `tools/run_val_data_e2e.py` 输出的轻量 perf report；完整 server metrics module、phase latency、VRAM 和长期 metrics pipeline 是后续可观测性工作。
+- 当前 runtime package 不包含 `metrics.py`。S6+ 性能证据来自 `tools/run_val_data_e2e.py` 输出的轻量 perf report；完整 server metrics module、phase latency、VRAM 和长期 metrics pipeline 是后续可观测性工作。
 - inference runtime cache 必须收敛在 `runtime/cache/*`；server 设置 `YOLO_CONFIG_DIR`、`TORCH_HOME`、`XDG_CACHE_HOME`、`MPLCONFIGDIR`，不改 `HOME`。
 - `val-data/`、`runtime/`、`artifacts/`、模型缓存和测试产物不得进入 Git。
 - `uv.lock` 必须进入 Git，用于 release/runtime 的 `--frozen` 安装。
@@ -228,7 +228,7 @@ V1 事件由 `EventEngine` 生成。
 | `person_passing_by` | 横向位移明显，从画面一侧通过，未进入近区停留 |
 | `person_approaching_robot` | bbox 面积或高度持续增大，并向中心/近区移动至少 0.5s |
 | `person_stopped_near_robot` | bbox 足够大且中心速度低，持续至少 1.5s |
-| `person_waving` | 使用 server 内部 keypoints：手腕在肩部附近或以上，并在 1-2s 内出现横向方向变化；keypoints 不进入 wire protocol |
+| `person_waving` | 使用 server 内部 keypoints：挥动手腕必须清楚高于肩部，并在 1-2s 内出现横向方向变化；keypoints 不进入 wire protocol |
 | `attention_target_changed` | attention target 稳定切换 |
 
 运动敏感事件：
@@ -245,6 +245,7 @@ V1 事件由 `EventEngine` 生成。
 - 同 track 同事件 5s 去重。
 - 同帧可输出多个不同事件，按固定顺序：`person_appeared`、`person_left`、`person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot`、`person_waving`、`attention_target_changed`。
 - `person_appeared` 不对背景所有人刷屏，只对当前 salient target 触发。
+- `person_waving` 保守处理走路摆臂：手腕未清楚高于肩部时不算挥手。S6.3 regression 关闭 `pic_1_r_to_l` walking-arm-swing false positive，并保留 `pic_hello` frame 12 的 `person_waving`。
 
 ## 7. Attention
 
@@ -396,6 +397,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 - Full matrix 必须跑完：`stationary` 全量 7 scene、`unknown` 全量 7 scene、`moving` targeted 5 scene。
 - `moving` targeted cases 只作为 `head_motion=moving` 的事件抑制 gate，不作为 tracking、attention 或 correctness 长矩阵。
+- `stationary` 全量 `all` gate 必须包含 S6.3 semantic event first-trigger/timeline checks。
 - 生成 per-scene 事件摘要、latency 统计、错误帧统计。
 - 失败时返回非零 exit code。
 
@@ -513,6 +515,23 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - runtime server 300s soak 通过：`soak.enabled == true`、`soak.passed == true`、Hz >= 9、p95 < 120ms、p99 < 200ms、error rate < 1%、RSS growth <= configured max。
 - `val-data/`、`runtime/`、`artifacts/`、模型文件和 cache 仍未被 Git 跟踪。
 
+### S6.3 Semantic Event Timeline Gate
+
+目标：
+
+- 把 semantic event 验收从场景级存在/不存在 smoke 提升为 first-trigger/timeline gate。
+- 在 `val-data/` stationary `all` gate 中检查 expected first trigger frame tolerance <= 3 frames、forbidden scene events 和 `pic_walk_in_stop` event ordering。
+- 保持 gate 轻量；它不是 dense per-frame manual annotation。
+
+验收：
+
+- `pic_1_r_to_l` stationary：`person_passing_by` first = expected first = 47；不触发 `person_waving`；`timing_errors == 0`、`forbidden == {}`、`order_violations == 0`。
+- `pic_hello`：`person_waving` first = expected first = 12。
+- `pic_walk_in_stop`：`person_approaching_robot` first = 9，`person_stopped_near_robot` first = 63，approaching-before-stopped ordering passes。
+- 挥手规则要求手腕清楚高于肩部，关闭 `pic_1_r_to_l` walking-arm-swing false positive，同时保留 `pic_hello` frame 12 true positive。
+
+Latest runtime release validation evidence is recorded in [`docs/server-handoff.md`](server-handoff.md): runtime smoke, full `val-data` E2E 19-case matrix, perf report, and 300s soak all passed with ignored artifact hashes.
+
 ## 9. 测试计划
 
 ### Unit
@@ -570,6 +589,7 @@ S6 full matrix case 目录规则：
 - `stationary` 全量 7 scene：`artifacts/e2e/<scene>/...`
 - `unknown` 全量 7 scene：`artifacts/e2e/<scene>__head_unknown/...`
 - `moving` targeted 5 scene：`artifacts/e2e/<scene>__head_moving/...`
+- S6.3 first-trigger/timeline gate 随 `stationary` 全量 `all` gate 运行，检查 expected first trigger frame tolerance <= 3 frames、forbidden scene events 和 `pic_walk_in_stop` ordering。
 
 输出产物必须落在 `artifacts/` 下，不能写回 `val-data/`。
 
@@ -603,6 +623,8 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 该 smoke 只证明 release/runtime server 可启动，并且 `/healthz` 返回的 `pid` 与本次启动的 server process 一致；最终 handoff 仍必须用同一个 runtime server 跑上面的 `val-data` full matrix + 300s soak。
 
+S6.3 semantic event timeline gate 必须随 full matrix 通过；不能只用事件是否出现的场景级 smoke 代替 first-trigger/timeline evidence。
+
 ### Performance
 
 统计范围：server 收到完整 frame 到发出 response。
@@ -630,17 +652,18 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 | 事件 | `person_passing_by` | `pic_1_l_to_r`、`pic_1_r_to_l` | 每段触发 1 次，不能触发 `person_stopped_near_robot` |
 | 事件 | `person_approaching_robot` | `pic_persone_walk_in` | 触发 1 次，触发点应在 bbox 面积/高度连续增大之后 |
 | 事件 | `person_stopped_near_robot` | `pic_walk_in_stop`、`pci_stand` | 稳定停留后触发 1 次；cooldown 内不重复 |
-| 事件 | `person_waving` | `pic_hello` | 触发 1 次；其他非挥手目录不得频繁误报 |
+| 事件 | `person_waving` | `pic_hello` | 触发 1 次；first trigger frame 12 within tolerance；其他非挥手目录不得误报走路摆臂 |
 | 事件 | `person_left` | `pic_leave` | track 丢失 TTL 后触发 1 次 |
 | 事件抑制 | `unknown` 全量运动敏感事件抑制 | 全部 `val-data`，`head_motion=unknown` | 不触发 `passing_by/approaching/stopped`；只作为 events gate |
 | 事件抑制 | `moving` targeted 运动敏感事件抑制 | `pci_stand`、`pic_1_l_to_r`、`pic_1_r_to_l`、`pic_persone_walk_in`、`pic_walk_in_stop`，`head_motion=moving` | 不触发 `passing_by/approaching/stopped`；只作为 events gate，输出 `__head_moving` artifacts |
-| 事件 gate | replay events summary | Full matrix：`stationary` 7 + `unknown` 7 + `moving` targeted 5 | `stationary` 用 `--gate all` 检查 tracking、attention、events；`unknown`/`moving` 用 `--gate events` 检查 suppression |
+| 事件 timeline gate | first trigger、forbidden events、event ordering | Full matrix stationary 7 scene | expected first trigger frame tolerance <= 3 frames；forbidden scene events empty；`pic_walk_in_stop` approaching before stopped；`timing_errors == 0`、`order_violations == 0` |
+| 事件 gate | replay events summary | Full matrix：`stationary` 7 + `unknown` 7 + `moving` targeted 5 | `stationary` 用 `--gate all` 检查 tracking、attention、events 和 S6.3 timeline；`unknown`/`moving` 用 `--gate events` 检查 suppression |
 | Attention | 最大稳定人物 | 全部 `val-data` | 存在稳定 visible person 或短暂 lost hold 时，`attention.target_track_id` 指向 selector 目标；无稳定目标且无 lost hold 时允许 `attention=null` |
 | Attention | 注视点合法 | 全部 `val-data` | `target_uv` 在图像范围内 |
 | 性能 | server GPU soak | `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 循环 `stationary` + `unknown` cases | `soak.passed == true`；Hz >= 9，P95 < 120ms，P99 < 200ms，error rate < 1%，RSS growth <= configured max；`cases_completed` 不包含 `__head_moving` |
 | Release/runtime | `runtime/venv` server smoke | `tools/run_runtime_smoke.py --config runtime/config/s2.toml` | `artifacts/runtime-smoke/report.json` 中 `passed == true`；`healthz_pid == server_pid`；`healthz_identity_verified == true`；sync env 指向 `runtime/cache/uv` 和 `runtime/venv`；server command 指向 `runtime/venv/bin/visual-events-server` |
 | Release/runtime | runtime server E2E/soak | `runtime/venv/bin/visual-events-server --config runtime/config/s2.toml` + `tools/run_val_data_e2e.py --soak-seconds 300` | full matrix 19 cases 通过；300s soak 通过；artifact hash 和关键指标写入 handoff |
-| 回归 | 固定数据回放 | 全部 `val-data` | 事件类型、数量、顺序稳定；触发帧偏差 <= 3 帧或 <= 300ms |
+| 回归 | 固定数据回放 | 全部 `val-data` | 事件类型、数量、顺序稳定；S6.3 first trigger frame 偏差 <= 3 帧 |
 
 ## 11. E2E 验收矩阵
 
@@ -648,11 +671,11 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 | --- | --- | --- |
 | `pci_stand` | `person_appeared`, `person_stopped_near_robot`, stable `attention` | repeated event spam |
 | `pic_1_l_to_r` | `person_passing_by` | `person_stopped_near_robot` |
-| `pic_1_r_to_l` | `person_passing_by` | `person_stopped_near_robot` |
-| `pic_hello` | `person_waving` | repeated `person_waving` within cooldown |
+| `pic_1_r_to_l` | `person_passing_by` first frame 47 | `person_stopped_near_robot`, `person_waving` |
+| `pic_hello` | `person_waving` first frame 12 | repeated `person_waving` within cooldown |
 | `pic_leave` | `person_left` | premature `person_left` before lost TTL |
 | `pic_persone_walk_in` | `person_approaching_robot` | `person_passing_by` |
-| `pic_walk_in_stop` | `person_approaching_robot`, then `person_stopped_near_robot` | repeated cooldown spam |
+| `pic_walk_in_stop` | `person_approaching_robot` first frame 9, then `person_stopped_near_robot` first frame 63 | repeated cooldown spam |
 
 第二轮 gating：
 
@@ -684,6 +707,8 @@ artifacts/e2e/<case>/visual_state.jsonl
 ```json
 {"frame_id":12,"latency_ms":43.2,"response":{"type":"visual_state"}}
 ```
+
+S6.3 event timeline summary fields must preserve first-trigger evidence, forbidden event evidence, `timing_errors`, and `order_violations` for the stationary `all` gate.
 
 场景汇总：
 
@@ -759,6 +784,7 @@ Server handoff 必须包含：
 - Release/runtime smoke 报告：`artifacts/runtime-smoke/report.json`，证明 `runtime/venv` server 可启动，并且 `/healthz` 返回的 pid 与本次 server process 一致。
 - Full matrix `val-data/` E2E 报告：`stationary` 全量、`unknown` 全量 suppression、`moving` targeted suppression。
 - 性能报告。
+- S6.3 semantic event first-trigger/timeline gate evidence：expected first trigger frame tolerance <= 3 frames、forbidden scene events 和 `pic_walk_in_stop` ordering。
 - 如 handoff 声称 S6.1/S7 5 分钟 soak 已通过，必须包含 runner 命令、`artifacts/e2e/soak/loop_0001/...` 证据路径、`report.json` 和 `server_perf.json` 中的 `soak` 摘要。
 - 如 handoff 声称 release/runtime 已验证，full matrix 和 soak 必须跑在 `runtime/venv/bin/visual-events-server` 上，不能只使用 source `.venv` server。
 - `docs/server-handoff.md` 中的模型权重和授权说明。
@@ -771,6 +797,7 @@ Server handoff 必须包含：
 - `val-data/` 被加入 Git。
 - 声称 release/runtime 已验证，但没有 `artifacts/runtime-smoke/report.json` 或没有 runtime server E2E/soak 证据。
 - 运动敏感事件在 `head_motion=unknown` 或 `moving` 时仍触发。
+- S6.3 event correctness 没有 first-trigger/timeline evidence。
 - server 输出不符合 [protocol.md](../common/schema/protocol.md)。
 - server 内部事件规则依赖正式 robot CLI。
 - 未输出 `summary.json` 和 `server_perf.json`。
@@ -784,7 +811,7 @@ Server handoff 必须包含：
 - `val-data/` 必须用于 E2E 验证，但不得提交到 Git。
 - 高频 `visual_state` 是 server 输出，不等于 Botified 事件。
 - `semantic_events` 由 server 生成；未来 CLI 只做 `event_id` 幂等输出，不重新实现规则。
-- `person_waving` 使用 server 内部 keypoints；keypoints 不输出到协议 tracks。
+- `person_waving` 使用 server 内部 keypoints；挥动手腕必须清楚高于肩部；keypoints 不输出到协议 tracks。
 - `head_motion` 缺失等价于 `unknown`。
 - `moving/unknown` 时不触发运动敏感事件。
 - `approaching_robot` 是基于图像 bbox/运动趋势的近似，不代表真实 3D 距离估计。
@@ -799,11 +826,11 @@ Server handoff 必须包含：
 
 | 风险 | 处理 |
 | --- | --- |
-| `val-data/` 没有人工标注 | V1 使用场景级期望和事件摘要验收；必要时后续增加轻量 annotation |
+| `val-data/` 没有 dense per-frame 人工标注 | V1 使用 first-trigger/timeline gate、forbidden scene events 和事件摘要验收；必要时后续增加轻量 annotation |
 | pose 模型漏检导致事件漏报 | 先调阈值和 track TTL，不训练模型 |
 | Tracker ID switch 影响事件 | 加 track 稳定帧数和 cooldown，避免一抖就发事件 |
 | 头部运动状态缺失 | 按协议视为 `unknown`，禁用运动敏感事件 |
-| 挥手规则误报 | 规则保守，要求关键点可见和短时间方向变化 |
+| 挥手规则误报 | 规则保守，要求关键点可见、手腕清楚高于肩部和短时间方向变化 |
 | Ultralytics 授权 | 授权未确认前仅做内部 POC/性能验证 |
 | RK3588 后续迁移 | 保持 `InferBackend`，不把 Ultralytics result 泄漏到业务层 |
 

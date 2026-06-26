@@ -356,6 +356,93 @@ async def test_any_replay_gate_failure_returns_nonzero_and_reports_reason(
 
 
 @pytest.mark.asyncio
+async def test_event_timing_failure_returns_nonzero_and_reports_reason(
+    tmp_path,
+    monkeypatch,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+
+    async def fake_replay_scene(**kwargs):
+        scene = Path(kwargs["scene_dir"]).name
+        write_fake_jsonl(kwargs["save_jsonl"])
+        stats = passing_stats(scene, kwargs["head_motion"])
+        if kwargs["head_motion"] == "stationary" and scene == "pic_hello":
+            stats = ReplayStats(
+                scene=scene,
+                frames_sent=3,
+                frames_ok=3,
+                errors=0,
+                elapsed_s=0.3,
+                head_motion="stationary",
+                track_frames=3,
+                visible_counts_by_id={"1": 3},
+                attention_frames=3,
+                attention_target_counts_by_id={"1": 3},
+                semantic_event_counts_by_type={"person_waving": 1},
+                semantic_event_first_frame_by_type={"person_waving": 20},
+                semantic_event_first_frame_tolerance=3,
+                semantic_event_expected_first_frame_by_type={"person_waving": 12},
+                semantic_event_first_frame_diagnostics={
+                    "person_waving": {
+                        "expected_frame": 12,
+                        "actual_frame": 20,
+                        "delta_frames": 8,
+                        "within_tolerance": False,
+                    }
+                },
+                semantic_event_trigger_timing_errors=1,
+                semantic_event_timeline_violations=[
+                    {
+                        "code": "trigger_frame_outside_tolerance",
+                        "event": "person_waving",
+                        "expected_frame": 12,
+                        "actual_frame": 20,
+                        "delta_frames": 8,
+                        "tolerance_frames": 3,
+                    }
+                ],
+            )
+        return stats
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 1
+    report = json.loads((out / "report.json").read_text())
+    failed = [case for case in report["cases"] if not case["passed"]]
+    assert [case["case"] for case in failed] == ["pic_hello"]
+    assert "semantic event trigger timing outside tolerance" in failed[0][
+        "failure_reasons"
+    ]
+    summary = json.loads(
+        Path(failed[0]["artifacts"]["summary_json"]).read_text(encoding="utf-8")
+    )
+    assert summary["semantic_event_trigger_timing_errors"] == 1
+    assert summary["semantic_event_timeline_violations"] == [
+        {
+            "code": "trigger_frame_outside_tolerance",
+            "event": "person_waving",
+            "expected_frame": 12,
+            "actual_frame": 20,
+            "delta_frames": 8,
+            "tolerance_frames": 3,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_replay_exception_writes_failure_report_and_perf(tmp_path, monkeypatch):
     data_dir = make_val_data_root(tmp_path)
     out = tmp_path / "artifacts" / "e2e"
