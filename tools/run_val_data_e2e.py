@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,9 @@ REQUIRED_SCENE_NAMES = (
 DEFAULT_OUT = Path("artifacts/e2e")
 DEFAULT_CAMERA = "front"
 DEFAULT_FPS = 10.0
+DEFAULT_SOAK_MEMORY_GROWTH_MAX_MB = 64.0
+DEFAULT_SOAK_SAMPLE_INTERVAL_S = 10.0
+_perf_counter = time.perf_counter
 _JPEG_GLOBS = ("*.jpeg", "*.jpg")
 _HZ_MIN = 9.0
 _TOTAL_LATENCY_P95_MAX_MS = 120.0
@@ -94,6 +98,16 @@ class PreflightError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class RunConfig:
+    server: str
+    camera: str
+    fps: float
+    realtime: bool
+    response_timeout_ms: int | None
+    semantic_event_cooldown_ms: int
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the full val-data E2E gate against visual-events-server."
@@ -104,6 +118,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--camera", default=DEFAULT_CAMERA)
     parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
     parser.add_argument("--response-timeout-ms", type=int, default=None)
+    parser.add_argument(
+        "--soak-seconds",
+        type=float,
+        default=0.0,
+        help="Run complete val-data loops until this runner wall-clock target is met.",
+    )
+    parser.add_argument(
+        "--server-pid",
+        type=int,
+        default=None,
+        help="Server process PID used for soak VmRSS sampling.",
+    )
+    parser.add_argument(
+        "--soak-memory-growth-max-mb",
+        type=float,
+        default=DEFAULT_SOAK_MEMORY_GROWTH_MAX_MB,
+    )
+    parser.add_argument(
+        "--soak-sample-interval-s",
+        type=float,
+        default=DEFAULT_SOAK_SAMPLE_INTERVAL_S,
+    )
     parser.add_argument(
         "--semantic-event-cooldown-ms",
         type=int,
@@ -126,6 +162,20 @@ async def async_main(argv: list[str] | None = None) -> int:
             raise PreflightError("fps must be positive")
         if args.response_timeout_ms is not None and args.response_timeout_ms <= 0:
             raise PreflightError("response-timeout-ms must be positive")
+        if args.soak_seconds < 0.0:
+            raise PreflightError("soak-seconds must be non-negative")
+        if args.server_pid is not None and args.server_pid <= 0:
+            raise PreflightError("server-pid must be positive")
+        if args.soak_memory_growth_max_mb < 0.0:
+            raise PreflightError("soak-memory-growth-max-mb must be non-negative")
+        if args.soak_sample_interval_s <= 0.0:
+            raise PreflightError("soak-sample-interval-s must be positive")
+        if args.soak_seconds > 0.0 and args.response_timeout_ms is None:
+            raise PreflightError("soak requires response-timeout-ms")
+        if args.soak_seconds > 0.0 and args.server_pid is None:
+            raise PreflightError("soak requires server-pid")
+        if args.soak_seconds > 0.0 and args.no_realtime:
+            raise PreflightError("soak requires realtime playback")
         if args.semantic_event_cooldown_ms < 0:
             raise PreflightError("semantic-event-cooldown-ms must be non-negative")
     except PreflightError as exc:
@@ -133,47 +183,62 @@ async def async_main(argv: list[str] | None = None) -> int:
         return 1
 
     cases: list[CaseResult] = []
+    soak_report = build_soak_report_disabled()
+    config = RunConfig(
+        server=args.server,
+        camera=args.camera,
+        fps=args.fps,
+        realtime=not args.no_realtime,
+        response_timeout_ms=args.response_timeout_ms,
+        semantic_event_cooldown_ms=args.semantic_event_cooldown_ms,
+    )
     try:
-        for scene_dir in scene_dirs:
-            cases.append(
-                await _run_case(
-                    server=args.server,
-                    scene_dir=scene_dir,
-                    out=args.out,
-                    camera=args.camera,
-                    fps=args.fps,
-                    head_motion="stationary",
-                    gate="all",
-                    realtime=not args.no_realtime,
-                    response_timeout_ms=args.response_timeout_ms,
-                    semantic_event_cooldown_ms=args.semantic_event_cooldown_ms,
+        soak_started = False
+        initial_rss_mb = None
+        await _run_full_matrix(scene_dirs, out=args.out, config=config, cases=cases)
+
+        if args.soak_seconds > 0.0:
+            initial_rss_mb = read_process_rss_mb(args.server_pid)
+            if initial_rss_mb is None:
+                soak_report = build_failed_soak_report(
+                    failure_reasons=["soak_rss_unavailable"],
+                    target_seconds=args.soak_seconds,
+                    server_pid=args.server_pid,
+                    memory_growth_max_mb=args.soak_memory_growth_max_mb,
                 )
+                perf_report = build_perf_report(cases, soak_report=soak_report)
+                report = build_e2e_report(cases, perf_report=perf_report)
+                _write_json(args.out / "report.json", report)
+                _write_json(args.out.parent / "perf" / "server_perf.json", perf_report)
+                return 1
+            soak_started = True
+            soak_report = await _run_soak(
+                scene_dirs,
+                out=args.out / "soak",
+                config=config,
+                target_seconds=args.soak_seconds,
+                server_pid=args.server_pid,
+                initial_rss_mb=initial_rss_mb,
+                memory_growth_max_mb=args.soak_memory_growth_max_mb,
+                sample_interval_s=args.soak_sample_interval_s,
             )
 
-        for scene_dir in scene_dirs:
-            cases.append(
-                await _run_case(
-                    server=args.server,
-                    scene_dir=scene_dir,
-                    out=args.out,
-                    camera=args.camera,
-                    fps=args.fps,
-                    head_motion="unknown",
-                    gate="events",
-                    realtime=not args.no_realtime,
-                    response_timeout_ms=args.response_timeout_ms,
-                    semantic_event_cooldown_ms=args.semantic_event_cooldown_ms,
-                )
-            )
-
-        perf_report = build_perf_report(cases)
+        perf_report = build_perf_report(cases, soak_report=soak_report)
         report = build_e2e_report(cases, perf_report=perf_report)
         _write_json(args.out / "report.json", report)
         perf_path = args.out.parent / "perf" / "server_perf.json"
         _write_json(perf_path, perf_report)
     except Exception as exc:
         print(f"e2e failed: {exc}", file=sys.stderr)
-        _write_failure_artifacts(args.out, cases=cases, exc=exc)
+        if soak_started:
+            soak_report = build_failed_soak_report(
+                failure_reasons=[f"soak_exception: {type(exc).__name__}: {exc}"],
+                target_seconds=args.soak_seconds,
+                server_pid=args.server_pid,
+                memory_growth_max_mb=args.soak_memory_growth_max_mb,
+                initial_rss_mb=initial_rss_mb,
+            )
+        _write_failure_artifacts(args.out, cases=cases, exc=exc, soak_report=soak_report)
         return 1
 
     return 0 if report["overall_pass"] else 1
@@ -221,6 +286,163 @@ def preflight_out_path(out: Path, *, data_dir: Path) -> None:
         resolved_data_dir
     ):
         raise PreflightError("out must not be inside data-dir")
+
+
+async def _run_full_matrix(
+    scene_dirs: list[Path],
+    *,
+    out: Path,
+    config: RunConfig,
+    cases: list[CaseResult] | None = None,
+) -> list[CaseResult]:
+    results: list[CaseResult] = [] if cases is None else cases
+    for scene_dir in scene_dirs:
+        results.append(
+            await _run_case(
+                server=config.server,
+                scene_dir=scene_dir,
+                out=out,
+                camera=config.camera,
+                fps=config.fps,
+                head_motion="stationary",
+                gate="all",
+                realtime=config.realtime,
+                response_timeout_ms=config.response_timeout_ms,
+                semantic_event_cooldown_ms=config.semantic_event_cooldown_ms,
+            )
+        )
+
+    for scene_dir in scene_dirs:
+        results.append(
+            await _run_case(
+                server=config.server,
+                scene_dir=scene_dir,
+                out=out,
+                camera=config.camera,
+                fps=config.fps,
+                head_motion="unknown",
+                gate="events",
+                realtime=config.realtime,
+                response_timeout_ms=config.response_timeout_ms,
+                semantic_event_cooldown_ms=config.semantic_event_cooldown_ms,
+            )
+        )
+    return results
+
+
+async def _run_soak(
+    scene_dirs: list[Path],
+    *,
+    out: Path,
+    config: RunConfig,
+    target_seconds: float,
+    server_pid: int | None,
+    initial_rss_mb: float | None,
+    memory_growth_max_mb: float,
+    sample_interval_s: float,
+) -> dict[str, Any]:
+    rss_samples: list[float] = []
+    rss_unavailable = False
+    if initial_rss_mb is None:
+        rss_unavailable = True
+    else:
+        rss_samples.append(initial_rss_mb)
+
+    failure_reasons: list[str] = []
+    loops_completed = 0
+    elapsed_s = 0.0
+    cases_completed = 0
+    frames_sent = 0
+    frames_ok = 0
+    errors = 0
+    stats_elapsed_s = 0.0
+    latencies: list[float] = []
+    last_sample_elapsed_s = 0.0
+    started_s = _perf_counter()
+
+    while True:
+        loops_completed += 1
+        loop_out = out / f"loop_{loops_completed:04d}"
+        loop_cases = await _run_full_matrix(scene_dirs, out=loop_out, config=config)
+        cases_completed += len(loop_cases)
+        for case in loop_cases:
+            frames_sent += case.stats.frames_sent
+            frames_ok += case.stats.frames_ok
+            errors += case.stats.errors
+            stats_elapsed_s += max(0.0, case.stats.elapsed_s)
+            latencies.extend(
+                read_latency_samples(Path(case.artifacts["visual_state_jsonl"]))
+            )
+            failure_reasons.extend(
+                f"loop_{loops_completed:04d}/{case.case}: {reason}"
+                for reason in case.failure_reasons
+            )
+
+        elapsed_s = _perf_counter() - started_s
+        if elapsed_s - last_sample_elapsed_s >= sample_interval_s:
+            sample = read_process_rss_mb(server_pid)
+            if sample is None:
+                rss_unavailable = True
+            else:
+                rss_samples.append(sample)
+            last_sample_elapsed_s = elapsed_s
+        if elapsed_s >= target_seconds:
+            break
+
+    final_sample = read_process_rss_mb(server_pid)
+    if final_sample is None:
+        rss_unavailable = True
+    else:
+        rss_samples.append(final_sample)
+
+    latency_summary = _latency_summary(latencies)
+    hz = _hz(frames_ok, stats_elapsed_s)
+    error_rate = _error_rate(errors, frames_sent)
+    threshold_results = {
+        "soak_hz": hz >= _HZ_MIN,
+        "soak_total_latency_p95_ms": (
+            latency_summary["available"]
+            and latency_summary["p95"] < _TOTAL_LATENCY_P95_MAX_MS
+        ),
+        "soak_total_latency_p99_ms": (
+            latency_summary["available"]
+            and latency_summary["p99"] < _TOTAL_LATENCY_P99_MAX_MS
+        ),
+        "soak_error_rate": error_rate < _ERROR_RATE_MAX,
+    }
+    failure_reasons.extend(
+        name for name, passed in threshold_results.items() if not passed
+    )
+
+    rss_mb = _rss_summary(
+        rss_samples,
+        available=not rss_unavailable,
+        memory_growth_max_mb=memory_growth_max_mb,
+    )
+    if rss_unavailable:
+        failure_reasons.append("soak_rss_unavailable")
+    elif rss_mb["growth"] > memory_growth_max_mb:
+        failure_reasons.append("soak_memory_growth_mb")
+
+    return build_soak_report(
+        passed=not failure_reasons,
+        failure_reasons=failure_reasons,
+        target_seconds=target_seconds,
+        elapsed_s=elapsed_s,
+        loops_completed=loops_completed,
+        cases_completed=cases_completed,
+        frames={
+            "sent": frames_sent,
+            "ok": frames_ok,
+            "errors": errors,
+            "latency_samples": len(latencies),
+        },
+        hz=hz,
+        error_rate=error_rate,
+        total_latency_ms=latency_summary,
+        server_pid=server_pid,
+        rss_mb=rss_mb,
+    )
 
 
 async def _run_case(
@@ -303,12 +525,129 @@ def _case_summary(
     return summary
 
 
+def build_soak_report_disabled() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "passed": True,
+        "failure_reasons": [],
+    }
+
+
+def build_soak_report(
+    *,
+    passed: bool,
+    failure_reasons: list[str],
+    target_seconds: float,
+    elapsed_s: float,
+    loops_completed: int,
+    cases_completed: int,
+    frames: dict[str, Any],
+    hz: float,
+    error_rate: float,
+    total_latency_ms: dict[str, Any],
+    server_pid: int | None,
+    rss_mb: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "passed": passed,
+        "failure_reasons": failure_reasons,
+        "target_seconds": float(target_seconds),
+        "elapsed_s": float(elapsed_s),
+        "loops_completed": loops_completed,
+        "cases_completed": cases_completed,
+        "frames": frames,
+        "hz": hz,
+        "error_rate": error_rate,
+        "total_latency_ms": total_latency_ms,
+        "server_pid": server_pid,
+        "rss_mb": rss_mb,
+    }
+
+
+def build_failed_soak_report(
+    *,
+    failure_reasons: list[str],
+    target_seconds: float,
+    server_pid: int | None,
+    memory_growth_max_mb: float,
+    initial_rss_mb: float | None = None,
+) -> dict[str, Any]:
+    if initial_rss_mb is None:
+        rss_mb = {
+            "available": False,
+            "start": None,
+            "end": None,
+            "growth": None,
+            "max_growth": float(memory_growth_max_mb),
+            "samples": 0,
+        }
+    else:
+        rss_mb = {
+            "available": True,
+            "start": float(initial_rss_mb),
+            "end": float(initial_rss_mb),
+            "growth": 0.0,
+            "max_growth": float(memory_growth_max_mb),
+            "samples": 1,
+        }
+
+    return build_soak_report(
+        passed=False,
+        failure_reasons=failure_reasons,
+        target_seconds=target_seconds,
+        elapsed_s=0.0,
+        loops_completed=0,
+        cases_completed=0,
+        frames={
+            "sent": 0,
+            "ok": 0,
+            "errors": 0,
+            "latency_samples": 0,
+        },
+        hz=0.0,
+        error_rate=1.0,
+        total_latency_ms=_latency_summary([]),
+        server_pid=server_pid,
+        rss_mb=rss_mb,
+    )
+
+
+def _rss_summary(
+    samples: list[float],
+    *,
+    available: bool,
+    memory_growth_max_mb: float,
+) -> dict[str, Any]:
+    if not samples:
+        return {
+            "available": False,
+            "start": None,
+            "end": None,
+            "growth": None,
+            "max_growth": float(memory_growth_max_mb),
+            "samples": 0,
+        }
+    start = samples[0]
+    end = samples[-1]
+    growth = max(samples) - start
+    return {
+        "available": available,
+        "start": float(start),
+        "end": float(end),
+        "growth": float(growth),
+        "max_growth": float(memory_growth_max_mb),
+        "samples": len(samples),
+    }
+
+
 def build_e2e_report(
     cases: list[CaseResult],
     *,
     perf_report: dict[str, Any],
     extra_failure_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
+    soak_report = perf_report.get("soak", build_soak_report_disabled())
     case_entries = [case.report_entry() for case in cases]
     failure_reasons: list[str] = []
     if extra_failure_reasons:
@@ -325,6 +664,7 @@ def build_e2e_report(
     return {
         "overall_pass": all(case.passed for case in cases) and perf_report["passed"],
         "cases": case_entries,
+        "soak": soak_report,
         "failure_reasons": failure_reasons,
         "thresholds": {
             "hz_min": _HZ_MIN,
@@ -332,11 +672,18 @@ def build_e2e_report(
             "total_latency_p99_max_ms": _TOTAL_LATENCY_P99_MAX_MS,
             "error_rate_max": _ERROR_RATE_MAX,
             "perf_passed": perf_report["passed"],
+            "soak_passed": soak_report["passed"],
         },
     }
 
 
-def build_perf_report(cases: list[CaseResult]) -> dict[str, Any]:
+def build_perf_report(
+    cases: list[CaseResult],
+    *,
+    soak_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if soak_report is None:
+        soak_report = build_soak_report_disabled()
     stats_items = [case.stats for case in cases]
     frames_sent = sum(item.frames_sent for item in stats_items)
     frames_ok = sum(item.frames_ok for item in stats_items)
@@ -365,8 +712,10 @@ def build_perf_report(cases: list[CaseResult]) -> dict[str, Any]:
     failure_reasons = [
         name for name, passed in threshold_results.items() if not passed
     ]
+    if not soak_report["passed"]:
+        failure_reasons.extend(soak_report["failure_reasons"])
     return {
-        "passed": all(threshold_results.values()),
+        "passed": all(threshold_results.values()) and soak_report["passed"],
         "failure_reasons": failure_reasons,
         "total_latency_ms": latency_summary,
         "hz": hz,
@@ -389,13 +738,23 @@ def build_perf_report(cases: list[CaseResult]) -> dict[str, Any]:
         },
         "vram": {"available": False},
         "memory": {"available": False},
+        "soak": soak_report,
     }
 
 
-def build_failed_perf_report(failure_reasons: list[str]) -> dict[str, Any]:
+def build_failed_perf_report(
+    failure_reasons: list[str],
+    *,
+    soak_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if soak_report is None:
+        soak_report = build_soak_report_disabled()
+    combined_failure_reasons = list(failure_reasons)
+    if not soak_report["passed"]:
+        combined_failure_reasons.extend(soak_report["failure_reasons"])
     return {
         "passed": False,
-        "failure_reasons": failure_reasons,
+        "failure_reasons": combined_failure_reasons,
         "total_latency_ms": _latency_summary([]),
         "hz": 0.0,
         "error_rate": 0.0,
@@ -422,6 +781,7 @@ def build_failed_perf_report(failure_reasons: list[str]) -> dict[str, Any]:
         },
         "vram": {"available": False},
         "memory": {"available": False},
+        "soak": soak_report,
     }
 
 
@@ -443,6 +803,28 @@ def read_latency_samples(jsonl_path: Path) -> list[float]:
         if math.isfinite(latency):
             samples.append(latency)
     return samples
+
+
+def read_process_rss_mb(pid: int | None) -> float | None:
+    if pid is None:
+        return None
+    status_path = Path("/proc") / str(pid) / "status"
+    try:
+        lines = status_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    for line in lines:
+        if not line.startswith("VmRSS:"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            return None
+        try:
+            return float(parts[1]) / 1024.0
+        except ValueError:
+            return None
+    return None
 
 
 def failure_reasons_for(
@@ -550,10 +932,16 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
-def _write_failure_artifacts(out: Path, *, cases: list[CaseResult], exc: Exception) -> None:
+def _write_failure_artifacts(
+    out: Path,
+    *,
+    cases: list[CaseResult],
+    exc: Exception,
+    soak_report: dict[str, Any] | None = None,
+) -> None:
     reason = f"e2e exception: {type(exc).__name__}: {exc}"
     try:
-        perf_report = build_failed_perf_report([reason])
+        perf_report = build_failed_perf_report([reason], soak_report=soak_report)
         report = build_e2e_report(
             cases,
             perf_report=perf_report,

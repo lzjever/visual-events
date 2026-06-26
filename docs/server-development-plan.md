@@ -141,9 +141,13 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv sync --group dev --extra 
 release/runtime 最小部署命令：
 
 ```bash
-UV_CACHE_DIR=runtime/cache/uv UV_PROJECT_ENVIRONMENT=runtime/venv uv sync --frozen --no-dev --no-editable --extra inference
+UV_CACHE_DIR=runtime/cache/uv UV_PROJECT_ENVIRONMENT=runtime/venv \
+  uv sync --frozen --no-dev --no-editable --extra inference \
+  --reinstall-package visual-events-server
 runtime/venv/bin/visual-events-server --config runtime/config.toml
 ```
+
+`--reinstall-package visual-events-server` 用于开发/交付阶段确保项目 version 不变时也刷新当前项目 wheel 到 `runtime/venv`；不改变 `uv.lock`、`--frozen`、`--no-dev`、`--no-editable` 的依赖管理原则。
 
 release 产物应保持简单：Python runtime venv、server 代码、锁定依赖、本地 config、后续模型缓存和运行输出都留在 `runtime/` 或 `artifacts/`，不写入 Git。
 
@@ -312,7 +316,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 
 - `val-data/` 每个场景至少 95% 有效帧能完成推理并返回 `visual_state`。
 - 有人场景中 `scene_flags.has_person/person_count` 能反映 person detections。
-- server GPU 模式显存目标 < 4GB。
+- 当前 runner 不采样 VRAM；显存 < 4GB 保留为后续 GPU capacity / metrics 验收项，不作为当前 S2/S6.1 gate 条件。
 - 单帧错误不会中断连接。
 
 ### S3 Tracking
@@ -380,6 +384,60 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - 生成 per-scene 事件摘要、latency 统计、错误帧统计。
 - 失败时返回非零 exit code。
 
+### S6.1/S7 Server Soak Evidence Gate
+
+目标：
+
+- 把“全量 `val-data/` 循环 5 分钟”从裸要求变成 runner 可复现的证据门禁。
+- 验证同一个运行中的 server 在真实 realtime replay 下不会崩溃，total latency、Hz、error rate 和 RSS 增长仍在阈值内。
+- 先跑普通 full matrix 作为 warm-up 和基础 E2E gate；warm-up 完成后读取 `--server-pid` 的 RSS，作为 soak memory baseline。
+
+命令示例：
+
+```bash
+SERVER_PID=<visual-events-server pid>
+
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/run_val_data_e2e.py \
+  --server ws://127.0.0.1:8765/v1/stream \
+  --data-dir val-data \
+  --out artifacts/e2e \
+  --response-timeout-ms 1000 \
+  --soak-seconds 300 \
+  --server-pid "$SERVER_PID" \
+  --soak-memory-growth-max-mb 64 \
+  --soak-sample-interval-s 10
+```
+
+约束：
+
+- Soak 必须 realtime；带 `--soak-seconds` 时不允许 `--no-realtime`。
+- Soak 必须显式提供 `--response-timeout-ms` 和 `--server-pid`。
+- Soak 不改 wire protocol，不开发正式 robot CLI，不要求 DDS、Botified frame 或 gaze controller。
+
+产物：
+
+- Warm-up full matrix 继续输出 `artifacts/e2e/<case>/visual_state.jsonl`、`summary.json`、`summary.md`。
+- Soak loop 输出 `artifacts/e2e/soak/loop_0001/<case>/visual_state.jsonl`、`summary.json`、`summary.md`；后续 loop 递增为 `loop_0002` 等。
+- `artifacts/e2e/report.json` 和 `artifacts/perf/server_perf.json` 都必须包含同一份 `soak` 摘要：`enabled`、`passed`、`failure_reasons`、`target_seconds`、`elapsed_s`、`loops_completed`、`cases_completed`、`frames`、`hz`、`error_rate`、`total_latency_ms`、`server_pid`、`rss_mb`。
+- top-level `server_phase_latency_ms` 仍显式标记为 unavailable；`server_perf.json.vram.available == false` 和 top-level memory metrics unavailable 是预期状态。当前阶段只有 soak 的 `rss_mb` 作为进程级内存增长证据。
+
+验收阈值：
+
+- `soak.enabled == true` 且 `soak.passed == true`。
+- `target_seconds` 为 300，`elapsed_s >= target_seconds`。
+- `soak.hz >= 9`。
+- `soak.total_latency_ms.p95 < 120`，`soak.total_latency_ms.p99 < 200`。
+- `soak.error_rate < 0.01`。
+- `soak.rss_mb.available == true` 且 `soak.rss_mb.growth <= soak.rss_mb.max_growth`；默认 max growth 为 64 MB，除非命令显式收紧或放宽。
+- 普通 full matrix 和 soak 任一阶段失败，都必须返回非零 exit code，并在 report/perf 的 `failure_reasons` 中留下原因。
+
+为什么不做完整 metrics/CLI/RK3588：
+
+- 完整 `metrics.py` 的 phase latency、VRAM 和长期 metrics pipeline 是后续 server 可观测性工作；S6.1/S7 只验证 300s realtime replay、Hz、total latency、error rate 和 process RSS growth。
+- 正式 robot CLI、DDS 输入、Botified 输出和头部控制闭环不属于当前 server handoff。
+- RK3588 迁移未验证；当前只保留 `InferBackend` 边界，避免把 GPU server soak 和未来 RKNN runtime 混成同一个验收项。
+
 ## 9. 测试计划
 
 ### Unit
@@ -434,6 +492,25 @@ S6 最小 runner 额外输出：
 
 输出产物必须落在 `artifacts/` 下，不能写回 `val-data/`。
 
+S6.1/S7 5 分钟 soak 必须通过同一个 runner 运行：
+
+```bash
+SERVER_PID=<visual-events-server pid>
+
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/run_val_data_e2e.py \
+  --server ws://127.0.0.1:8765/v1/stream \
+  --data-dir val-data \
+  --out artifacts/e2e \
+  --response-timeout-ms 1000 \
+  --soak-seconds 300 \
+  --server-pid "$SERVER_PID" \
+  --soak-memory-growth-max-mb 64 \
+  --soak-sample-interval-s 10
+```
+
+声称 5 分钟 soak 通过时，必须同时有 `artifacts/e2e/soak/loop_0001/...` 证据、`artifacts/e2e/report.json` 的 `soak.passed == true`，以及 `artifacts/perf/server_perf.json` 的同名 `soak` 摘要。
+
 ### Performance
 
 统计范围：server 收到完整 frame 到发出 response。
@@ -442,9 +519,10 @@ S6 最小 runner 额外输出：
 
 - 输出频率：回放 10Hz 时 `visual_state` >= 9Hz。
 - GPU server latency：P95 < 120ms，P99 < 200ms。
-- 显存：< 4GB。
+- 当前 runner 不采样 VRAM；`server_perf.json.vram.available == false` 是预期状态，不能据此声称显存 < 4GB 已验证。
 - 单场景连接不中断，error frame 比例 < 1%。
-- 全量 `val-data/` 循环 5 分钟：无崩溃、无明显内存增长。
+- 全量 `val-data/` 5 分钟 soak：用 `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 运行；`report.json` 和 `server_perf.json` 必须记录 `soak.passed == true`、latency/Hz/error/RSS growth 证据。
+- 显存 < 4GB 保留为后续 GPU capacity / metrics 验收项，不作为 S6.1 soak pass 条件。
 
 ## 10. 验证矩阵
 
@@ -466,7 +544,7 @@ S6 最小 runner 额外输出：
 | 事件 gate | replay events summary | 全部 `val-data` | `--gate events` 按场景期望检查 semantic event；`--gate all` 同时要求 tracking、attention、events 通过 |
 | Attention | 最大稳定人物 | 全部 `val-data` | 存在稳定 visible person 或短暂 lost hold 时，`attention.target_track_id` 指向 selector 目标；无稳定目标且无 lost hold 时允许 `attention=null` |
 | Attention | 注视点合法 | 全部 `val-data` | `target_uv` 在图像范围内 |
-| 性能 | server GPU E2E | 全部 `val-data` 循环 5 分钟 | P95 < 120ms，P99 < 200ms |
+| 性能 | server GPU soak | `tools/run_val_data_e2e.py --soak-seconds 300 --response-timeout-ms <ms> --server-pid <pid>` realtime 跑全部 `val-data` | `soak.passed == true`；Hz >= 9，P95 < 120ms，P99 < 200ms，error rate < 1%，RSS growth <= configured max |
 | 回归 | 固定数据回放 | 全部 `val-data` | 事件类型、数量、顺序稳定；触发帧偏差 <= 3 帧或 <= 300ms |
 
 ## 11. E2E 验收矩阵
@@ -539,7 +617,29 @@ artifacts/perf/server_perf.json
 ```
 
 S6 最小 runner 必须包含 total latency、Hz、error rate 和 frame counts。
-decode、preprocess、infer、postprocess、tracking、events、VRAM、memory 在当前阶段显式标记为 unavailable；完整 server metrics 模块另列后续实现。
+decode、preprocess、infer、postprocess、tracking、events、VRAM、memory 在当前阶段显式标记为 unavailable；`server_perf.json.vram.available == false` 是预期状态。完整 server metrics 模块和 GPU capacity 证据另列后续实现。
+
+Soak 摘要字段：
+
+```json
+{
+  "enabled": true,
+  "passed": true,
+  "failure_reasons": [],
+  "target_seconds": 300.0,
+  "elapsed_s": 300.0,
+  "loops_completed": 1,
+  "cases_completed": 14,
+  "frames": {"sent": 1152, "ok": 1152, "errors": 0, "latency_samples": 1152},
+  "hz": 9.8,
+  "error_rate": 0.0,
+  "total_latency_ms": {"available": true, "p50": 20.0, "p95": 40.0, "p99": 60.0},
+  "server_pid": 12345,
+  "rss_mb": {"available": true, "start": 512.0, "end": 520.0, "growth": 8.0, "max_growth": 64.0, "samples": 31}
+}
+```
+
+未启用 soak 时，`soak` 为 disabled summary；不能据此声称 5 分钟 soak 通过。
 
 ## 13. Handoff 要求
 
@@ -552,6 +652,7 @@ Server handoff 必须包含：
 - 单元测试和集成测试。
 - 全量 `val-data/` E2E 报告。
 - 性能报告。
+- 如 handoff 声称 S6.1/S7 5 分钟 soak 已通过，必须包含 runner 命令、`artifacts/e2e/soak/loop_0001/...` 证据路径、`report.json` 和 `server_perf.json` 中的 `soak` 摘要。
 - `docs/server-handoff.md` 中的模型权重和授权说明。
 - `docs/server-handoff.md` 中的已知失败场景和阈值说明。
 
@@ -564,6 +665,7 @@ Server handoff 必须包含：
 - server 输出不符合 [protocol.md](../common/schema/protocol.md)。
 - server 内部事件规则依赖正式 robot CLI。
 - 未输出 `summary.json` 和 `server_perf.json`。
+- 声称 5 分钟 soak 通过，但没有 `soak.enabled == true`、`soak.passed == true` 和 `artifacts/e2e/soak/...` 证据。
 
 ## 14. 必须避免的歧义
 
@@ -580,6 +682,7 @@ Server handoff 必须包含：
 - `stopped_near_robot` 是基于大 bbox + 低速停留的近似，不承诺真实距离。
 - `person_waving` 是 pose 规则，不是动作识别模型。
 - V1 不做人脸识别，也不输出“看向机器人”的强判断。
+- 5 分钟 soak 必须以 runner artifact 为准；没有 matching artifact 时只能说 runner 支持 soak，不能说 soak 已通过。
 - RK3588 是未来迁移方向，不是当前 server 开发验收条件。
 
 ## 15. 风险

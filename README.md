@@ -1,13 +1,13 @@
 # visual-events
 
-视觉事件推理服务。当前 repo 已包含 S0-S6 server baseline：WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay/E2E 工具、S2 推理 backend 边界和 Ultralytics pose adapter、S3 项目内 ByteTrack-style IoU/TTL tracker baseline、S4 attention selector、S5 semantic events，以及 S6 `tools/run_val_data_e2e.py` E2E/perf gate。首个产品场景是商店门口揽客机器人。
+视觉事件推理服务。当前 repo 已包含 S0-S6 server baseline：WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay/E2E 工具、S2 推理 backend 边界和 Ultralytics pose adapter、S3 项目内 ByteTrack-style IoU/TTL tracker baseline、S4 attention selector、S5 semantic events，以及支持 S6/S6.1 E2E/perf/soak evidence gate 的 `tools/run_val_data_e2e.py`。首个产品场景是商店门口揽客机器人。
 
 本 repo 计划包含两个运行单元，并包含开发/验证工具：
 
 - `visual-events-server`: 已有 S0-S6 baseline。局域网推理服务，接收机器人侧 JPEG 帧，输出 10Hz `visual_state` 和低频 `semantic_events`。
 - `visual-events-cli`: 未来运行单元。Botified 启动的机器人后台 CLI，从 DDS 抓取图像，调用服务端，消费高频注视目标，并把低频语义事件转换成 Botified frame。
 - `tools/replay_val_data.py`: 已有开发/验证工具。按 server wire protocol 回放 `val-data` JPEG，不接 DDS，不输出 Botified frame。
-- `tools/run_val_data_e2e.py`: 已有 S6 E2E/perf gate。对运行中的 server 回放全量 `val-data`，输出 ignored artifacts。
+- `tools/run_val_data_e2e.py`: 已有 S6 E2E/perf gate，并支持 S6.1 5-minute soak evidence gate。对运行中的 server 回放全量 `val-data`，输出 ignored artifacts。
 
 核心分层：
 
@@ -37,7 +37,7 @@ DDS JPEG @10Hz
 - 开发/验证目录：`tools/`、`tests/`。
 - 输入/输出频率：10Hz。
 - 模型：`YOLOv8n-pose` 作为 V1 baseline。
-- 真实推理依赖：开发使用 `uv sync --group dev --extra inference`；release 使用 `uv sync --frozen --no-dev --no-editable --extra inference`。当前 extra 使用 PyTorch cu128 wheel，面向 5090D GPU server。
+- 真实推理依赖：开发使用 `uv sync --group dev --extra inference`；release 使用 `uv sync --frozen --no-dev --no-editable --extra inference --reinstall-package visual-events-server`，确保交付验证时当前项目 wheel 刷新到 `runtime/venv`。当前 extra 使用 PyTorch cu128 wheel，面向 5090D GPU server。
 - Inference release note：模型权重默认 `runtime/models/yolov8n-pose.pt`，不入 Git，必须由 release/runtime 外部准备；真实 backend 只加载显式 `model_path`，缺失时启动失败而不会隐式下载。
 - 追踪：项目内 ByteTrack-style IoU/TTL tracker baseline，不使用 Ultralytics `model.track()`。
 - 高频通道：WebSocket streaming。
