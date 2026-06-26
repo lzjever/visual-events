@@ -2,14 +2,17 @@
 
 日期：2026-06-26
 
-本文档是 server 和 robot CLI 的协议事实来源。V1 只有一条主通道：WebSocket streaming。
+本文档是 `visual-events-server` 的 wire protocol 事实来源。V1 只有一条主通道：WebSocket streaming。
+
+S0/S1 当前实现范围是 server WebSocket 协议、mock `visual_state` 和 `tools/replay_val_data.py` 回放工具。本文中提到的 robot CLI、DDS、gaze controller 和 Botified frame 行为是未来客户端侧约定，不是当前 S0/S1 server 实现范围。
 
 ## 1. 连接
 
 - URL：`ws://<host>:<port>/v1/stream`
-- 客户端：`visual-events-cli`
+- 客户端：未来 `visual-events-cli`；S0/S1 可由 `tools/replay_val_data.py` 按同一 wire protocol 发送测试帧
 - 服务端：`visual-events-server`
 - 每条连接只处理一个 camera stream。
+- 第一帧确定该连接的 `camera`；后续 frame 的 `camera` 不同是严重协议错误，服务端返回 `invalid_header`、`retryable=false` 后关闭连接。
 - 每条连接最多一个 in-flight frame。
 
 Backpressure：
@@ -235,6 +238,8 @@ CLI 行为：
 - 断线期间 gaze controller 使用保持或回中策略，不使用过期 `attention`。
 
 ## 8. Botified Frame 输出
+
+本节描述未来 robot CLI 的客户端输出约定；`visual-events-server` 不直接输出 Botified frame。
 
 CLI stdout 默认只输出 Botified frame：
 

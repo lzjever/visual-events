@@ -1,11 +1,12 @@
 # visual-events
 
-视觉事件推理服务设计文档。当前 repo 处于设计与 handoff 阶段，尚未包含可运行实现。首个产品场景是商店门口揽客机器人。
+视觉事件推理服务。当前 repo 已包含 S0/S1 server skeleton、WebSocket wire protocol parser/serializer、mock `visual_state` endpoint，以及 `val-data` replay 测试工具。真实 inference、tracking、attention 和 semantic events 仍按后续里程碑实现。首个产品场景是商店门口揽客机器人。
 
 本 repo 计划同时包含两个运行单元：
 
-- `visual-events-server`: 局域网推理服务，接收机器人侧 JPEG 帧，输出 10Hz `visual_state`。
-- `visual-events-cli`: Botified 启动的机器人后台 CLI，从 DDS 抓取图像，调用服务端，消费高频注视目标，并把低频语义事件转换成 Botified frame。
+- `visual-events-server`: 已有 skeleton。局域网推理服务，接收机器人侧 JPEG 帧，输出 10Hz `visual_state`。
+- `visual-events-cli`: 未来运行单元。Botified 启动的机器人后台 CLI，从 DDS 抓取图像，调用服务端，消费高频注视目标，并把低频语义事件转换成 Botified frame。
+- `tools/replay_val_data.py`: 已有开发/验证工具。按 server wire protocol 回放 `val-data` JPEG，不接 DDS，不输出 Botified frame。
 
 核心分层：
 
@@ -29,6 +30,9 @@ DDS JPEG @10Hz
 
 当前基线决策：
 
+- 包管理：`uv`。
+- runtime package：`src/visual_events_server/`。
+- 开发/验证目录：`tools/`、`tests/`。
 - 输入/输出频率：10Hz。
 - 模型：`YOLOv8n-pose` 作为 V1 baseline。
 - 追踪：ByteTrack。

@@ -66,6 +66,7 @@ Server 的目标是接收符合 [protocol.md](../common/schema/protocol.md) 的 
 V1 技术栈：
 
 - Python server。
+- `uv` 做包管理和环境管理。
 - FastAPI/Starlette WebSocket + Uvicorn。
 - Pytest 做单元/集成测试。
 - Ultralytics `YOLOv8n-pose` 做 V1 inference backend。
@@ -74,11 +75,12 @@ V1 技术栈：
 V1 server 结构：
 
 ```text
-server/
+src/
   visual_events_server/
     app.py
     config.py
     protocol.py
+    processor.py
     inference/
       base.py
       ultralytics_pose.py
@@ -97,6 +99,8 @@ tools/
 tests/
   unit/
   integration/
+runtime/        # ignored: release venv, runtime cache, local config/model cache
+artifacts/      # ignored: replay/e2e/perf outputs
 ```
 
 模块职责：
@@ -110,6 +114,32 @@ tests/
 | `events` | 基于 track history 生成 V1 `semantic_events` |
 | `metrics` | 输出 latency、FPS、事件统计、错误统计 |
 | `tools/replay_val_data.py` | 测试回放客户端，不是产品 CLI |
+
+环境约束：
+
+- runtime package 只放在 `src/visual_events_server/`。
+- `tools/` 和 `tests/` 是开发/验证目录，不属于正式 robot CLI。
+- 开发环境使用项目内 `.venv/` 和 `.uv-cache/`。
+- release/runtime 环境使用项目内 `runtime/venv/` 和 `runtime/cache/uv/`。
+- `val-data/`、`runtime/`、`artifacts/`、模型缓存和测试产物不得进入 Git。
+- `uv.lock` 必须进入 Git，用于 release/runtime 的 `--frozen` 安装。
+
+S0/S1 本地开发命令：
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv sync --group dev
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv run --group dev pytest -q
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv run visual-events-server --host 127.0.0.1 --port 8765
+```
+
+release/runtime 最小部署命令：
+
+```bash
+UV_CACHE_DIR=runtime/cache/uv UV_PROJECT_ENVIRONMENT=runtime/venv uv sync --frozen --no-dev --no-editable
+runtime/venv/bin/visual-events-server --config runtime/config.toml
+```
+
+release 产物应保持简单：Python runtime venv、server 代码、锁定依赖、本地 config、后续模型缓存和运行输出都留在 `runtime/` 或 `artifacts/`，不写入 Git。
 
 KISS 约束：
 
@@ -128,6 +158,7 @@ Server 必须实现 [protocol.md](../common/schema/protocol.md)：
 - binary request：`uint32_be header_len + header_json_utf8 + jpeg_bytes`
 - JSON response：`visual_state` 或 `error`
 - 每条连接一个 camera stream
+- 第一帧确定连接的 `camera`；后续帧 `camera` 不同必须返回 `invalid_header`、`retryable=false`，并关闭连接
 - 每条连接最多一个 in-flight frame
 - 非法 header、非法 JPEG、超限 payload 返回 `error`
 - 断线后丢弃该连接的 tracker/event state
@@ -226,7 +257,8 @@ V1 server 只输出 `attention`，不生成头部控制命令。
 示例：
 
 ```bash
-python tools/replay_val_data.py \
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/replay_val_data.py \
   --server ws://127.0.0.1:8765/v1/stream \
   --data-dir val-data/pic_hello \
   --camera front \
@@ -332,7 +364,8 @@ python tools/replay_val_data.py \
 必须运行：
 
 ```bash
-python tools/run_val_data_e2e.py \
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/run_val_data_e2e.py \
   --server ws://127.0.0.1:8765/v1/stream \
   --data-dir val-data \
   --out artifacts/e2e

@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import argparse
+from typing import Any
+
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+from .config import ServerConfig, load_config
+from .processor import MockVisualFrameProcessor, VisualFrameProcessor
+from .protocol import (
+    ProtocolError,
+    decode_frame_message,
+    serialize_error,
+    serialize_json_message,
+    serialize_protocol_error,
+)
+
+
+def create_app(
+    *,
+    processor: VisualFrameProcessor | None = None,
+    config: ServerConfig | None = None,
+) -> FastAPI:
+    app = FastAPI(title="visual-events-server", version="0.1.0")
+    app.state.config = config or ServerConfig()
+    app.state.processor = processor or MockVisualFrameProcessor()
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.websocket("/v1/stream")
+    async def stream(websocket: WebSocket) -> None:
+        await websocket.accept()
+        stream_camera: str | None = None
+        while True:
+            try:
+                message = await websocket.receive()
+            except WebSocketDisconnect:
+                return
+
+            if message["type"] == "websocket.disconnect":
+                return
+
+            payload = message.get("bytes")
+            if payload is None:
+                await websocket.send_text(
+                    serialize_error(
+                        code="invalid_frame",
+                        message="client message must be a binary frame",
+                        retryable=True,
+                    )
+                )
+                continue
+
+            try:
+                frame = decode_frame_message(payload)
+                if stream_camera is None:
+                    stream_camera = frame.camera
+                elif frame.camera != stream_camera:
+                    await websocket.send_text(
+                        serialize_error(
+                            code="invalid_header",
+                            message="camera cannot change within a WebSocket connection",
+                            frame_id=frame.frame_id,
+                            retryable=False,
+                        )
+                    )
+                    await websocket.close(code=1008)
+                    return
+                response = await app.state.processor.process_frame(frame)
+            except ProtocolError as exc:
+                await websocket.send_text(serialize_protocol_error(exc))
+                continue
+            except Exception:
+                await websocket.send_text(
+                    serialize_error(
+                        code="internal_error",
+                        message="internal server error",
+                        retryable=True,
+                    )
+                )
+                continue
+
+            await websocket.send_text(serialize_json_message(response))
+
+    return app
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="visual-events-server")
+    parser.add_argument("--config", help="Path to a JSON or TOML server config")
+    parser.add_argument("--host", help="Override bind host")
+    parser.add_argument("--port", type=int, help="Override bind port")
+    args = parser.parse_args(argv)
+
+    config = load_config(args.config)
+    host = args.host or config.host
+    port = args.port if args.port is not None else config.port
+    app = create_app(config=config)
+    uvicorn.run(app, host=host, port=port)
+
+
+app: Any = create_app()
+
+
+if __name__ == "__main__":
+    main()
