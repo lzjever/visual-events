@@ -6,7 +6,7 @@
 
 Visual Events 是一个机器人视觉事件推理服务，不是通用视觉平台。
 
-目标是让机器人以 10Hz 观察眼前画面，稳定识别人、追踪人、估计简单行为，并把结果分成两类输出：
+首个产品场景是商店门口揽客。目标是让机器人以 10Hz 观察眼前画面，稳定识别人、追踪人、估计简单行为，并把结果分成两类输出：
 
 - 高频视觉状态：给机器人本体实时控制使用，例如持续注视画面中占比最大的一个人。
 - 低频语义事件：通过 Botified frame 通知 agent，让 agent 根据上下文决定是否回应。
@@ -19,6 +19,8 @@ Visual Events 是一个机器人视觉事件推理服务，不是通用视觉平
 
 V1 验收场景：
 
+- 有人从机器人或店门前路过。
+- 有人朝机器人或店门方向靠近。
 - 有人进入画面并停留。
 - 有人向机器人挥手。
 - 有人站在机器人前方并保持相对稳定。
@@ -27,8 +29,7 @@ V1 验收场景：
 
 V1.5 候选场景：
 
-- 有人从机器人面前走过。
-- 有人靠近机器人或远离机器人。
+- 有人远离机器人。
 - 有人可能看向机器人。
 - 输出真实人脸框。
 
@@ -168,9 +169,19 @@ V1 事件：
 | --- | --- | --- |
 | `person_appeared` | 新 track 稳定出现至少 2 帧 | 5s |
 | `person_left` | track 丢失超过 TTL | 5s |
-| `person_stopped_near_robot` | 大 bbox 人物低速停留 1.5s 以上，且当前帧未标记头部运动 | 5s |
+| `person_passing_by` | track 从画面一侧进入并以横向速度通过，未进入近区停留，且当前帧 `head_motion.state=stationary` | 5s |
+| `person_approaching_robot` | bbox 面积或高度持续增大，并向中心/近区移动 0.5s 以上，且当前帧 `head_motion.state=stationary` | 5s |
+| `person_stopped_near_robot` | 大 bbox 人物低速停留 1.5s 以上，且当前帧 `head_motion.state=stationary` | 5s |
 | `person_waving` | 手腕高于肩部附近且横向方向变化满足阈值 | 5s |
 | `attention_target_changed` | 注视目标稳定切换 | 5s |
+
+`person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot` 是运动敏感事件。`head_motion.state` 为 `moving` 或 `unknown` 时不触发，避免机器人自己转头造成误判。
+
+事件优先级建议：
+
+- `person_passing_by`: 轻量招呼，例如简短问候。
+- `person_approaching_robot`: 欢迎或引导进店。
+- `person_stopped_near_robot`: 进入更正式的导购/问答。
 
 示例：
 
@@ -318,6 +329,9 @@ header 示例：
 
 - 单人进入画面后 1s 内形成稳定 track。
 - 单人短暂漏检时 track 不立即跳变。
+- 单人横向路过且未停留时，触发 `person_passing_by`，不触发 `person_stopped_near_robot`。
+- 单人从远处朝机器人/店门靠近时，触发 `person_approaching_robot`。
+- `head_motion.state=moving` 或 `unknown` 时，不触发 `person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot`。
 - 多人场景最大人物目标在 10s 回放内切换次数 <= 2，除非最大 bbox 面积变化超过 25% 并持续 0.5s。
 - 挥手事件宁可保守少报，不频繁误报。
 

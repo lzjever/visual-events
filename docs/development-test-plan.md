@@ -160,7 +160,7 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 
 产出：
 
-- 事件规则：出现、离开、停留、挥手、注视目标变化。
+- 事件规则：出现、离开、路过、靠近、停留、挥手、注视目标变化。
 - Event cooldown 和同 track 去重。
 - Botified frame 输出。
 
@@ -169,6 +169,7 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 - 高频 `visual_state` 不进入 Botified。
 - 同一事件不会刷屏。
 - Botified frame 符合 `id/request/expect/urgency/timeout_secs` 约束。
+- `head_motion.state=moving` 或 `unknown` 时，不触发路过、靠近、停留这三类运动敏感事件。
 
 ### M6 头部注视控制
 
@@ -182,7 +183,7 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 - `log` adapter 模式下，给定固定 `target_uv` 序列，输出命令满足 deadband、低通、速度限制和 stale 丢弃。
 - 接入真实 `head_velocity` 或等价接口后，在目标稳定、初始归一化误差 <= 0.20、`deadband_norm=0.03` 的测试条件下，1s 内进入 deadband 并保持至少 5 帧。
 - 目标丢失时保持或回中，不抽动。
-- frame header 标记头部运动或未知时，服务端暂停 `person_stopped_near_robot` 这类运动敏感事件。
+- frame header 标记头部运动或未知时，服务端暂停 `person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot` 这类运动敏感事件。
 
 ### M7 RK3588 Spike
 
@@ -226,6 +227,8 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 
 - 空画面。
 - 单人进入和离开。
+- 单人从画面一侧路过但不靠近。
+- 单人从远处朝机器人/店门方向靠近。
 - 单人停留。
 - 单人挥手。
 - 两个人交叉和面积接近。
@@ -236,6 +239,8 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 - 同一输入序列的 `track_id` 可允许不同，但事件类型、事件数量和触发帧偏差 <= 3 帧。
 - `person_appeared` 在稳定出现后 2-5 帧内触发。
 - `person_left` 在 lost TTL 后 2 帧内触发。
+- `person_passing_by` 在横向通过且未进入近区停留后 5 帧内触发。
+- `person_approaching_robot` 在 bbox 面积或高度持续增大并向中心/近区移动 0.5s 后 5 帧内触发。
 - `person_stopped_near_robot` 在满足低速停留阈值后 5 帧内触发。
 - 同一事件 cooldown 内不重复输出。
 - 多人面积接近回放中 10s 内 attention 切换次数 <= 2。

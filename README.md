@@ -1,6 +1,6 @@
 # visual-events
 
-视觉事件推理服务设计文档。当前 repo 处于设计与 handoff 阶段，尚未包含可运行实现。
+视觉事件推理服务设计文档。当前 repo 处于设计与 handoff 阶段，尚未包含可运行实现。首个产品场景是商店门口揽客机器人。
 
 本 repo 计划同时包含两个运行单元：
 
@@ -33,6 +33,7 @@ DDS JPEG @10Hz
 - 追踪：ByteTrack。
 - 高频通道：WebSocket streaming。
 - 低频语义事件：Botified `<botified>...</botified>` request frame。
+- V1 事件：出现、离开、路过、靠近、停留、挥手、注视目标变化。
 - RK3588 兼容：从第一版开始保留 `InferBackend` 边界，未来替换为 RKNN backend。
 
 开发原则：

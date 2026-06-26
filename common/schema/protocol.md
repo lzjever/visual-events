@@ -69,7 +69,7 @@ Header 可选字段：
 - `moving`: 当前头部正在运动。
 - `unknown`: 无法判断。
 
-V1 规则：`moving` 或 `unknown` 时，服务端暂停 `person_stopped_near_robot` 这类运动敏感事件。没有 `head_motion` 字段等价于 `unknown`。
+V1 规则：`moving` 或 `unknown` 时，服务端暂停 `person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot` 这类运动敏感事件。没有 `head_motion` 字段等价于 `unknown`。
 
 ## 3. 服务端状态消息
 
@@ -172,9 +172,19 @@ V1 event 枚举：
 
 - `person_appeared`
 - `person_left`
+- `person_passing_by`
+- `person_approaching_robot`
 - `person_stopped_near_robot`
 - `person_waving`
 - `attention_target_changed`
+
+运动敏感事件：
+
+- `person_passing_by`
+- `person_approaching_robot`
+- `person_stopped_near_robot`
+
+这些事件只在 `head_motion.state=stationary` 时触发。
 
 服务端负责：
 
