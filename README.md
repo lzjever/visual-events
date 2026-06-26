@@ -1,6 +1,6 @@
 # visual-events
 
-视觉事件推理服务。当前 repo 已包含 S0/S1 server skeleton、WebSocket wire protocol parser/serializer、mock `visual_state` endpoint，以及 `val-data` replay 测试工具。真实 inference、tracking、attention 和 semantic events 仍按后续里程碑实现。首个产品场景是商店门口揽客机器人。
+视觉事件推理服务。当前 repo 已包含 S0/S1 server skeleton、WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay 测试工具，以及 S2 的推理 backend 边界和 Ultralytics pose adapter。tracking、attention 和 semantic events 仍按后续里程碑实现。首个产品场景是商店门口揽客机器人。
 
 本 repo 计划同时包含两个运行单元：
 
@@ -35,6 +35,8 @@ DDS JPEG @10Hz
 - 开发/验证目录：`tools/`、`tests/`。
 - 输入/输出频率：10Hz。
 - 模型：`YOLOv8n-pose` 作为 V1 baseline。
+- 真实推理依赖：`uv sync --group dev --extra inference`；release 使用 `uv sync --frozen --no-dev --no-editable --extra inference`。当前 extra 使用 PyTorch cu128 wheel，面向 5090D GPU server。
+- 模型权重：默认 `runtime/models/yolov8n-pose.pt`，不入 Git，缺失时真实 backend 启动失败而不会隐式下载。
 - 追踪：ByteTrack。
 - 高频通道：WebSocket streaming。
 - 低频语义事件：Botified `<botified>...</botified>` request frame。

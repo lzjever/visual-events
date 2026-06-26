@@ -34,6 +34,20 @@ class ReplayStats:
     frames_ok: int
     errors: int
     elapsed_s: float
+    frames_with_person: int = 0
+    frame_id_mismatch: int = 0
+
+    @property
+    def ok_rate(self) -> float:
+        if self.frames_sent == 0:
+            return 0.0
+        return self.frames_ok / self.frames_sent
+
+    @property
+    def person_frame_rate(self) -> float:
+        if self.frames_sent == 0:
+            return 0.0
+        return self.frames_with_person / self.frames_sent
 
 
 def discover_scene_dirs(data_dir: Path) -> list[Path]:
@@ -101,6 +115,7 @@ async def replay_scene(
     append_jsonl: bool = False,
     connector: Callable[..., Any] | None = None,
     realtime: bool = True,
+    response_timeout_ms: int | None = None,
 ) -> ReplayStats:
     frames = iter_scene_frames(
         scene_dir,
@@ -114,6 +129,8 @@ async def replay_scene(
     frames_sent = 0
     frames_ok = 0
     errors = 0
+    frames_with_person = 0
+    frame_id_mismatch = 0
 
     jsonl_file = None
     try:
@@ -130,11 +147,43 @@ async def replay_scene(
                 await websocket.send(payload)
                 frames_sent += 1
 
-                raw_response = await websocket.recv()
+                try:
+                    raw_response = await _recv_with_timeout(
+                        websocket,
+                        response_timeout_ms=response_timeout_ms,
+                    )
+                except TimeoutError:
+                    errors += 1
+                    if jsonl_file is not None:
+                        jsonl_file.write(
+                            json.dumps(
+                                {
+                                    "scene": Path(scene_dir).name,
+                                    "frame_id": frame.header["frame_id"],
+                                    "latency_ms": (
+                                        time.perf_counter() - frame_started_s
+                                    )
+                                    * 1000.0,
+                                    "response": {
+                                        "type": "error",
+                                        "code": "response_timeout",
+                                    },
+                                },
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        )
+                    break
                 latency_ms = (time.perf_counter() - frame_started_s) * 1000.0
                 response = _decode_response(raw_response)
                 if response.get("type") == "visual_state":
                     frames_ok += 1
+                    scene_flags = response.get("scene_flags", {})
+                    if isinstance(scene_flags, dict) and scene_flags.get("has_person"):
+                        frames_with_person += 1
+                    if response.get("frame_id") != frame.header["frame_id"]:
+                        frame_id_mismatch += 1
                 else:
                     errors += 1
 
@@ -167,6 +216,8 @@ async def replay_scene(
         frames_ok=frames_ok,
         errors=errors,
         elapsed_s=time.perf_counter() - start_s,
+        frames_with_person=frames_with_person,
+        frame_id_mismatch=frame_id_mismatch,
     )
 
 
@@ -179,6 +230,7 @@ async def replay_data_dir(
     head_motion: str,
     save_jsonl: Path | None,
     realtime: bool = True,
+    response_timeout_ms: int | None = None,
 ) -> list[ReplayStats]:
     scene_dirs = discover_scene_dirs(data_dir)
     append_jsonl = False
@@ -199,6 +251,7 @@ async def replay_data_dir(
                 save_jsonl=save_jsonl,
                 append_jsonl=append_jsonl,
                 realtime=realtime,
+                response_timeout_ms=response_timeout_ms,
             )
         )
     return stats
@@ -219,6 +272,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--save-jsonl", type=Path)
     parser.add_argument(
+        "--response-timeout-ms",
+        type=int,
+        default=None,
+        help="Stop waiting for a frame response after this many milliseconds.",
+    )
+    parser.add_argument(
+        "--summary-json",
+        type=Path,
+        help="Write per-scene replay summary JSON.",
+    )
+    parser.add_argument(
         "--no-realtime",
         action="store_true",
         help="Send the next frame as soon as a response arrives.",
@@ -236,22 +300,27 @@ async def async_main(argv: list[str] | None = None) -> int:
         head_motion=args.head_motion,
         save_jsonl=args.save_jsonl,
         realtime=not args.no_realtime,
+        response_timeout_ms=args.response_timeout_ms,
     )
+    if args.summary_json is not None:
+        args.summary_json.parent.mkdir(parents=True, exist_ok=True)
+        args.summary_json.write_text(
+            json.dumps(
+                [_stats_to_summary(item) for item in stats],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
     for item in stats:
         print(
             json.dumps(
-                {
-                    "scene": item.scene,
-                    "frames_sent": item.frames_sent,
-                    "frames_ok": item.frames_ok,
-                    "errors": item.errors,
-                    "elapsed_s": item.elapsed_s,
-                },
+                _stats_to_summary(item),
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
         )
-    return 0 if all(item.errors == 0 for item in stats) else 1
+    return 0 if all(_stats_passed(item) for item in stats) else 1
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -286,6 +355,42 @@ def _decode_response(raw_response: str | bytes) -> dict[str, Any]:
     if not isinstance(response, dict):
         raise ValueError("server response must be a JSON object")
     return response
+
+
+async def _recv_with_timeout(
+    websocket: Any,
+    *,
+    response_timeout_ms: int | None,
+) -> str | bytes:
+    if response_timeout_ms is None:
+        return await websocket.recv()
+    if response_timeout_ms <= 0:
+        raise ValueError("response_timeout_ms must be positive")
+    try:
+        return await asyncio.wait_for(
+            websocket.recv(),
+            timeout=response_timeout_ms / 1000.0,
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError("timed out waiting for server response") from exc
+
+
+def _stats_to_summary(item: ReplayStats) -> dict[str, Any]:
+    return {
+        "scene": item.scene,
+        "frames_sent": item.frames_sent,
+        "frames_ok": item.frames_ok,
+        "errors": item.errors,
+        "ok_rate": item.ok_rate,
+        "frames_with_person": item.frames_with_person,
+        "person_frame_rate": item.person_frame_rate,
+        "frame_id_mismatch": item.frame_id_mismatch,
+        "elapsed_s": item.elapsed_s,
+    }
+
+
+def _stats_passed(item: ReplayStats) -> bool:
+    return item.errors == 0 and item.frame_id_mismatch == 0
 
 
 def _default_connector() -> Callable[..., Any]:

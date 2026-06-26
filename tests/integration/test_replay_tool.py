@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -5,6 +6,7 @@ import pytest
 
 from tools.replay_val_data import (
     ReplayStats,
+    async_main,
     discover_scene_dirs,
     iter_scene_frames,
     replay_scene,
@@ -117,6 +119,17 @@ class FakeConnect:
         return False
 
 
+class HangingWebSocket(FakeWebSocket):
+    async def recv(self):
+        await asyncio.sleep(1)
+
+
+class HangingConnect(FakeConnect):
+    def __init__(self):
+        self.websocket = HangingWebSocket()
+        self.urls = []
+
+
 @pytest.mark.asyncio
 async def test_replay_scene_sends_one_frame_at_a_time_and_saves_jsonl(tmp_path):
     scene = tmp_path / "pic_hello"
@@ -135,12 +148,17 @@ async def test_replay_scene_sends_one_frame_at_a_time_and_saves_jsonl(tmp_path):
         save_jsonl=save_jsonl,
         connector=connector,
         realtime=False,
+        response_timeout_ms=250,
     )
 
     assert isinstance(stats, ReplayStats)
     assert stats.frames_sent == 2
     assert stats.frames_ok == 2
     assert stats.errors == 0
+    assert stats.ok_rate == 1.0
+    assert stats.frames_with_person == 0
+    assert stats.person_frame_rate == 0.0
+    assert stats.frame_id_mismatch == 0
     assert connector.urls == [("ws://127.0.0.1:8765/v1/stream", None)]
     assert len(connector.websocket.sent_payloads) == 2
     assert [
@@ -152,3 +170,76 @@ async def test_replay_scene_sends_one_frame_at_a_time_and_saves_jsonl(tmp_path):
     assert [line["frame_id"] for line in lines] == [0, 1]
     assert [line["response"]["type"] for line in lines] == ["visual_state", "visual_state"]
     assert all(line["latency_ms"] >= 0 for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_replay_scene_response_timeout_records_error_and_returns(tmp_path):
+    scene = tmp_path / "pic_hello"
+    scene.mkdir()
+    write_jpeg(scene / "img_1710000000000000000.jpeg")
+    connector = HangingConnect()
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=1,
+    )
+
+    assert stats.frames_sent == 1
+    assert stats.frames_ok == 0
+    assert stats.errors == 1
+    assert stats.ok_rate == 0.0
+
+
+@pytest.mark.asyncio
+async def test_async_main_writes_summary_json(tmp_path, monkeypatch):
+    scene = tmp_path / "pic_hello"
+    scene.mkdir()
+    write_jpeg(scene / "img_1710000000000000000.jpeg")
+    summary_json = tmp_path / "summary.json"
+
+    async def fake_replay_data_dir(**kwargs):
+        return [
+            ReplayStats(
+                scene="pic_hello",
+                frames_sent=2,
+                frames_ok=2,
+                errors=0,
+                elapsed_s=0.25,
+                frames_with_person=1,
+                frame_id_mismatch=1,
+            )
+        ]
+
+    monkeypatch.setattr("tools.replay_val_data.replay_data_dir", fake_replay_data_dir)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(scene),
+            "--summary-json",
+            str(summary_json),
+        ]
+    )
+
+    assert exit_code == 1
+    assert json.loads(summary_json.read_text()) == [
+        {
+            "scene": "pic_hello",
+            "frames_sent": 2,
+            "frames_ok": 2,
+            "errors": 0,
+            "ok_rate": 1.0,
+            "frames_with_person": 1,
+            "person_frame_rate": 0.5,
+            "frame_id_mismatch": 1,
+            "elapsed_s": 0.25,
+        }
+    ]

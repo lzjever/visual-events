@@ -7,7 +7,12 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from .config import ServerConfig, load_config
-from .processor import MockVisualFrameProcessor, VisualFrameProcessor
+from .inference.factory import create_infer_backend
+from .processor import (
+    BackendVisualFrameProcessor,
+    MockVisualFrameProcessor,
+    VisualFrameProcessor,
+)
 from .protocol import (
     ProtocolError,
     decode_frame_message,
@@ -88,6 +93,11 @@ def create_app(
     return app
 
 
+def create_processor_from_config(config: ServerConfig) -> VisualFrameProcessor:
+    backend = create_infer_backend(config.inference, runtime_dir=config.runtime_dir)
+    return BackendVisualFrameProcessor(backend)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="visual-events-server")
     parser.add_argument("--config", help="Path to a JSON or TOML server config")
@@ -98,7 +108,11 @@ def main(argv: list[str] | None = None) -> None:
     config = load_config(args.config)
     host = args.host or config.host
     port = args.port if args.port is not None else config.port
-    app = create_app(config=config)
+    try:
+        processor = create_processor_from_config(config)
+    except Exception as exc:
+        parser.exit(2, f"config error: {exc}\n")
+    app = create_app(processor=processor, config=config)
     uvicorn.run(app, host=host, port=port)
 
 

@@ -69,7 +69,7 @@ V1 技术栈：
 - `uv` 做包管理和环境管理。
 - FastAPI/Starlette WebSocket + Uvicorn。
 - Pytest 做单元/集成测试。
-- Ultralytics `YOLOv8n-pose` 做 V1 inference backend。
+- Ultralytics headless package `ultralytics-opencv-headless` + `YOLOv8n-pose` 做 V1 inference backend。
 - 不同时维护 `websockets` 裸实现、gRPC 或第二套 HTTP streaming 协议。
 
 V1 server 结构：
@@ -121,6 +121,7 @@ artifacts/      # ignored: replay/e2e/perf outputs
 - `tools/` 和 `tests/` 是开发/验证目录，不属于正式 robot CLI。
 - 开发环境使用项目内 `.venv/` 和 `.uv-cache/`。
 - release/runtime 环境使用项目内 `runtime/venv/` 和 `runtime/cache/uv/`。
+- inference runtime cache 必须收敛在 `runtime/cache/*`；server 设置 `YOLO_CONFIG_DIR`、`TORCH_HOME`、`XDG_CACHE_HOME`、`MPLCONFIGDIR`，不改 `HOME`。
 - `val-data/`、`runtime/`、`artifacts/`、模型缓存和测试产物不得进入 Git。
 - `uv.lock` 必须进入 Git，用于 release/runtime 的 `--frozen` 安装。
 
@@ -132,14 +133,38 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv run --group dev pytest -q
 UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv run visual-events-server --host 127.0.0.1 --port 8765
 ```
 
+开发真实推理命令：
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv uv sync --group dev --extra inference
+```
+
 release/runtime 最小部署命令：
 
 ```bash
-UV_CACHE_DIR=runtime/cache/uv UV_PROJECT_ENVIRONMENT=runtime/venv uv sync --frozen --no-dev --no-editable
+UV_CACHE_DIR=runtime/cache/uv UV_PROJECT_ENVIRONMENT=runtime/venv uv sync --frozen --no-dev --no-editable --extra inference
 runtime/venv/bin/visual-events-server --config runtime/config.toml
 ```
 
 release 产物应保持简单：Python runtime venv、server 代码、锁定依赖、本地 config、后续模型缓存和运行输出都留在 `runtime/` 或 `artifacts/`，不写入 Git。
+
+真实推理配置示例：
+
+```toml
+[server]
+runtime_dir = "runtime"
+
+[inference]
+backend = "ultralytics"
+model_path = "runtime/models/yolov8n-pose.pt"
+device = "0"
+imgsz = 640
+conf = 0.25
+```
+
+GPU server 可省略 `device` 让 Ultralytics 自动选择，或显式写 `device = "0"`。CPU 仅作为本地无 GPU 调试 fallback，例如 `device = "cpu"`。
+
+模型权重不进入 Git。默认模型路径是 `runtime/models/yolov8n-pose.pt`；也可用 `[inference].model_path` 显式指定。server 不调用裸 `YOLO("yolov8n-pose.pt")`，模型缺失时真实 backend 启动失败并报告 config error，不做隐式下载。
 
 KISS 约束：
 
@@ -274,10 +299,13 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - `UltralyticsPoseBackend`。
 - `PoseDetections` 内部结构。
 - person bbox/keypoints/confidence 输出。
+- `visual_state.scene_flags.has_person/person_count` 来自 detections。
+- S2 不生成稳定 `track_id`，`tracks` 可以为空。
 
 验收：
 
 - `val-data/` 每个场景至少 95% 有效帧能完成推理并返回 `visual_state`。
+- 有人场景中 `scene_flags.has_person/person_count` 能反映 person detections。
 - server GPU 模式显存目标 < 4GB。
 - 单帧错误不会中断连接。
 
@@ -409,8 +437,8 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 | 协议 | 合法 JPEG envelope | 任意 `val-data` 目录 | 每帧返回同 `frame_id` 的 `visual_state`，无协议错误 |
 | 协议 | header 过大、非法 JSON、非 JPEG、unsupported encoding | 构造帧 | 返回协议定义的 `error.code`，服务不崩溃 |
 | 协议 | one in-flight | replay client 强制等待响应 | server 不积压队列，乱序响应为 0 |
-| 推理 | person bbox/keypoints | 全部 `val-data` | 有人场景中 `tracks` 非空率 >= 85% |
-| 推理 | image_size/坐标合法性 | 全部 `val-data` | bbox 坐标在图像范围内，`bbox_area_ratio` 在 0-1 |
+| 推理 | person bbox/keypoints | 全部 `val-data` | 有人场景中 `scene_flags.has_person` 非空率 >= 85%，`person_count` 来自 detections |
+| 推理 | image_size/坐标合法性 | 全部 `val-data` | 内部 `PoseDetections` bbox 坐标在图像范围内，`bbox_area` 在图像面积范围内；`bbox_area_ratio` 留到 S3 tracks 输出后验证 |
 | 追踪 | 单人稳定 track | `pci_stand`、`pic_walk_in_stop` | 主 track 在可见区间 ID 切换 <= 1 次 |
 | 追踪 | 路过轨迹连续 | `pic_1_l_to_r`、`pic_1_r_to_l` | 主 track 横向速度方向与场景一致，轨迹中断不超过 1s |
 | 事件 | `person_passing_by` | `pic_1_l_to_r`、`pic_1_r_to_l` | 每段触发 1 次，不能触发 `person_stopped_near_robot` |
