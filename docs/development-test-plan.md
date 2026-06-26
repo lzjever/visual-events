@@ -1,0 +1,368 @@
+# Visual Events 开发与测试计划
+
+日期：2026-06-26
+
+## 1. 开发原则
+
+这些原则是实现约束，不是口号：
+
+- KISS：一个 DDS 图像输入，一个 WebSocket 服务协议，一个 `visual_state` schema，一个 Botified 事件出口。
+- DRY：schema、几何计算、事件冷却、注视目标选择只实现一次。服务端负责事件生成、rising-edge、cooldown 和同 track 去重；CLI 只按 `event_id` 做 Botified 输出幂等保护，不重新实现事件规则。
+- YAGNI：没有明确验收需求前，不加训练流程、人脸识别、ReID、数据库、事件治理后台、多摄像头、多协议。
+- 可替换但不抽象过度：只为推理 backend 定一个小接口，服务 RK3588 迁移；其他地方先按 V1 需求直接实现。
+- 高频状态和低频事件分离：10Hz 状态用于控制和调试，Botified frame 只承载语义事件。
+- 失败时降级：服务断开、帧过期、无人、目标丢失时，CLI 不输出误导性事件，头控进入保持或回中策略。
+
+## 2. Repo 结构
+
+计划结构：
+
+```text
+visual-events/
+  README.md
+  docs/
+    product-design.md
+    development-test-plan.md
+  server/
+    visual_events_server/
+      api/
+      inference/
+      tracking/
+      events/
+      attention/
+  robot_cli/
+    src/
+      dds_input/
+      service_client/
+      gaze_control/
+      botified_output/
+  common/
+    schema/
+      protocol.md
+      samples/
+```
+
+边界：
+
+- `server` 用 Python，方便接 Ultralytics、ONNX/TensorRT/RKNN 原型和 WebSocket 服务。
+- `robot_cli` 用 C++，复用 `/home/galbot/works/image-capture` 的 Unitree DDS JPEG 订阅经验。
+- `common/schema` 是共享协议事实来源；不强行共享 Python/C++ 业务代码。
+- 未来 RK3588 本地化仍运行同一个 `visual-events-server --backend rknn`，机器人 CLI 连接 `ws://127.0.0.1:<port>/v1/stream`；不把 RKNN 推理嵌进 C++ CLI。
+
+## 3. 模块计划
+
+### 3.1 Server
+
+模块：
+
+- `api`: WebSocket 接入、帧解析、连接生命周期。
+- `inference`: `InferBackend` 接口和 `UltralyticsPoseBackend`。
+- `tracking`: ByteTrack，只追踪 person。
+- `events`: track history 和 V1 规则。
+- `attention`: 最大稳定人物选择和 `target_uv` 计算。
+
+`InferBackend` 最小接口：
+
+```text
+infer(frame) -> PoseDetections
+```
+
+`PoseDetections` 必须是项目自己的结构，不直接把 Ultralytics result 对象传到 tracking/events。
+
+### 3.2 Robot CLI
+
+模块：
+
+- `dds_input`: 持续订阅 `/camera/image/jpeg`，校验 JPEG，按 10Hz 取最新帧。
+- `service_client`: WebSocket 连接、二进制帧发送、`visual_state` 接收、断线重连。
+- `gaze_control`: stale 检查、deadband、滤波、限速、目标保持、头部命令输出。
+- `botified_output`: 语义事件去重，写 stdout `<botified>...</botified>`。
+
+CLI 默认行为：
+
+```text
+visual-events-cli --server ws://<host>:<port>/v1/stream --camera front
+```
+
+stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr 或文件；显式 `--debug-json-stdout` 只能用于手工调试，不能用于 Botified task。
+
+## 4. 里程碑
+
+### M0 文档与协议
+
+产出：
+
+- 产品设计文档。
+- 开发/测试计划。
+- `visual_state`、`semantic_event`、WebSocket frame envelope 样例。
+
+验收：
+
+- 产品和技术评审确认一条主线方案。
+
+### M1 Mock 端到端
+
+产出：
+
+- WebSocket mock server。
+- Robot CLI mock input 模式，读取本地 JPEG 序列。
+- 服务端返回 mock `visual_state`。
+
+验收：
+
+- 10Hz JPEG 序列能跑满 5 分钟。
+- 断线后 CLI 自动重连。
+- 旧帧被丢弃，不产生无界队列。
+- 每条 WebSocket 连接最多一个 in-flight frame，超时后丢弃响应并重连。
+
+### M2 DDS 输入
+
+产出：
+
+- C++ DDS JPEG 持续订阅。
+- 复用 `image-capture` 的 JPEG 字段校验、DDS domain/network 配置思路。
+
+验收：
+
+- 可从 `/camera/image/jpeg` 稳定取 10Hz 最新帧。
+- 无 DDS 发布者时 CLI 有清晰错误并保持可恢复。
+
+### M3 推理
+
+产出：
+
+- `YOLOv8n-pose` backend。
+- person bbox/keypoints 输出到项目内部结构。
+- 640 输入尺寸基准配置。
+
+验收：
+
+- 单帧和视频回放输出稳定 bbox/keypoints。
+- 5090D 服务端显存 < 4GB。
+- GPU 模式从 server 收到完整 frame 到发出 `visual_state`，P95 < 120ms。
+
+### M4 追踪与注视目标
+
+产出：
+
+- ByteTrack 接入。
+- `attention.target_track_id` 和 `target_uv`。
+- 目标滞回、短暂丢失保持。
+
+验收：
+
+- 单人 1s 内形成稳定 track。
+- 多人面积接近时不频繁切换。
+- `attention` 10Hz 返回，过期帧不用于控制。
+- 10s 多人回放中，除非新目标面积超过当前目标 25% 并持续 0.5s，目标切换次数 <= 2。
+
+### M5 事件规则与 Botified
+
+产出：
+
+- 事件规则：出现、离开、停留、挥手、注视目标变化。
+- Event cooldown 和同 track 去重。
+- Botified frame 输出。
+
+验收：
+
+- 高频 `visual_state` 不进入 Botified。
+- 同一事件不会刷屏。
+- Botified frame 符合 `id/request/expect/urgency/timeout_secs` 约束。
+
+### M6 头部注视控制
+
+产出：
+
+- `gaze_control` 本地闭环。
+- 头部接口 adapter：先实现 `log` 和 `disabled`，接入真实接口后实现 `head_velocity` 或 `head_position`。
+
+验收：
+
+- `log` adapter 模式下，给定固定 `target_uv` 序列，输出命令满足 deadband、低通、速度限制和 stale 丢弃。
+- 接入真实 `head_velocity` 或等价接口后，在目标稳定、初始归一化误差 <= 0.20、`deadband_norm=0.03` 的测试条件下，1s 内进入 deadband 并保持至少 5 帧。
+- 目标丢失时保持或回中，不抽动。
+- frame header 标记头部运动或未知时，服务端暂停 `person_stopped_near_robot` 这类运动敏感事件。
+
+### M7 RK3588 Spike
+
+产出：
+
+- 在 RK3588 上跑 `yolov8n-pose.rknn` 或 RKNN Model Zoo 等价示例。
+- E2E 性能报告，必须包含 JPEG decode、preprocess、infer、postprocess、tracking。
+
+验收：
+
+- 单路 640 pose E2E >= 10Hz，或明确瓶颈与降级方案。
+- RKNN 输出能转换为同一份 `PoseDetections`。
+
+## 5. 测试计划
+
+### 5.1 单元测试
+
+覆盖：
+
+- bbox 面积、中心点、头部 fallback 点。
+- `target_uv` 低通和 deadband。
+- 最大人物选择和滞回。
+- track history 时间窗口。
+- event rising-edge、cooldown、同 track 去重。
+- Botified frame JSON escape 和 id 合法性。
+
+### 5.2 协议测试
+
+覆盖：
+
+- WebSocket binary envelope 解析。
+- header 长度非法、JSON 非法、JPEG 非法。
+- frame_id 乱序。
+- 旧 timestamp 丢弃。
+- 服务端慢处理时客户端只保留最新帧。
+- 断线重连后事件状态不会立即刷屏。
+
+### 5.3 回放测试
+
+准备固定 JPEG 序列：
+
+- 空画面。
+- 单人进入和离开。
+- 单人停留。
+- 单人挥手。
+- 两个人交叉和面积接近。
+- 头部转动导致画面整体移动。
+
+验收：
+
+- 同一输入序列的 `track_id` 可允许不同，但事件类型、事件数量和触发帧偏差 <= 3 帧。
+- `person_appeared` 在稳定出现后 2-5 帧内触发。
+- `person_left` 在 lost TTL 后 2 帧内触发。
+- `person_stopped_near_robot` 在满足低速停留阈值后 5 帧内触发。
+- 同一事件 cooldown 内不重复输出。
+- 多人面积接近回放中 10s 内 attention 切换次数 <= 2。
+
+### 5.4 集成测试
+
+覆盖：
+
+- CLI mock JPEG input -> server -> visual_state。
+- CLI DDS input -> mock server。
+- server 推理 -> tracking -> events。
+- semantic_event -> Botified frame stdout。
+
+Botified 集成只测试 stdout frame，不修改 Botified 服务端。
+
+### 5.5 性能测试
+
+服务端 GPU：
+
+- 输入：640 JPEG，10Hz，单路。
+- 指标：decode、preprocess、infer、postprocess、tracking、event、total latency。
+- 目标：P95 < 120ms，P99 < 200ms，显存 < 4GB。
+
+机器人 CLI：
+
+- DDS 接收频率。
+- WebSocket 发送频率。
+- 重连时间。
+- stale frame 丢弃数量。
+- Botified event rate。
+
+RK3588：
+
+- 不只测 NPU inference。
+- 必须包含 decode/preprocess/postprocess/tracking。
+- 目标：E2E >= 10Hz。
+
+### 5.6 机器人测试
+
+覆盖：
+
+- 单人站在画面前方时注视头部区域。
+- 两人并列时注视最大稳定人物。
+- 目标短暂遮挡时保持。
+- 无人时保持或回中。
+- 服务断开时停止发送头部追踪命令。
+
+## 6. 配置
+
+V1 配置只保留必要项：
+
+```yaml
+camera:
+  name: front
+  dds_topic: /camera/image/jpeg
+  hz: 10
+
+service:
+  url: ws://127.0.0.1:8765/v1/stream
+
+model:
+  name: yolov8n-pose
+  image_size: 640
+  confidence: 0.35
+
+tracking:
+  type: bytetrack
+  lost_ttl_ms: 1000
+
+events:
+  cooldown_ms: 5000
+
+gaze:
+  enabled: true
+  mode: log
+  stale_ms: 250
+  deadband_norm: 0.03
+```
+
+不为每个规则开放大量配置。阈值先放在一个小配置块里，只有调试证明需要时再暴露。
+
+## 7. Handoff Checklist
+
+开发前必须确认：
+
+- 头部控制接口：角速度、角度目标，还是已有 `look_at` API。
+- 摄像头是否安装在头部，以及能否读取头部 yaw/pitch/角速度。
+- Botified 启动 CLI 的命令、工作目录、环境变量和日志采集方式。
+- 产品授权路径：AGPL 开源还是 Ultralytics Enterprise。
+
+未确认时的默认策略：
+
+- 头部控制接口未确认：使用 `gaze.mode=log`，只验收命令计算，不发送真实头控命令。
+- 摄像头是否头载或头部运动状态未知：frame header 标记 `head_motion.state=unknown`，服务端暂停运动敏感事件。
+- 授权未确认：只做内部 POC 和性能验证，不进入产品发布。
+- 其他模块是否需要高频 DDS 未确认：不发布高频 DDS，只在 CLI 内部消费 `visual_state`。
+
+首版完成必须满足：
+
+- 同 repo 中有 server 和 robot CLI。
+- 高频状态走 WebSocket，不走 Botified。
+- 低频事件走 Botified frame。
+- 注视控制在 CLI 本地闭环。
+- V1 事件不会刷屏。
+- 有回放测试和性能报告。
+
+## 8. 评审结论
+
+产品评审结论：
+
+- 分层正确：高频状态用于控制，低频事件用于 agent。
+- MVP 范围应保守，先做 person/pose/track/规则事件/注视最大人物。
+- 人脸检测、真实 gaze、多摄像头、长期记忆都不进入 V1。
+
+技术评审结论：
+
+- `YOLOv8n-pose + ByteTrack` 是当前兼顾服务端可用性和 RK3588 未来迁移的最好 baseline。
+- WebSocket streaming 比 gRPC 更适合 V1。
+- 服务端不接 DDS；机器人 CLI 是 DDS、Botified、头控的集成边界。
+- RK3588 迁移风险必须用 E2E spike 验证，不能只看 NPU inference benchmark。
+
+## 9. 参考资料
+
+- Ultralytics tracking 文档：<https://docs.ultralytics.com/modes/track/>
+- Ultralytics Rockchip RKNN 文档：<https://docs.ultralytics.com/integrations/rockchip-rknn/>
+- Rockchip RKNN Model Zoo：<https://github.com/airockchip/rknn_model_zoo>
+- RKNN Toolkit2：<https://github.com/rockchip-linux/rknn-toolkit2>
+- Ultralytics license：<https://www.ultralytics.com/license>
+- Botified interactive stdio contract：`/home/galbot/works/botified/docs/ops-manual.md`
+- DDS JPEG capture reference：`/home/galbot/works/image-capture`
