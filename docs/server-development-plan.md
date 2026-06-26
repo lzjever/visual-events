@@ -451,7 +451,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 | 事件 | `person_waving` | `pic_hello` | 触发 1 次；其他非挥手目录不得频繁误报 |
 | 事件 | `person_left` | `pic_leave` | track 丢失 TTL 后触发 1 次 |
 | 事件抑制 | 运动敏感事件抑制 | 路过/靠近/停留目录，`head_motion=moving/unknown` | 不触发 `passing_by/approaching/stopped` |
-| Attention | 最大稳定人物 | 全部 `val-data` | 有人时 `attention.target_track_id` 指向最大稳定 person track |
+| Attention | 最大稳定人物 | 全部 `val-data` | 存在稳定 visible person 或短暂 lost hold 时，`attention.target_track_id` 指向 selector 目标；无稳定目标且无 lost hold 时允许 `attention=null` |
 | Attention | 注视点合法 | 全部 `val-data` | `target_uv` 在图像范围内 |
 | 性能 | server GPU E2E | 全部 `val-data` 循环 5 分钟 | P95 < 120ms，P99 < 200ms |
 | 回归 | 固定数据回放 | 全部 `val-data` | 事件类型、数量、顺序稳定；触发帧偏差 <= 3 帧或 <= 300ms |

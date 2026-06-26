@@ -145,16 +145,37 @@ def track_payload(
     }
 
 
+def attention_payload(
+    track_id: int,
+    *,
+    target_uv: list[float] | None = None,
+    reason: str = "largest_stable_person",
+    confidence: float = 0.9,
+) -> dict:
+    return {
+        "target_track_id": track_id,
+        "target_uv": target_uv or [60.0, 76.0],
+        "reason": reason,
+        "confidence": confidence,
+    }
+
+
 class SequenceResponseWebSocket(FakeWebSocket):
-    def __init__(self, response_tracks):
+    def __init__(self, response_tracks, response_attentions=None):
         super().__init__()
         self.response_tracks = list(response_tracks)
+        self.response_attentions = (
+            [None for _ in response_tracks]
+            if response_attentions is None
+            else list(response_attentions)
+        )
 
     async def recv(self):
         assert self.awaiting_recv is True
         self.awaiting_recv = False
         frame = decode_frame_message(self.sent_payloads[-1])
         tracks = self.response_tracks.pop(0)
+        attention = self.response_attentions.pop(0)
         return json.dumps(
             {
                 "type": "visual_state",
@@ -165,11 +186,11 @@ class SequenceResponseWebSocket(FakeWebSocket):
                 "server_timestamp_ms": frame.timestamp_ms + 5,
                 "image_size": [frame.width, frame.height],
                 "tracks": tracks,
-                "attention": None,
+                "attention": attention,
                 "scene_flags": {
                     "has_person": bool(tracks),
                     "person_count": len(tracks),
-                    "largest_person_stable": False,
+                    "largest_person_stable": attention is not None,
                     "someone_near_center": False,
                 },
                 "semantic_events": [],
@@ -178,8 +199,8 @@ class SequenceResponseWebSocket(FakeWebSocket):
 
 
 class SequenceResponseConnect(FakeConnect):
-    def __init__(self, response_tracks):
-        self.websocket = SequenceResponseWebSocket(response_tracks)
+    def __init__(self, response_tracks, response_attentions=None):
+        self.websocket = SequenceResponseWebSocket(response_tracks, response_attentions)
         self.urls = []
 
 
@@ -476,6 +497,180 @@ async def test_replay_scene_counts_track_schema_and_age_violations(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_replay_scene_summarizes_attention_targets_switches_and_lost_hold(
+    tmp_path,
+):
+    scene = tmp_path / "pic_hello"
+    scene.mkdir()
+    for index in range(4):
+        write_jpeg(scene / f"img_1710000000{index}00000000.jpeg")
+    left = [10.0, 20.0, 110.0, 220.0]
+    right = [300.0, 20.0, 440.0, 240.0]
+    connector = SequenceResponseConnect(
+        [
+            [track_payload(1, age_ms=400, bbox_area_ratio=0.10, bbox_xyxy=left)],
+            [
+                track_payload(1, age_ms=500, bbox_area_ratio=0.10, bbox_xyxy=left),
+                track_payload(2, age_ms=500, bbox_area_ratio=0.22, bbox_xyxy=right),
+            ],
+            [
+                track_payload(
+                    1,
+                    age_ms=600,
+                    bbox_area_ratio=0.10,
+                    bbox_xyxy=left,
+                    lost_ms=300,
+                )
+            ],
+            [track_payload(2, age_ms=700, bbox_area_ratio=0.22, bbox_xyxy=right)],
+        ],
+        [
+            attention_payload(1),
+            attention_payload(1),
+            attention_payload(1, reason="held_lost_target"),
+            attention_payload(2, target_uv=[370.0, 81.6]),
+        ],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.attention_frames == 4
+    assert stats.attention_null_frames == 0
+    assert stats.attention_coverage == 1.0
+    assert stats.attention_target_switches == 1
+    assert stats.attention_target_counts_by_id == {"1": 3, "2": 1}
+    assert stats.attention_schema_errors == 0
+    assert stats.attention_invalid_uv_frames == 0
+    assert stats.attention_target_missing_track_frames == 0
+    assert stats.attention_target_lost_frames == 1
+    assert stats.attention_max_lost_hold_ms == 300
+    assert stats.attention_largest_bbox_disagreement_frames == 1
+    assert _stats_passed(stats, gate="attention") is True
+
+
+@pytest.mark.asyncio
+async def test_replay_scene_counts_attention_schema_uv_and_missing_target_errors(
+    tmp_path,
+):
+    scene = tmp_path / "pic_hello"
+    scene.mkdir()
+    for index in range(3):
+        write_jpeg(scene / f"img_1710000000{index}00000000.jpeg")
+    connector = SequenceResponseConnect(
+        [
+            [track_payload(1, age_ms=400)],
+            [track_payload(1, age_ms=500)],
+            [track_payload(1, age_ms=600)],
+        ],
+        [
+            {"target_track_id": 1, "reason": "largest_stable_person", "confidence": 0.9},
+            attention_payload(1, target_uv=[2000.0, 76.0]),
+            attention_payload(2),
+        ],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.attention_frames == 2
+    assert stats.attention_schema_errors == 1
+    assert stats.attention_invalid_uv_frames == 1
+    assert stats.attention_target_missing_track_frames == 1
+    assert _stats_passed(stats, gate="attention") is False
+
+
+@pytest.mark.asyncio
+async def test_replay_scene_empty_attention_fails_attention_gate_only(tmp_path):
+    scene = tmp_path / "pic_hello"
+    scene.mkdir()
+    write_jpeg(scene / "img_1710000000000000000.jpeg")
+    connector = SequenceResponseConnect([[track_payload(1, age_ms=400)]])
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.attention_frames == 0
+    assert stats.attention_null_frames == 1
+    assert stats.attention_coverage == 0.0
+    assert _stats_passed(stats, gate="tracking") is True
+    assert _stats_passed(stats, gate="attention") is False
+    assert _stats_passed(stats, gate="none") is True
+
+
+def test_stable_attention_scene_low_coverage_fails_attention_gate():
+    stats = ReplayStats(
+        scene="pci_stand",
+        frames_sent=10,
+        frames_ok=10,
+        errors=0,
+        elapsed_s=1.0,
+        attention_frames=1,
+        attention_null_frames=9,
+        attention_target_counts_by_id={"1": 1},
+    )
+
+    assert stats.attention_coverage == 0.1
+    assert _stats_passed(stats, gate="attention") is False
+
+
+def test_stable_attention_scene_excessive_switches_fail_attention_gate():
+    stats = ReplayStats(
+        scene="pic_walk_in_stop",
+        frames_sent=10,
+        frames_ok=10,
+        errors=0,
+        elapsed_s=1.0,
+        attention_frames=10,
+        attention_target_switches=3,
+        attention_target_counts_by_id={"1": 4, "2": 3, "3": 3},
+    )
+
+    assert stats.attention_coverage == 1.0
+    assert _stats_passed(stats, gate="attention") is False
+
+
+def test_non_stable_attention_scene_uses_generic_evidence_gate():
+    stats = ReplayStats(
+        scene="pic_hello",
+        frames_sent=10,
+        frames_ok=10,
+        errors=0,
+        elapsed_s=1.0,
+        attention_frames=1,
+        attention_null_frames=9,
+        attention_target_counts_by_id={"1": 1},
+    )
+
+    assert stats.attention_coverage == 0.1
+    assert _stats_passed(stats, gate="attention") is True
+
+
+@pytest.mark.asyncio
 async def test_replay_scene_response_timeout_records_error_and_returns(tmp_path):
     scene = tmp_path / "pic_hello"
     scene.mkdir()
@@ -555,6 +750,20 @@ async def test_async_main_writes_summary_json(tmp_path, monkeypatch):
             "visible_counts_by_id": {},
             "track_schema_errors": 0,
             "age_monotonic_violations": 0,
+            "attention_frames": 0,
+            "attention_null_frames": 0,
+            "attention_coverage": 0.0,
+            "attention_target_switches": 0,
+            "attention_target_counts_by_id": {},
+            "attention_schema_errors": 0,
+            "attention_invalid_uv_frames": 0,
+            "attention_target_missing_track_frames": 0,
+            "attention_target_lost_frames": 0,
+            "attention_max_lost_hold_ms": 0,
+            "attention_largest_bbox_disagreement_frames": 0,
+            "tracking_pass": False,
+            "attention_pass": False,
+            "passed": False,
             "elapsed_s": 0.25,
         }
     ]

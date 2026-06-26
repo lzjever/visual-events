@@ -1,6 +1,6 @@
 # visual-events
 
-视觉事件推理服务。当前 repo 已包含 S0/S1 server skeleton、WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay 测试工具、S2 推理 backend 边界和 Ultralytics pose adapter，以及 S3 项目内 ByteTrack-style IoU/TTL tracker baseline。attention 和 semantic events 仍按后续里程碑实现。首个产品场景是商店门口揽客机器人。
+视觉事件推理服务。当前 repo 已包含 S0/S1 server skeleton、WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay 测试工具、S2 推理 backend 边界和 Ultralytics pose adapter、S3 项目内 ByteTrack-style IoU/TTL tracker baseline，以及 S4 attention selector。semantic events 仍按后续里程碑实现。首个产品场景是商店门口揽客机器人。
 
 本 repo 计划同时包含两个运行单元：
 

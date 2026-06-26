@@ -100,7 +100,11 @@ def create_app(
 
 def create_processor_from_config(config: ServerConfig) -> VisualFrameProcessor:
     backend = create_infer_backend(config.inference, runtime_dir=config.runtime_dir)
-    return BackendVisualFrameProcessor(backend, tracking_config=config.tracking)
+    return BackendVisualFrameProcessor(
+        backend,
+        tracking_config=config.tracking,
+        attention_config=config.attention,
+    )
 
 
 def _session_factory_from_processor(

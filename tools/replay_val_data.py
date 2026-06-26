@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -20,6 +21,9 @@ DEFAULT_HEIGHT = 720
 _JPEG_GLOBS = ("*.jpeg", "*.jpg")
 _FILENAME_NUMBER = re.compile(r"(\d+)")
 _ASSOCIATION_IOU_THRESHOLD = 0.5
+_S4_STABLE_ATTENTION_SCENES = {"pci_stand", "pic_walk_in_stop"}
+_S4_STABLE_ATTENTION_MIN_COVERAGE = 0.85
+_S4_STABLE_ATTENTION_MAX_SWITCHES = 2
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,16 @@ class ReplayStats:
     visible_counts_by_id: dict[str, int] = field(default_factory=dict)
     track_schema_errors: int = 0
     age_monotonic_violations: int = 0
+    attention_frames: int = 0
+    attention_null_frames: int = 0
+    attention_target_switches: int = 0
+    attention_target_counts_by_id: dict[str, int] = field(default_factory=dict)
+    attention_schema_errors: int = 0
+    attention_invalid_uv_frames: int = 0
+    attention_target_missing_track_frames: int = 0
+    attention_target_lost_frames: int = 0
+    attention_max_lost_hold_ms: int = 0
+    attention_largest_bbox_disagreement_frames: int = 0
 
     @property
     def ok_rate(self) -> float:
@@ -61,6 +75,12 @@ class ReplayStats:
         if self.frames_sent == 0:
             return 0.0
         return self.frames_with_person / self.frames_sent
+
+    @property
+    def attention_coverage(self) -> float:
+        if self.frames_ok == 0:
+            return 0.0
+        return self.attention_frames / self.frames_ok
 
 
 def discover_scene_dirs(data_dir: Path) -> list[Path]:
@@ -145,6 +165,7 @@ async def replay_scene(
     frames_with_person = 0
     frame_id_mismatch = 0
     tracking_stats = _TrackingStatsAccumulator()
+    attention_stats = _AttentionStatsAccumulator()
 
     jsonl_file = None
     try:
@@ -199,6 +220,7 @@ async def replay_scene(
                     if response.get("frame_id") != frame.header["frame_id"]:
                         frame_id_mismatch += 1
                     tracking_stats.observe(response)
+                    attention_stats.observe(response)
                 else:
                     errors += 1
 
@@ -226,6 +248,7 @@ async def replay_scene(
             jsonl_file.close()
 
     tracking_summary = tracking_stats.summary()
+    attention_summary = attention_stats.summary()
     return ReplayStats(
         scene=Path(scene_dir).name,
         frames_sent=frames_sent,
@@ -248,6 +271,22 @@ async def replay_scene(
         visible_counts_by_id=tracking_summary["visible_counts_by_id"],
         track_schema_errors=tracking_summary["track_schema_errors"],
         age_monotonic_violations=tracking_summary["age_monotonic_violations"],
+        attention_frames=attention_summary["attention_frames"],
+        attention_null_frames=attention_summary["attention_null_frames"],
+        attention_target_switches=attention_summary["attention_target_switches"],
+        attention_target_counts_by_id=attention_summary[
+            "attention_target_counts_by_id"
+        ],
+        attention_schema_errors=attention_summary["attention_schema_errors"],
+        attention_invalid_uv_frames=attention_summary["attention_invalid_uv_frames"],
+        attention_target_missing_track_frames=attention_summary[
+            "attention_target_missing_track_frames"
+        ],
+        attention_target_lost_frames=attention_summary["attention_target_lost_frames"],
+        attention_max_lost_hold_ms=attention_summary["attention_max_lost_hold_ms"],
+        attention_largest_bbox_disagreement_frames=attention_summary[
+            "attention_largest_bbox_disagreement_frames"
+        ],
     )
 
 
@@ -317,6 +356,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Send the next frame as soon as a response arrives.",
     )
+    parser.add_argument(
+        "--gate",
+        choices=("tracking", "attention", "all", "none"),
+        default="tracking",
+        help="Validation gate to apply to the replay summary.",
+    )
     return parser.parse_args(argv)
 
 
@@ -336,7 +381,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         args.summary_json.parent.mkdir(parents=True, exist_ok=True)
         args.summary_json.write_text(
             json.dumps(
-                [_stats_to_summary(item) for item in stats],
+                [_stats_to_summary(item, gate=args.gate) for item in stats],
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -345,12 +390,12 @@ async def async_main(argv: list[str] | None = None) -> int:
     for item in stats:
         print(
             json.dumps(
-                _stats_to_summary(item),
+                _stats_to_summary(item, gate=args.gate),
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
         )
-    return 0 if all(_stats_passed(item) for item in stats) else 1
+    return 0 if all(_stats_passed(item, gate=args.gate) for item in stats) else 1
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -405,7 +450,9 @@ async def _recv_with_timeout(
         raise TimeoutError("timed out waiting for server response") from exc
 
 
-def _stats_to_summary(item: ReplayStats) -> dict[str, Any]:
+def _stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str, Any]:
+    tracking_pass = _tracking_stats_passed(item)
+    attention_pass = _attention_stats_passed(item)
     return {
         "scene": item.scene,
         "frames_sent": item.frames_sent,
@@ -427,11 +474,41 @@ def _stats_to_summary(item: ReplayStats) -> dict[str, Any]:
         "visible_counts_by_id": item.visible_counts_by_id,
         "track_schema_errors": item.track_schema_errors,
         "age_monotonic_violations": item.age_monotonic_violations,
+        "attention_frames": item.attention_frames,
+        "attention_null_frames": item.attention_null_frames,
+        "attention_coverage": item.attention_coverage,
+        "attention_target_switches": item.attention_target_switches,
+        "attention_target_counts_by_id": item.attention_target_counts_by_id,
+        "attention_schema_errors": item.attention_schema_errors,
+        "attention_invalid_uv_frames": item.attention_invalid_uv_frames,
+        "attention_target_missing_track_frames": (
+            item.attention_target_missing_track_frames
+        ),
+        "attention_target_lost_frames": item.attention_target_lost_frames,
+        "attention_max_lost_hold_ms": item.attention_max_lost_hold_ms,
+        "attention_largest_bbox_disagreement_frames": (
+            item.attention_largest_bbox_disagreement_frames
+        ),
+        "tracking_pass": tracking_pass,
+        "attention_pass": attention_pass,
+        "passed": _stats_passed(item, gate=gate),
         "elapsed_s": item.elapsed_s,
     }
 
 
-def _stats_passed(item: ReplayStats) -> bool:
+def _stats_passed(item: ReplayStats, *, gate: str = "tracking") -> bool:
+    if gate == "tracking":
+        return _tracking_stats_passed(item)
+    if gate == "attention":
+        return _attention_stats_passed(item)
+    if gate == "all":
+        return _tracking_stats_passed(item) and _attention_stats_passed(item)
+    if gate == "none":
+        return True
+    raise ValueError("gate must be one of: tracking, attention, all, none")
+
+
+def _tracking_stats_passed(item: ReplayStats) -> bool:
     return (
         item.errors == 0
         and item.frame_id_mismatch == 0
@@ -443,6 +520,119 @@ def _stats_passed(item: ReplayStats) -> bool:
         and item.single_visible_id_switches == 0
         and item.association_id_switches == 0
     )
+
+
+def _attention_stats_passed(item: ReplayStats) -> bool:
+    generic_pass = (
+        item.errors == 0
+        and item.frame_id_mismatch == 0
+        and item.frames_ok > 0
+        and item.attention_frames > 0
+        and item.attention_schema_errors == 0
+        and item.attention_invalid_uv_frames == 0
+        and item.attention_target_missing_track_frames == 0
+    )
+    if not generic_pass:
+        return False
+    if item.scene not in _S4_STABLE_ATTENTION_SCENES:
+        return True
+    return (
+        item.attention_coverage >= _S4_STABLE_ATTENTION_MIN_COVERAGE
+        and item.attention_target_switches <= _S4_STABLE_ATTENTION_MAX_SWITCHES
+    )
+
+
+@dataclass
+class _AttentionStatsAccumulator:
+    attention_frames: int = 0
+    attention_null_frames: int = 0
+    attention_target_switches: int = 0
+    attention_schema_errors: int = 0
+    attention_invalid_uv_frames: int = 0
+    attention_target_missing_track_frames: int = 0
+    attention_target_lost_frames: int = 0
+    attention_max_lost_hold_ms: int = 0
+    attention_largest_bbox_disagreement_frames: int = 0
+
+    def __post_init__(self) -> None:
+        self._last_target_track_id: int | None = None
+        self._target_counts_by_id: dict[str, int] = {}
+
+    def observe(self, response: dict[str, Any]) -> None:
+        attention = response.get("attention")
+        if attention is None:
+            self.attention_null_frames += 1
+            return
+        if not isinstance(attention, dict) or not _valid_attention_schema(attention):
+            self.attention_schema_errors += 1
+            return
+
+        self.attention_frames += 1
+        target_id = int(attention["target_track_id"])
+        target_key = str(target_id)
+        self._target_counts_by_id[target_key] = (
+            self._target_counts_by_id.get(target_key, 0) + 1
+        )
+        if (
+            self._last_target_track_id is not None
+            and target_id != self._last_target_track_id
+        ):
+            self.attention_target_switches += 1
+        self._last_target_track_id = target_id
+
+        image_size = response.get("image_size")
+        if (
+            not _number_list(image_size, length=2)
+            or float(image_size[0]) < 0.0
+            or float(image_size[1]) < 0.0
+            or not _uv_in_image(attention["target_uv"], image_size=image_size)
+        ):
+            self.attention_invalid_uv_frames += 1
+
+        tracks = _valid_tracks_from_response(response)
+        tracks_by_id = {int(track["track_id"]): track for track in tracks}
+        target_track = tracks_by_id.get(target_id)
+        if target_track is None:
+            self.attention_target_missing_track_frames += 1
+        else:
+            lost_ms = int(target_track.get("lost_ms", 0))
+            if lost_ms > 0:
+                self.attention_target_lost_frames += 1
+                self.attention_max_lost_hold_ms = max(
+                    self.attention_max_lost_hold_ms,
+                    lost_ms,
+                )
+
+        visible_tracks = [
+            track for track in tracks if int(track.get("lost_ms", 0)) == 0
+        ]
+        if visible_tracks:
+            largest = max(
+                visible_tracks,
+                key=lambda track: float(track["bbox_area_ratio"]),
+            )
+            if int(largest["track_id"]) != target_id:
+                self.attention_largest_bbox_disagreement_frames += 1
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "attention_frames": self.attention_frames,
+            "attention_null_frames": self.attention_null_frames,
+            "attention_target_switches": self.attention_target_switches,
+            "attention_target_counts_by_id": dict(
+                sorted(self._target_counts_by_id.items())
+            ),
+            "attention_schema_errors": self.attention_schema_errors,
+            "attention_invalid_uv_frames": self.attention_invalid_uv_frames,
+            "attention_target_missing_track_frames": (
+                self.attention_target_missing_track_frames
+            ),
+            "attention_target_lost_frames": self.attention_target_lost_frames,
+            "attention_max_lost_hold_ms": self.attention_max_lost_hold_ms,
+            "attention_largest_bbox_disagreement_frames": (
+                self.attention_largest_bbox_disagreement_frames
+            ),
+        }
 
 
 @dataclass
@@ -630,6 +820,45 @@ def _valid_track_schema(track: dict[str, Any]) -> bool:
     )
 
 
+def _valid_tracks_from_response(response: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_tracks = response.get("tracks", [])
+    if not isinstance(raw_tracks, list):
+        return []
+    return [
+        raw_track
+        for raw_track in raw_tracks
+        if isinstance(raw_track, dict) and _valid_track_schema(raw_track)
+    ]
+
+
+def _valid_attention_schema(attention: dict[str, Any]) -> bool:
+    required = {"target_track_id", "target_uv", "reason", "confidence"}
+    if not required.issubset(attention):
+        return False
+    return (
+        isinstance(attention["target_track_id"], int)
+        and not isinstance(attention["target_track_id"], bool)
+        and _number_list(attention["target_uv"], length=2)
+        and isinstance(attention["reason"], str)
+        and _is_number(attention["confidence"])
+    )
+
+
+def _uv_in_image(value: Any, *, image_size: list[Any]) -> bool:
+    if not _number_list(value, length=2):
+        return False
+    x, y = [float(item) for item in value]
+    width, height = [float(item) for item in image_size]
+    return (
+        _is_finite_number(x)
+        and _is_finite_number(y)
+        and _is_finite_number(width)
+        and _is_finite_number(height)
+        and 0.0 <= x <= width
+        and 0.0 <= y <= height
+    )
+
+
 def _associate_adjacent_tracks(
     previous_tracks: list[dict[str, Any]],
     current_tracks: list[dict[str, Any]],
@@ -686,6 +915,10 @@ def _non_negative_int(value: Any) -> bool:
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_finite_number(value: Any) -> bool:
+    return _is_number(value) and math.isfinite(float(value))
 
 
 def _default_connector() -> Callable[..., Any]:

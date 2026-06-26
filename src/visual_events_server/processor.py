@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Protocol
 
+from .attention import AttentionConfig, AttentionResult, AttentionSelector
 from .inference.base import InferBackend
 from .protocol import FrameMessage, SCHEMA_VERSION
 from .protocol import ProtocolError
@@ -29,15 +30,18 @@ class BackendVisualFrameProcessor:
         backend: InferBackend,
         *,
         tracking_config: TrackingConfig | None = None,
+        attention_config: AttentionConfig | None = None,
     ) -> None:
         self.backend = backend
         self.tracking_config = tracking_config or TrackingConfig()
+        self.attention_config = attention_config or AttentionConfig()
         self._legacy_session: BackendVisualStreamSession | None = None
 
     def create_session(self) -> "BackendVisualStreamSession":
         return BackendVisualStreamSession(
             self.backend,
             tracker=ByteTrackStyleTracker(config=self.tracking_config),
+            attention_selector=AttentionSelector(config=self.attention_config),
         )
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
@@ -52,9 +56,11 @@ class BackendVisualStreamSession:
         backend: InferBackend,
         *,
         tracker: ByteTrackStyleTracker,
+        attention_selector: AttentionSelector,
     ) -> None:
         self.backend = backend
         self.tracker = tracker
+        self.attention_selector = attention_selector
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
         try:
@@ -67,7 +73,8 @@ class BackendVisualStreamSession:
                 retryable=True,
             ) from exc
         tracks = self.tracker.update(frame, detections)
-        return build_visual_state(frame, tracks)
+        attention = self.attention_selector.update(frame, tracks)
+        return build_visual_state(frame, tracks, attention=attention)
 
 
 class MockVisualFrameProcessor:
@@ -86,6 +93,8 @@ class MockVisualFrameProcessor:
 def build_visual_state(
     frame: FrameMessage,
     tracks: list[TrackSnapshot],
+    *,
+    attention: AttentionResult | None = None,
 ) -> dict[str, Any]:
     protocol_tracks = [
         track.to_protocol(image_width=frame.width, image_height=frame.height)
@@ -101,11 +110,13 @@ def build_visual_state(
         "server_timestamp_ms": int(time.time() * 1000),
         "image_size": [frame.width, frame.height],
         "tracks": protocol_tracks,
-        "attention": None,
+        "attention": attention.to_protocol() if attention is not None else None,
         "scene_flags": {
             "has_person": visible_person_count > 0,
             "person_count": visible_person_count,
-            "largest_person_stable": False,
+            "largest_person_stable": (
+                attention.largest_person_stable if attention is not None else False
+            ),
             "someone_near_center": False,
         },
         "semantic_events": [],

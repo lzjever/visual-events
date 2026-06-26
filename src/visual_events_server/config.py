@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from visual_events_server.attention import AttentionConfig
 from visual_events_server.tracking import TrackingConfig
 
 
@@ -25,6 +26,7 @@ class ServerConfig:
     runtime_dir: Path = Path("runtime")
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
+    attention: AttentionConfig = field(default_factory=AttentionConfig)
 
 
 def load_config(path: str | Path | None = None) -> ServerConfig:
@@ -44,6 +46,9 @@ def load_config(path: str | Path | None = None) -> ServerConfig:
     tracking_data = data.get("tracking", {})
     if not isinstance(tracking_data, dict):
         raise ValueError("[tracking] section must be an object")
+    attention_data = data.get("attention", {})
+    if not isinstance(attention_data, dict):
+        raise ValueError("[attention] section must be an object")
 
     return ServerConfig(
         host=str(server_data.get("host", ServerConfig.host)),
@@ -51,6 +56,7 @@ def load_config(path: str | Path | None = None) -> ServerConfig:
         runtime_dir=runtime_dir,
         inference=_parse_inference_config(inference_data, runtime_dir=runtime_dir),
         tracking=_parse_tracking_config(tracking_data),
+        attention=_parse_attention_config(attention_data),
     )
 
 
@@ -107,4 +113,21 @@ def _parse_tracking_config(data: dict[str, Any]) -> TrackingConfig:
         velocity_window_ms=int(
             data.get("velocity_window_ms", defaults.velocity_window_ms)
         ),
+    )
+
+
+def _parse_attention_config(data: dict[str, Any]) -> AttentionConfig:
+    defaults = AttentionConfig()
+    return AttentionConfig(
+        stable_min_hits=int(data.get("stable_min_hits", defaults.stable_min_hits)),
+        stable_min_age_ms=int(
+            data.get("stable_min_age_ms", defaults.stable_min_age_ms)
+        ),
+        switch_area_ratio=float(
+            data.get("switch_area_ratio", defaults.switch_area_ratio)
+        ),
+        switch_confirm_ms=int(
+            data.get("switch_confirm_ms", defaults.switch_confirm_ms)
+        ),
+        lost_hold_ms=int(data.get("lost_hold_ms", defaults.lost_hold_ms)),
     )

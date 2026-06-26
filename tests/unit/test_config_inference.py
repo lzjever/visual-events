@@ -33,6 +33,13 @@ match_iou = 0.25
 lost_ttl_ms = 1800
 history_ms = 3200
 velocity_window_ms = 900
+
+[attention]
+stable_min_hits = 3
+stable_min_age_ms = 350
+switch_area_ratio = 1.4
+switch_confirm_ms = 700
+lost_hold_ms = 800
 """.strip(),
         encoding="utf-8",
     )
@@ -54,6 +61,25 @@ velocity_window_ms = 900
     assert config.tracking.lost_ttl_ms == 1800
     assert config.tracking.history_ms == 3200
     assert config.tracking.velocity_window_ms == 900
+    assert config.attention.stable_min_hits == 3
+    assert config.attention.stable_min_age_ms == 350
+    assert config.attention.switch_area_ratio == 1.4
+    assert config.attention.switch_confirm_ms == 700
+    assert config.attention.lost_hold_ms == 800
+
+
+def test_load_config_rejects_invalid_attention_section(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[attention]
+stable_min_hits = 0
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="stable_min_hits"):
+        load_config(config_path)
 
 
 def test_factory_mock_backend_does_not_touch_runtime_cache(tmp_path, monkeypatch):
