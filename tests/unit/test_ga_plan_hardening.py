@@ -152,9 +152,11 @@ def test_ga_plan_pins_botified_backpressure_and_broken_pipe_semantics():
     assert_contains_all(
         text,
         [
-            "stdout writer 使用 bounded queue/drop/coalescing",
-            "slow stdout 不得阻塞 gaze stale watchdog",
-            "BrokenPipe 行为固定为：尽力发布一次 `valid=false,state=stale` 后受控非 0 退出",
+            "Botified stdout writer：bounded queue/drop/coalescing + BrokenPipe exception unit core",
+            "slow stdout bounded queue/drop/coalescing 不阻塞 gaze stale",
+            "stdout bounded queue/drop/coalescing 不阻塞 gaze stale",
+            "Runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理",
+            "仍需尽力发布一次 `valid=false,state=stale` 后受控非 0 退出",
             "由 Botified supervisor 重启",
             'broken_pipe = "publish_stale_then_exit_nonzero"',
             "BrokenPipe 受控非 0 退出",
@@ -183,20 +185,26 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "配置 skeleton",
             "`target_mapper` 纯逻辑",
             "`botified_output` 纯逻辑",
-            "尚未完成 CLI runtime loop",
-            "service_client",
-            "frame_pump",
+            "并已完成 CLI unit core 的 `service_client` WebSocket wire client",
+            "`frame_pump` deterministic core/stale watchdog",
+            "Botified stdout bounded queue/drop/coalescing 与 BrokenPipe exception 单元核心",
+            "`service_client`：WebSocket wire/pack-unpack、连接复用/关闭、timeout、invalid response、frame_id mismatch、retryable/non-retryable error handling 的单元核心",
+            "`frame_pump`：one in-flight coordination、keep-latest frame slot/backpressure、gaze stale watchdog、Botified enqueue 的 deterministic unit core",
+            "Botified stdout writer：bounded queue/drop/coalescing + BrokenPipe exception unit core",
+            "仍未完成 formal CLI runtime loop/main wiring",
             "真实 DDS adapters",
-            "Botified stdout writer/backpressure",
+            "runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理",
             "PC 本地 DDS E2E tools",
             "release/runtime 编排",
             "真机 smoke",
             "closed-loop handoff",
-            "仍需完成 runtime loop、真实 DDS adapters、Botified stdout writer、PC E2E tools 和 release/runtime 编排",
+            "仍需完成 formal CLI runtime loop/main wiring、真实 DDS adapters、runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理、PC E2E tools、release/runtime 编排、真机 smoke 和 closed-loop handoff",
             "DDS contract/schema Step 1 主要产物已完成",
             "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
         ],
     )
+    assert "尚未完成 CLI runtime loop、service_client、frame_pump、真实 DDS adapters、Botified stdout writer/backpressure" not in text
+    assert "仍需完成 runtime loop、真实 DDS adapters、Botified stdout writer、PC E2E tools 和 release/runtime 编排" not in text
 
 
 def test_ga_plan_baseline_and_team_review_match_current_server_state():
