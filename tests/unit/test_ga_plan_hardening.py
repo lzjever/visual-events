@@ -146,6 +146,50 @@ def test_ga_plan_defines_ga_thresholds_and_equivalent_closed_loop():
     )
 
 
+def test_ga_plan_pins_review_followup_contract_boundaries():
+    text = read_text(GA_PLAN)
+
+    assert_contains_all(
+        text,
+        [
+            "nominal 10Hz DDS image 输入",
+            "nominal 10Hz 输出 gaze target",
+            "目标 >=9Hz 且 <=10Hz",
+            "不承诺断线期间继续 >=9Hz heartbeat",
+            "`CameraFrame_.camera_name` 是 DDS source camera name",
+            "`[camera].name` 是发给 server、Botified frame、gaze target 和 report 的逻辑相机名",
+            "默认仍为 `front`",
+            "`dds_source_camera_name`",
+            "`logical_camera_name`/`camera.name`",
+            "manifest/oracle 标注的短遮挡、lost hold/cooldown 和空间邻近窗口",
+            "不承诺 ReID/长期记忆",
+            "重复招呼风险控制仍由 server semantic event rules",
+            "Production runner/lifecycle 自动化测试",
+            "正式 start/run/shutdown/reconnect",
+            "signal/process cleanup",
+            "Botified task 启停",
+            "required head_state 模式",
+            "真实 DDS adapter wiring failure/fail-fast",
+            "DDS resource cleanup",
+            "真机 smoke 不能替代 production runner/lifecycle 的单元/集成测试",
+            "native DDS bridge/helper",
+            "aarch64/RK3588 build/probe",
+            "explicit unsupported fail-fast",
+            "不能把 bridge 兼容问题藏到 server backend",
+            "Botified request frame contract test",
+            "wrapper",
+            "JSON 字段",
+            "ttl/timeout 语义",
+            "错误/ack 期望",
+            "manifest 中所有 GA scene",
+            "计划不硬编码 scene 数量",
+            "GA release config/gate 必须显式设置并验证满足 750ms",
+            "当前 server 默认 500ms 不能被当作 GA pass 证据",
+        ],
+    )
+    assert "同一物理人短暂 lost/恢复期间不得产生新的招呼型事件序列" not in text
+
+
 def test_ga_plan_pins_botified_backpressure_and_broken_pipe_semantics():
     text = read_text(GA_PLAN)
 
@@ -186,8 +230,10 @@ def test_ga_plan_pins_final_review_contracts_without_expanding_scope():
             "现场 checklist 必须验证 expected attention target timeline/rule",
             "进入、路过、靠近、停留、挥手等每类事件有 expected occurrence 和允许延迟窗口",
             "负例不得触发",
-            "同一物理人短暂 lost/恢复期间不得产生新的招呼型事件序列",
+            "manifest/oracle 标注的短遮挡、lost hold/cooldown 和空间邻近窗口",
+            "同一物理人不得产生新的招呼型事件序列",
             "`track_id` 变化时也必须通过 scene/person label 发现",
+            "不承诺 ReID/长期记忆",
             "Botified owner 完整产品闭环 artifact",
             "Visual Events semantic event -> Botified 决策/回应动作 -> 冷却不重复招呼",
             "不要求也不允许把 Botified 会话逻辑实现回本 repo",
