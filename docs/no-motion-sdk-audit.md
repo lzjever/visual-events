@@ -36,6 +36,8 @@ The CLI and DDS bridge must not publish motor or head control command topics. Th
 
 The only permitted head-related data flow is read-only `HeadStateV1_` input and `GazeTargetV1_` target fact output. Any downstream component that chooses to move hardware must live outside this Visual Events CLI/DDS bridge contract and must consume these facts through its own separately audited safety boundary.
 
+The no-motion audit + PC DDS emulation 不验证硬件运动/真实头部执行; it does not validate hardware motion or real head execution.
+
 ## Native bridge audit commands
 
 Run the repo-local native bridge audit without scanning Unitree SDK includes, because SDK headers contain unrelated motion-control IDL names:

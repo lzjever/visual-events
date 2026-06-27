@@ -156,7 +156,7 @@ This section is a required plan for the next adapter step, not passed evidence.
 
 ## RK3588 / Board Probe Gate
 
-The aarch64 SDK package exists and local `file` evidence shows ARM aarch64 DDS libraries. GA handoff still requires an aarch64/RK3588 build/probe, or an explicit unsupported fail-fast path, before claiming board compatibility. Do not mark RK3588 supported or GA from package presence alone.
+The aarch64 SDK package exists and local `file` evidence shows ARM aarch64 DDS libraries. GA handoff still requires an aarch64/RK3588 build/probe, or an explicit unsupported fail-fast path, before claiming board compatibility. In other words, claiming board compatibility still requires an RK3588/board probe, and this deferred hardware gate does not block the current repo-local PC DDS emulation delivery gate. Do not mark RK3588 supported or hardware/field GA passed from package presence or PC evidence alone.
 
 ## No-Motion Boundary
 

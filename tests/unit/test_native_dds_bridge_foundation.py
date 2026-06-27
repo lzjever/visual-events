@@ -544,6 +544,42 @@ def test_native_bridge_cmake_uses_unitree_and_camera_frame_inputs_without_python
     assert offenders == []
 
 
+def test_native_bridge_cmake_has_optional_full_bridge_generated_type_support_inputs():
+    cmake = NATIVE_BRIDGE / "CMakeLists.txt"
+    text = cmake.read_text(encoding="utf-8")
+
+    required = [
+        "VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE",
+        "VISUAL_EVENTS_GENERATED_DDS_DIR",
+        "VISUAL_EVENTS_HEAD_STATE_HEADER",
+        "VISUAL_EVENTS_HEAD_STATE_SOURCE",
+        "VISUAL_EVENTS_GAZE_TARGET_HEADER",
+        "VISUAL_EVENTS_GAZE_TARGET_SOURCE",
+        "head_state_v1.hpp",
+        "head_state_v1.cpp",
+        "gaze_target_v1.hpp",
+        "gaze_target_v1.cpp",
+    ]
+    missing = [item for item in required if item not in text]
+    assert missing == []
+
+
+def test_native_probe_source_references_generated_head_and_gaze_type_props():
+    probe = NATIVE_BRIDGE / "src" / "probe_main.cpp"
+    text = probe.read_text(encoding="utf-8")
+
+    required = [
+        '#include "head_state_v1.hpp"',
+        '#include "gaze_target_v1.hpp"',
+        "get_type_props<visual_events::msg::dds_::HeadStateV1_>()",
+        "get_type_props<visual_events::msg::dds_::GazeTargetV1_>()",
+        "HeadStateV1_ type properties are unavailable",
+        "GazeTargetV1_ type properties are unavailable",
+    ]
+    missing = [item for item in required if item not in text]
+    assert missing == []
+
+
 def test_native_probe_status_source_contract_uses_existing_jsonl_bridge_status_frame():
     text = _combined_native_source_text()
     assert '"protocol_version":1' in text
@@ -609,6 +645,73 @@ def test_build_tool_foundation_check_does_not_require_idl_generator(tmp_path, re
     assert report["foundation_ready"] is True
     assert report["visual_events_codegen_ready"] is False
     assert report["visual_events_codegen_error"] == "not required for foundation check"
+
+
+def test_build_tool_validates_full_bridge_generated_head_gaze_files(tmp_path):
+    import tools.build_dds_bridge as build_dds_bridge
+
+    generated_dir = tmp_path / "generated"
+    generated_dir.mkdir()
+    for name in [
+        "head_state_v1.hpp",
+        "head_state_v1.cpp",
+        "gaze_target_v1.hpp",
+    ]:
+        (generated_dir / name).write_text("// fake generated file\n", encoding="utf-8")
+
+    with pytest.raises(build_dds_bridge.CheckError, match="gaze_target_v1.cpp"):
+        build_dds_bridge.validate_full_bridge_generated_type_support(generated_dir)
+
+
+def test_build_tool_full_bridge_configure_passes_generated_inputs_to_cmake(
+    tmp_path,
+    monkeypatch,
+):
+    import tools.build_dds_bridge as build_dds_bridge
+
+    unitree_root = _make_minimal_unitree_sdk_root(tmp_path)
+    video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
+    build_dir = REPO_ROOT / "build" / "test-dds-bridge" / f"{tmp_path.name}-full-configure"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    generated_dir = REPO_ROOT / "build" / "test-dds-codegen" / f"{tmp_path.name}-generated"
+    shutil.rmtree(generated_dir, ignore_errors=True)
+    generated_dir.mkdir(parents=True)
+    for name in [
+        "head_state_v1.hpp",
+        "head_state_v1.cpp",
+        "gaze_target_v1.hpp",
+        "gaze_target_v1.cpp",
+    ]:
+        (generated_dir / name).write_text("// fake generated file\n", encoding="utf-8")
+
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(build_dds_bridge, "_run", fake_run)
+
+    try:
+        report = build_dds_bridge.configure_and_build(
+            unitree_sdk_root=unitree_root,
+            video_dds_publisher_dir=video_dir,
+            build_dir=build_dir,
+            target="visual_events_dds_bridge_probe",
+            full_bridge_generated_dir=generated_dir,
+        )
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)
+        shutil.rmtree(generated_dir, ignore_errors=True)
+
+    configure = commands[0]
+    assert f"-DVISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=ON" in configure
+    assert f"-DVISUAL_EVENTS_GENERATED_DDS_DIR={generated_dir}" in configure
+    assert f"-DVISUAL_EVENTS_HEAD_STATE_HEADER={generated_dir / 'head_state_v1.hpp'}" in configure
+    assert f"-DVISUAL_EVENTS_HEAD_STATE_SOURCE={generated_dir / 'head_state_v1.cpp'}" in configure
+    assert f"-DVISUAL_EVENTS_GAZE_TARGET_HEADER={generated_dir / 'gaze_target_v1.hpp'}" in configure
+    assert f"-DVISUAL_EVENTS_GAZE_TARGET_SOURCE={generated_dir / 'gaze_target_v1.cpp'}" in configure
+    assert report["full_bridge_generated_dir"] == os.fspath(generated_dir)
 
 
 def test_build_tool_rejects_report_paths_outside_repo_artifacts_without_writing(tmp_path):

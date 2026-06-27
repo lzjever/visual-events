@@ -24,6 +24,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 NATIVE_BRIDGE_DIR = REPO_ROOT / "native" / "dds_bridge"
 DEFAULT_BUILD_DIR = REPO_ROOT / "build" / "dds_bridge"
 DEFAULT_REPORT = REPO_ROOT / "artifacts" / "dds_bridge" / "build_report.json"
+FULL_BRIDGE_GENERATED_FILES = {
+    "head_state_header": "head_state_v1.hpp",
+    "head_state_source": "head_state_v1.cpp",
+    "gaze_target_header": "gaze_target_v1.hpp",
+    "gaze_target_source": "gaze_target_v1.cpp",
+}
 
 
 class CheckError(RuntimeError):
@@ -151,14 +157,44 @@ def check_visual_events_codegen(
     return report
 
 
+def validate_full_bridge_generated_type_support(generated_dir: Path) -> dict[str, object]:
+    resolved = _resolve_path(generated_dir)
+    paths = {
+        key: resolved / filename
+        for key, filename in FULL_BRIDGE_GENERATED_FILES.items()
+    }
+    missing = [path for path in paths.values() if not path.is_file()]
+    if missing:
+        formatted = ", ".join(os.fspath(path) for path in missing)
+        raise CheckError(f"missing generated Head/Gaze type support files: {formatted}")
+    return {
+        "full_bridge_generated_type_support_ready": True,
+        "full_bridge_generated_dir": os.fspath(resolved),
+        **{f"full_bridge_{key}": os.fspath(path) for key, path in paths.items()},
+    }
+
+
 def configure_and_build(
     *,
     unitree_sdk_root: Path,
     video_dds_publisher_dir: Path,
     build_dir: Path,
     target: str,
+    full_bridge_generated_dir: Path | None = None,
 ) -> dict[str, object]:
     build_dir.mkdir(parents=True, exist_ok=True)
+    full_bridge_report: dict[str, object] = {}
+    generated_args: list[str] = []
+    if full_bridge_generated_dir is not None:
+        full_bridge_report = validate_full_bridge_generated_type_support(full_bridge_generated_dir)
+        generated_args = [
+            "-DVISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=ON",
+            f"-DVISUAL_EVENTS_GENERATED_DDS_DIR={full_bridge_report['full_bridge_generated_dir']}",
+            f"-DVISUAL_EVENTS_HEAD_STATE_HEADER={full_bridge_report['full_bridge_head_state_header']}",
+            f"-DVISUAL_EVENTS_HEAD_STATE_SOURCE={full_bridge_report['full_bridge_head_state_source']}",
+            f"-DVISUAL_EVENTS_GAZE_TARGET_HEADER={full_bridge_report['full_bridge_gaze_target_header']}",
+            f"-DVISUAL_EVENTS_GAZE_TARGET_SOURCE={full_bridge_report['full_bridge_gaze_target_source']}",
+        ]
     configure = _run(
         [
             "cmake",
@@ -168,6 +204,7 @@ def configure_and_build(
             os.fspath(build_dir),
             f"-DUNITREE_SDK_ROOT={unitree_sdk_root}",
             f"-DVIDEO_DDS_PUBLISHER_DIR={video_dds_publisher_dir}",
+            *generated_args,
         ],
         cwd=REPO_ROOT,
     )
@@ -182,6 +219,7 @@ def configure_and_build(
         "build_dir": os.fspath(build_dir),
         "target": target,
         "binary": os.fspath(build_dir / target),
+        **full_bridge_report,
     }
 
 
@@ -285,6 +323,13 @@ def main(argv: list[str] | None = None) -> int:
                 raise
 
         should_build = args.build or args.probe
+        full_bridge_generated_dir = None
+        if should_build and args.check_full_bridge:
+            probe_output_dir = report.get("probe_output_dir")
+            if not isinstance(probe_output_dir, str) or not probe_output_dir:
+                raise CheckError("full-bridge build requires generated Head/Gaze probe_output_dir")
+            full_bridge_generated_dir = Path(probe_output_dir)
+
         if should_build:
             report.update(
                 configure_and_build(
@@ -292,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
                     video_dds_publisher_dir=video_dds_publisher_dir,
                     build_dir=build_dir,
                     target="visual_events_dds_bridge_probe",
+                    full_bridge_generated_dir=full_bridge_generated_dir,
                 )
             )
         if args.probe:

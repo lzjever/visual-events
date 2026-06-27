@@ -1,5 +1,10 @@
 #include "visual_events/dds_bridge/bridge_contract.hpp"
 
+#ifdef VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE
+#include "gaze_target_v1.hpp"
+#include "head_state_v1.hpp"
+#endif
+
 #include "unitree_camera/msg/dds/CameraFrame_.hpp"
 
 #include <cstring>
@@ -28,7 +33,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cerr << "visual_events_dds_bridge_probe: checked Unitree SDK2 link and CameraFrame_ type properties\n";
+#ifdef VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE
+    auto& head_props =
+        cdr::get_type_props<visual_events::msg::dds_::HeadStateV1_>();
+    if (head_props.empty()) {
+        std::cerr << "HeadStateV1_ type properties are unavailable\n";
+        return 1;
+    }
+
+    auto& gaze_props =
+        cdr::get_type_props<visual_events::msg::dds_::GazeTargetV1_>();
+    if (gaze_props.empty()) {
+        std::cerr << "GazeTargetV1_ type properties are unavailable\n";
+        return 1;
+    }
+
+    std::cout << R"({"protocol_version":1,"type":"status","code":"probe_ok","message":"native DDS bridge probe ok","mode":"probe","type_support":["CameraFrame_","HeadStateV1_","GazeTargetV1_"]})"
+              << '\n';
+#else
     std::cout << visual_events::dds_bridge::ProbeStatusJson() << '\n';
+#endif
     return 0;
 }

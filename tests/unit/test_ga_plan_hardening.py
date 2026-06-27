@@ -6,6 +6,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GA_PLAN = REPO_ROOT / "docs" / "ga-development-plan.md"
 DDS_STACK_DECISION = REPO_ROOT / "docs" / "dds-stack-decision-record.md"
+NO_MOTION_AUDIT = REPO_ROOT / "docs" / "no-motion-sdk-audit.md"
 PROTOCOL = REPO_ROOT / "common" / "schema" / "protocol.md"
 GITIGNORE = REPO_ROOT / ".gitignore"
 
@@ -86,6 +87,8 @@ def test_dds_stack_decision_record_freezes_ga_handoff_fields():
             "time.monotonic_ns()",
             "same OS monotonic clock domain",
             "CLOCK_MONOTONIC",
+            "claiming board compatibility still requires an RK3588/board probe",
+            "does not block the current repo-local PC DDS emulation delivery gate",
         ],
     )
     assert "box_norm_width" not in text
@@ -94,10 +97,20 @@ def test_dds_stack_decision_record_freezes_ga_handoff_fields():
 
 def test_ga_plan_requires_val_data_manifest_and_release_hashes():
     text = read_text(GA_PLAN)
+    step9 = section_between(text, "### Step 9：Release 和 handoff", "## 10. Server 改进清单")
 
     assert_contains_all(
-        text,
+        step9,
         [
+            "当前 PC gate handoff artifacts",
+            "server baseline",
+            "CLI unit/integration",
+            "PC local E2E",
+            "fault matrix",
+            "runtime smoke",
+            "30 分钟 soak",
+            "300s soak",
+            "no-motion-SDK audit",
             "val-data/manifest.json",
             "manifest_sha256",
             "scene 名称",
@@ -105,27 +118,46 @@ def test_ga_plan_requires_val_data_manifest_and_release_hashes():
             "frame count",
             "fps",
             "expected event timeline source/version",
-            "PC/release report",
+            "runtime server/CLI provenance",
+            "head state required-mode",
+            "Botified stdout allowlist",
+            "latency report",
+            "Deferred hardware/field handoff artifacts",
+            "真机 smoke",
+            "camera DDS owner",
+            "gaze consumer/运控 owner",
+            "Botified owner sign-off",
+            "真实闭环/现场 owner sign-off",
+            "不阻塞当前 PC gate",
+            "不得由 PC evidence 声称通过",
         ],
     )
+    assert "Artifact hash：server baseline、CLI unit/integration、PC local E2E、真机 smoke" not in step9
+    assert "Camera DDS owner、gaze consumer/运控 owner、Botified owner sign-off。" not in step9
 
 
-def test_ga_plan_separates_pc_regression_from_robot_dds_and_closed_loop_gates():
+def test_ga_plan_defines_current_pc_delivery_gate_and_deferred_hardware_gate():
     text = read_text(GA_PLAN)
 
     assert_contains_all(
         text,
         [
-            "PC 本地 E2E 的定位是 regression gate",
-            "真实 camera DDS runtime/network",
-            "板端 DDS type/QoS compatibility",
-            "真实 head state topic/type/Hz/freshness",
-            "真实 head/motion consumer",
+            "PC 本地 DDS 仿真是当前阶段 delivery gate",
+            "pass/fail authority 是 repo-local PC DDS emulation",
+            "synthetic DDS camera/head-state publishers",
+            "真实 runtime server/CLI",
+            "DDS gaze subscriber/stdout collector",
+            "required reports",
+            "所有 PC tests/audits passing",
+            "RK3588/board compatibility、真实 robot camera DDS、真实 head-state source、physical head pointing、HIL/real closed loop、owner sign-off 是后续硬件可用后的 deferred gate",
+            "PC gate 证据不得声称 `real robot validated`、`board compatible`、`RK supported` 或 `field GA passed`",
             "valid tracking 时头部物理指向目标",
             "invalid/stale 后不继续动",
             "restart 后无残留动作",
         ],
     )
+    assert "PC 本地 E2E 的定位是 regression gate" not in text
+    assert "PC green 不等价于板端 green" not in text
 
 
 def test_ga_plan_pins_head_state_latency_botified_and_runtime_hard_gates():
@@ -219,6 +251,8 @@ def test_ga_plan_defines_ga_thresholds_and_equivalent_closed_loop():
             "真实或 HIL head_state >=9Hz",
             "由运控 owner sign-off",
             "shadow consumer/logs 只能作为 preflight",
+            "这些阈值属于 deferred hardware/field GA pass",
+            "不阻塞当前 PC gate pass",
         ],
     )
 
@@ -270,7 +304,7 @@ def test_ga_plan_pins_review_followup_contract_boundaries():
             "manifest 中所有 GA scene",
             "计划不硬编码 scene 数量",
             "GA release config/gate 必须显式设置并验证满足 750ms",
-            "当前 server 默认 500ms 不能被当作 GA pass 证据",
+            "当前 server 默认 500ms 不能被当作 PC gate pass 证据",
         ],
     )
     assert "正式 start/run/shutdown/reconnect 单元核心" not in text
@@ -361,6 +395,8 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "IDL codegen/toolchain、真实 bridge/factories 和验证仍属于 Step 4",
             "Step 1 的 DDS stack decision record 已冻结",
             "不代表真实 DDS factories/adapters、PC E2E、板端兼容或真机闭环已完成",
+            "当前阶段验收口径：PC gate pass 是 repo-local PC DDS emulation",
+            "硬件/现场证据延后到 deferred gate",
             "当前 repo 已完成 CLI Step 3A skeleton + Step 3B pure logic",
             "### Step 3：实现正式 CLI core（3A skeleton/3B pure logic、RuntimeCoordinator/main wiring 和 production runner/lifecycle unit core 已完成；真实 DDS factories/adapters 剩余）",
             "CLI package",
@@ -458,10 +494,16 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "Head/Gaze expected `.hpp/.cpp` 都写出",
             "`visual_events_codegen_ready=true`",
             "外部源码/build/install/probe 输出不进 Git",
-            "Head/Gaze generated type support 仍未生成或接入",
+            "Step 4 native full-bridge generated Head/Gaze C++ type-support compile/probe slice 已完成",
+            "`tools/build_dds_bridge.py --check --check-full-bridge --build --probe`",
+            "运行 Head/Gaze IDL codegen oracle",
+            "CMake full-bridge 编译 `head_state_v1.hpp/.cpp` 和 `gaze_target_v1.hpp/.cpp`",
+            "native probe 检查 `CameraFrame_`、`HeadStateV1_`、`GazeTargetV1_` type props",
+            "输出一行 JSONL status",
+            "Foundation 路径仍然 CameraFrame-only",
             "full bridge runtime",
             "real serialization/QoS",
-            "真实 DDS/C++/IDL/QoS/PC E2E/RK/真机仍未完成",
+            "真实 DDS runtime/PC E2E/RK/真机仍未完成",
             "`service_client`：WebSocket wire/pack-unpack、连接复用/关闭、timeout、invalid response、frame_id mismatch、retryable/non-retryable error handling 的单元核心",
             "`frame_pump`：one in-flight coordination、keep-latest frame slot/backpressure、gaze stale watchdog、Botified enqueue 的 deterministic unit core",
             "main runtime_runner 注入和默认 DDS factories fail-fast",
@@ -475,7 +517,7 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "### Step 4：实现 DDS adapters（first slice/unit core 已完成；真实 runtime adapters 剩余）",
             "真实 DDS runtime adapters",
             "按 `docs/dds-stack-decision-record.md` 已冻结决策实现 C++ native DDS helper/bridge",
-            "Head/Gaze generated type support 接入",
+            "native full-bridge generated Head/Gaze C++ type-support compile/probe slice",
             "real serialization/QoS tests",
             "`native/dds_bridge` CMake project 可构建 very small `visual_events_dds_bridge_probe`",
             "`tools/build_dds_bridge.py` 拆分 foundation gate 和 full-bridge gate",
@@ -488,7 +530,6 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "`oracle_ok=true`",
             "只证明 repo-local prepare 编排和 C++ codegen probe 会拒绝假阳性",
             "只证明 camera/probe foundation",
-            "不实现 `HeadStateV1_`/`GazeTargetV1_` C++ type support",
             "不实现 full bridge runtime loop",
             "不证明真实 serialization/QoS、PC E2E、board/RK 或真机闭环",
             "PC E2E",
@@ -506,15 +547,16 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "剩余是 Step 4 真实 DDS factories/adapters",
             "DDS contract/schema Step 1 主要产物已完成",
             "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
-            "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` generated C++ type support 接入、full bridge runtime、real serialization/QoS 和 native bridge ABI implementation 仍未完成",
+            "真实 DDS factories/adapters、full bridge runtime、real serialization/QoS 和 native bridge ABI implementation 仍未完成",
             "`visual_events_dds_bridge_probe` 可输出既有 JSONL bridge ABI status frame（`protocol_version=1,type=status,code=probe_ok,message=...`）",
             "`tools/build_dds_bridge.py` foundation gate 可在无 IDL generator 时通过并报告 `foundation_ready=true`",
             "`tools/prepare_dds_codegen_toolchain.py --prepare` 可在 ignored `build/tools/cyclonedds-cxx-idlc-0.10.2/` 下准备 pinned idlc wrapper 并复用 Head/Gaze codegen oracle",
             "`--probe-codegen` 和 `tools/build_dds_bridge.py --check-full-bridge` 会实际运行 C++ idlc probe",
             "默认验证 `head_state_v1.idl` 和 `gaze_target_v1.idl` 都生成 expected `.hpp/.cpp`",
             "拒绝版本不是 0.10.2、`cannot load generator cxx`、任一 IDL 只生成 `.hpp` 或缺 `.cpp` 的假阳性",
-            "这只证明 repo-local prepare 编排和 Head/Gaze IDL codegen oracle hardening 完成",
-            "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` generated C++ type support 接入、full bridge runtime、real serialization/QoS tests / construction tests、板端 compatibility probe、PC E2E tools、board/RK probe、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
+            "full bridge runtime、real DDS factories/adapters、real serialization/QoS tests / construction tests、PC E2E tools、release/runtime 真跑、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
+            "CLI 当前 PC gate 必须有 unit、integration、PC local E2E 和 fault matrix",
+            "真机 smoke/closed-loop 是 deferred hardware/field gate",
         ],
     )
     assert "Step 1 仍未完成 DDS stack decision record" not in text
@@ -543,7 +585,16 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     assert "Step 4 Python JSONL bridge runtime integration slice 仍未完成" not in text
     assert "真实 DDS/C++ bridge/PC E2E/RK probe 已完成" not in text
     assert "Step 4 Python JSONL bridge runtime integration slice 完成代表真实 DDS" not in text
+    assert "Head/Gaze generated type support 仍未生成或接入" not in text
+    assert "不实现 `HeadStateV1_`/`GazeTargetV1_` C++ type support" not in text
+    assert "Visual Events `HeadStateV1_`/`GazeTargetV1_` generated C++ type support 接入、full bridge runtime" not in text
+    assert "CLI 必须有 unit、integration、PC local E2E、fault matrix、真机 smoke" not in text
+    assert "真实 DDS runtime 已完成" not in text
+    assert "PC E2E 已完成" not in text
+    assert "RK/board probe 已完成" not in text
+    assert "真机 smoke 已完成" not in text
     assert "Fake DDS adapters started/closed lifecycle unit core" not in text
+    assert "PC 本地 DDS E2E 是正式 release regression gate" not in text
     assert "可重复 start/stop" not in text
 
 
@@ -582,7 +633,7 @@ def test_ga_plan_repeats_formal_cli_bridge_opt_in_status_in_three_summaries():
         "formal CLI bridge runtime opt-in slice 已完成",
         "默认仍 fail_fast，不因 env 隐式切 bridge",
         '显式 `[dds].runtime="bridge"`/`--dds-runtime bridge` 才走 `bridge_runtime_factories()`',
-        "真实 DDS/C++/IDL/QoS/PC E2E/RK/真机仍未完成",
+        "真实 DDS runtime/PC E2E/RK/真机仍未完成",
     ]
     snippets = [
         paragraph_containing(text, "当前 repo 已完成 Step 4 first slice/unit core"),
@@ -616,6 +667,18 @@ def test_protocol_pins_cli_frame_id_stale_watchdog_and_botified_allowlist():
             "不实现 Botified 业务 rate limiter",
             "由 server semantic event engine 的 rising-edge、cooldown、dedupe 规则产生",
             "由 PC/现场 report gate 验收",
+        ],
+    )
+
+
+def test_no_motion_audit_does_not_claim_hardware_motion_validation():
+    text = read_text(NO_MOTION_AUDIT)
+
+    assert_contains_all(
+        text,
+        [
+            "no-motion audit + PC DDS emulation 不验证硬件运动/真实头部执行",
+            "does not validate hardware motion or real head execution",
         ],
     )
 
