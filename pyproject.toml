@@ -29,6 +29,7 @@ dev = [
 
 [project.scripts]
 visual-events-server = "visual_events_server.app:main"
+visual-events-cli = "visual_events_cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
