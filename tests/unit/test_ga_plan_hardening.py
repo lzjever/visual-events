@@ -76,6 +76,12 @@ def test_ga_plan_pins_head_state_latency_botified_and_runtime_hard_gates():
             "`attention_target_changed` 不输出到 Botified",
             "runtime/venv/bin/visual-events-server",
             "runtime/venv/bin/visual-events-cli",
+            "--server-bin runtime/venv/bin/visual-events-server",
+            "--cli-bin runtime/venv/bin/visual-events-cli",
+            "runtime provenance",
+            "server_exit_code",
+            "cli_exit_code",
+            "dev console script 或手工预启动 server",
             "visual-events-server` wheel",
             "CLI 不依赖 Torch/Ultralytics",
             "aarch64/RK3588 runtime",
@@ -85,6 +91,141 @@ def test_ga_plan_pins_head_state_latency_botified_and_runtime_hard_gates():
         ],
     )
     assert "required_for_ga" not in text
+
+
+def test_ga_plan_freezes_head_state_contract_and_dds_stack_decision_record():
+    text = read_text(GA_PLAN)
+
+    assert_contains_all(
+        text,
+        [
+            "`/robot/head_state` + `visual_events::msg::dds_::HeadStateV1_` 是 canonical GA 合同",
+            "adapter 映射",
+            "canonical internal schema",
+            "PC publisher 使用的权威类型",
+            "compatibility report 字段",
+            "DDS stack decision record",
+            "SDK/bridge 名称和版本",
+            "IDL codegen 命令",
+            "native bridge ABI",
+            "runtime env vars",
+            "PC 安装方式",
+            "板端 probe 命令",
+        ],
+    )
+    assert "topic | `/robot/head_state`，实现前需与运控 owner 固化最终名称" not in text
+    assert "DDS type | `visual_events::msg::dds_::HeadStateV1_` 或运控 owner 已有等价类型；Step 1 必须固化" not in text
+
+
+def test_ga_plan_defines_ga_thresholds_and_equivalent_closed_loop():
+    text = read_text(GA_PLAN)
+
+    assert_contains_all(
+        text,
+        [
+            "## 7. GA 阈值",
+            "Botified 每 track/event/min 上限",
+            "同一 `track_id` 的同一 event type 每分钟 <=1 条",
+            "Botified 全局事件/min 上限",
+            "合计每分钟 <=12 条",
+            "Head state unknown ratio",
+            "stationary/moving segment <=1%",
+            "Target switch dwell/jitter",
+            "dwell >=750ms",
+            "target_norm jitter P95 <=0.04",
+            "现场 head pointing 误差",
+            "P95 <=8 度",
+            "Invalid/stale 停止延迟",
+            "250ms 内发布 `valid=false,state=stale`",
+            "500ms 内停止继续跟随旧目标",
+            "等价闭环必须消费同一个 `/visual_events/gaze_target` DDS topic",
+            "真实或 HIL head_state >=9Hz",
+            "由运控 owner sign-off",
+            "shadow consumer/logs 只能作为 preflight",
+        ],
+    )
+
+
+def test_ga_plan_pins_botified_backpressure_and_broken_pipe_semantics():
+    text = read_text(GA_PLAN)
+
+    assert_contains_all(
+        text,
+        [
+            "stdout writer 使用 bounded queue/drop/coalescing",
+            "slow stdout 不得阻塞 gaze stale watchdog",
+            "BrokenPipe 行为固定为：尽力发布一次 `valid=false,state=stale` 后受控非 0 退出",
+            "由 Botified supervisor 重启",
+            'broken_pipe = "publish_stale_then_exit_nonzero"',
+            "BrokenPipe 受控非 0 退出",
+        ],
+    )
+    assert 'broken_pipe = "fail_fast"' not in text
+
+
+def test_ga_plan_baseline_and_team_review_match_current_cli_state():
+    text = read_text(GA_PLAN)
+
+    assert_contains_all(
+        text,
+        [
+            "当前 repo 已完成 DDS contract/schema Step 1 的主要产物",
+            "`common/schema/dds/camera_jpeg_contract.md`",
+            "`common/schema/dds/gaze_target_v1.idl` 和 `gaze_target_v1.md`",
+            "`common/schema/dds/head_state_v1.idl` 和 `head_state_v1.md`",
+            "gaze target samples",
+            "no-motion-SDK audit 覆盖",
+            "Step 1 仍未完成 DDS stack decision record",
+            "尚未实际确定 SDK/bridge runtime choice",
+            "当前 repo 已完成 CLI Step 3A skeleton + Step 3B pure logic",
+            "CLI package",
+            "`visual-events-cli` entrypoint",
+            "配置 skeleton",
+            "`target_mapper` 纯逻辑",
+            "`botified_output` 纯逻辑",
+            "尚未完成 CLI runtime loop",
+            "service_client",
+            "frame_pump",
+            "真实 DDS adapters",
+            "Botified stdout writer/backpressure",
+            "PC 本地 DDS E2E tools",
+            "release/runtime 编排",
+            "真机 smoke",
+            "closed-loop handoff",
+            "仍需完成 runtime loop、真实 DDS adapters、Botified stdout writer、PC E2E tools 和 release/runtime 编排",
+            "DDS contract/schema Step 1 主要产物已完成",
+            "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
+        ],
+    )
+
+
+def test_ga_plan_baseline_and_team_review_match_current_server_state():
+    text = read_text(GA_PLAN)
+
+    assert_contains_all(
+        text,
+        [
+            "server GA 收口 Step 2 已完成",
+            "frame/timestamp regression reset",
+            "JPEG dimensions validation",
+            "`scene_flags.someone_near_center`",
+            "shared backend inference serialization",
+            "metrics sink write error count/stderr",
+            "server/CLI contract tests",
+            "Step 2：完成 server GA 收口改进（已完成，后续只防回归）",
+            "这些 GA 前 server 收口项已完成；后续只防回归和继续跑 gates",
+            "已 reset 当前连接 tracker/event state，并补测试",
+            "已校验 header 与 decode 尺寸一致",
+            "已实现真实计算",
+            "已串行化共享 backend 推理",
+            "已记录 write error count 并输出 stderr",
+            "已固化 attention、semantic events、head_motion suppression 行为",
+            "frame/timestamp reset、JPEG dimensions validation、`someone_near_center`、shared backend inference serialization、metrics sink write error count/stderr 和 server/CLI contract tests 已完成",
+            "后续只防回归/跑 gates",
+        ],
+    )
+    assert "Server S8 baseline 不重写，只补 frame/timestamp reset、尺寸策略、`someone_near_center`、多连接推理和 metrics error 收口" not in text
+    assert "这些改进是 GA 前 server 必做收口项" not in text
 
 
 def test_protocol_pins_cli_frame_id_stale_watchdog_and_botified_allowlist():
