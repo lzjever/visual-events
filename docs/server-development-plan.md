@@ -432,7 +432,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - Soak 必须 realtime；带 `--soak-seconds` 时不允许 `--no-realtime`。
 - Soak 必须显式提供 `--response-timeout-ms` 和 `--server-pid`。
 - Soak loop 不包含 `head_motion=moving` cases；moving suppression 由 warm-up/full matrix 的 `__head_moving` artifacts 证明。
-- Soak 不改 wire protocol，不开发正式 robot CLI，不要求 DDS、Botified frame 或 gaze controller。
+- Soak 不改 wire protocol，不开发正式 robot CLI，不要求 DDS、Botified frame 或 gaze target publisher。
 
 产物：
 

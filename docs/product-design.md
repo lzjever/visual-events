@@ -11,7 +11,7 @@ Visual Events 是一个机器人视觉事件推理服务，不是通用视觉平
 - 高频视觉状态：给机器人本体实时控制使用，例如持续注视画面中占比最大的一个人。
 - 低频语义事件：通过 Botified frame 通知 agent，让 agent 根据上下文决定是否回应。
 
-一句话原则：模型做感知，规则做事件，本体做实时控制，agent 做语义决策。
+一句话原则：模型做感知，规则做事件，CLI 发布 gaze target，运控本体做实时控制，agent 做语义决策。
 
 ## 2. 目标场景
 
@@ -24,7 +24,7 @@ V1 验收场景：
 - 有人进入画面并停留。
 - 有人向机器人挥手。
 - 有人站在机器人前方并保持相对稳定。
-- 机器人持续把头部转向画面中最大且稳定的人。
+- 系统持续输出画面中最大且稳定人物的 DDS gaze target，供运控/头控 owner 转头注视。
 - agent 只在出现语义事件时被唤起，不接收 10Hz 视觉流。
 
 V1.5 候选场景：
@@ -62,18 +62,19 @@ DDS JPEG @10Hz
       -> AttentionTarget
   -> visual_state @10Hz
   -> visual-events-cli
-      -> gaze controller
+      -> DDS gaze target publisher
       -> Botified frame output
+  -> head/motion owner
 ```
 
 职责分配：
 
 | 模块 | 职责 | 不做 |
 | --- | --- | --- |
-| `visual-events-cli` | 从 DDS 获取 JPEG；连接服务端；消费 `attention`；输出 Botified frame | 不跑大模型；不做 agent 决策 |
+| `visual-events-cli` | 从 DDS 获取 JPEG；连接服务端；消费 `attention`；发布 DDS gaze target；输出 Botified frame | 不跑大模型；不做 agent 决策；不直接操纵运控 |
 | `visual-events-server` | 推理、追踪、事件规则、注视目标选择 | 不接 DDS；不直接控制机器人 |
 | Botified agent | 收低频语义事件并决定后续响应 | 不接收 10Hz 状态；不做头部实时闭环 |
-| 头部控制接口 | 执行本地注视控制 | 不理解语义事件 |
+| 运控/头控 owner | 订阅 DDS gaze target 并执行本地安全闭环 | 不理解语义事件；不在本 repo 实现 |
 
 ## 5. 模型与追踪决策
 
@@ -235,25 +236,34 @@ score = bbox_area_ratio * confidence * stability_score
 
 ### 7.3 头部控制
 
-机器人 CLI 把 `attention.target_uv` 转成头部控制命令。
+机器人 CLI 不把 `attention.target_uv` 转成头部速度、位置或 `look_at` 命令。CLI 只把 `attention.target_uv` 发布成 DDS gaze target，真实头部控制由运控/头控 owner 订阅后执行。
 
-若有相机内参：
+若下游运控有相机内参，可在其安全边界内使用：
 
 ```text
 yaw_delta = atan((target_x - cx) / fx)
 pitch_delta = -atan((target_y - cy) / fy)
 ```
 
-若暂时没有内参：
+若暂时没有内参，下游可使用归一化误差：
 
 ```text
 ex = target_x / image_width - 0.5
 ey = target_y / image_height - 0.5
 ```
 
-然后使用简单 P/PD 控制。
+这些控制律不在 `visual-events-cli` 中实现。
 
-必须包含：
+CLI 发布的 DDS gaze target 必须包含：
+
+- `valid`：目标是否有效。
+- `state`：`tracking`、`lost`、`stale` 或 `disabled`。
+- `target_uv`：图像像素坐标。
+- `target_track_id`、`confidence`、`reason`。
+- `frame_id`、`frame_timestamp_ms`、`publish_timestamp_ms`。
+- `stale_after_ms`：下游必须尊重的过期时间。
+
+下游运控/头控 owner 执行动作时需要在其独立验收中证明：
 
 - deadband：小误差不动。
 - low-pass filter：平滑 `target_uv`。
@@ -261,6 +271,8 @@ ey = target_y / image_height - 0.5
 - acceleration limit：避免抽动。
 - stale frame check：旧帧丢弃。
 - target hysteresis：防止多人场景频繁切换。
+
+`visual-events-cli` 禁止发布 `yaw_velocity`、`pitch_velocity`、`head_position`、`motor_command` 等直接运控命令字段。
 
 ## 8. 协议决策
 
@@ -298,11 +310,10 @@ header 示例：
 
 详细字段、坐标、错误、backpressure 和断线语义见 [protocol.md](../common/schema/protocol.md)。
 
-不使用 gRPC，不让服务端接 DDS，不在 V1 发布高频 DDS 状态。若未来其他本体模块必须订阅，再由 CLI 增加可选 DDS bridge：
+不使用 gRPC，不让服务端接 DDS，不通过 Botified 发送高频状态。GA 只发布一个高频 DDS gaze target，不发布完整 `visual_state` DDS：
 
 ```text
-/perception/visual_state  best_effort, keep_last=1
-/perception/gaze_target   best_effort, keep_last=1
+/visual_events/gaze_target  best_effort, keep_last=1, lifespan=250ms
 ```
 
 ## 9. 主要风险与处理
@@ -310,8 +321,9 @@ header 示例：
 | 风险 | 处理 |
 | --- | --- |
 | RK3588 pose 端到端性能不足 | 首版就保留 backend 边界；单独做 RK3588 spike，实测 decode/preprocess/infer/postprocess/tracking |
-| 头部转动污染图像运动 | V1 frame header 包含可选 `head_motion`；服务端在头部运动或状态未知时暂停运动敏感规则 |
+| 头部转动污染图像运动 | V1 frame header 包含可选 `head_motion`；CLI 从头部状态 DDS 生成该字段；服务端在头部运动或状态未知时暂停运动敏感规则 |
 | Botified 被事件刷屏 | 事件 rising-edge、cooldown、同 track 去重；高频状态永不进入 Botified |
+| CLI 越过安全边界直接控头 | CLI 只发布 DDS gaze target；release audit 必须证明不链接、不调用运控 SDK |
 | 人脸/看向机器人判断不准 | V1 不输出看向机器人事件；必要时 V1.5 加人脸模型和弱 gaze 规则 |
 | 授权风险 | 产品化前确认 Ultralytics AGPL/Enterprise 授权 |
 
@@ -343,10 +355,11 @@ Botified：
 
 注视：
 
-- 在真实头控接口确认前，V1 只验收 `target_uv`、deadband/滤波/限速命令计算和 `log` adapter 输出。
-- 接入 `head_velocity` 或等价真实接口后，在目标稳定、初始归一化误差 <= 0.20、`deadband_norm=0.03` 的测试条件下，1s 内进入 deadband 并保持至少 5 帧。
-- 多人场景默认注视画面中最大稳定人物。
-- 目标短暂丢失时不明显抽动。
+- CLI 只发布 DDS gaze target，不直接操纵运控。
+- 有新鲜 `visual_state` 时，CLI 每帧发布一条 valid 或 invalid gaze target，目标 >=9Hz；server 断线或超时时，250ms 内发布 invalid/stale sample，之后不再发布过期有效目标。
+- 多人场景默认输出画面中最大稳定人物。
+- 目标短暂丢失时发布 `valid=false`；DDS lifespan 是下游失效的后备保护，不允许输出过期有效目标。
+- 真实头部动作验收由运控/头控 owner 提供独立 artifact/sign-off；本 repo 只验收 DDS target 正确性、时效性和失效语义。
 
 ## 11. 参考资料
 

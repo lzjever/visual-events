@@ -2,16 +2,18 @@
 
 日期：2026-06-26
 
+后续 GA 开发以 [GA 后续开发计划](ga-development-plan.md) 为准。本文保留早期总体设计背景，并已同步关键边界：机器人 CLI 只发布 DDS gaze target，不直接操纵运控。
+
 ## 1. 开发原则
 
 这些原则是实现约束，不是口号：
 
-- KISS：一个 DDS 图像输入，一个 WebSocket 服务协议，一个 `visual_state` schema，一个 Botified 事件出口。
+- KISS：一个 DDS 图像输入，一个 WebSocket 服务协议，一个 `visual_state` schema，一个 DDS gaze target 输出，一个 Botified 事件出口。
 - DRY：schema、几何计算、事件冷却、注视目标选择只实现一次。服务端负责事件生成、rising-edge、cooldown 和同 track 去重；CLI 只按 `event_id` 做 Botified 输出幂等保护，不重新实现事件规则。
 - YAGNI：没有明确验收需求前，不加训练流程、人脸识别、ReID、数据库、事件治理后台、多摄像头、多协议。
 - 可替换但不抽象过度：只为推理 backend 定一个小接口，服务 RK3588 迁移；其他地方先按 V1 需求直接实现。
-- 高频状态和低频事件分离：10Hz 状态用于控制和调试，Botified frame 只承载语义事件。
-- 失败时降级：服务断开、帧过期、无人、目标丢失时，CLI 不输出误导性事件，头控进入保持或回中策略。
+- 高频状态和低频事件分离：10Hz 状态用于生成 DDS gaze target 和调试，Botified frame 只承载语义事件。
+- 失败时降级：服务断开、帧过期、无人、目标丢失时，CLI 不输出误导性事件，并在 250ms 内发布 invalid/stale gaze target；DDS lifespan 只作为后备失效保护。
 
 ## 2. Repo 结构
 
@@ -23,18 +25,17 @@ visual-events/
   docs/
     product-design.md
     development-test-plan.md
-  server/
+  src/
     visual_events_server/
       api/
       inference/
       tracking/
       events/
       attention/
-  robot_cli/
-    src/
+    visual_events_cli/
       dds_input/
       service_client/
-      gaze_control/
+      gaze_target_output/
       botified_output/
   common/
     schema/
@@ -44,10 +45,11 @@ visual-events/
 
 边界：
 
-- `server` 用 Python，方便接 Ultralytics、ONNX/TensorRT/RKNN 原型和 WebSocket 服务。
-- `robot_cli` 用 C++，复用 `/home/galbot/works/image-capture` 的 Unitree DDS JPEG 订阅经验。
-- `common/schema` 是共享协议事实来源；不强行共享 Python/C++ 业务代码。
-- 未来 RK3588 本地化仍运行同一个 `visual-events-server --backend rknn`，机器人 CLI 连接 `ws://127.0.0.1:<port>/v1/stream`；不把 RKNN 推理嵌进 C++ CLI。
+- `visual_events_server` 和 `visual_events_cli` 都由 `uv` 管理，开发环境与 release/runtime 环境分离。
+- `visual_events_cli` 复用 `/home/galbot/works/image-capture` 的 Unitree DDS JPEG topic/type/校验经验；具体 DDS adapter 必须在本 repo 内完备实现和测试。
+- 如果 Unitree DDS runtime 只能通过 C++ SDK 接入，可以在本 repo 内实现一个很小的 native DDS bridge；CLI core 仍保持 Python/`uv` 入口和统一测试。
+- `common/schema` 是共享协议事实来源。
+- 未来 RK3588 本地化仍运行同一个 `visual-events-server --backend rknn`，机器人 CLI 连接 `ws://127.0.0.1:<port>/v1/stream`；不把 RKNN 推理嵌进 CLI。
 
 ## 3. 模块计划
 
@@ -75,7 +77,7 @@ infer(frame) -> PoseDetections
 
 - `dds_input`: 持续订阅 `/camera/image/jpeg`，校验 JPEG，按 10Hz 取最新帧。
 - `service_client`: WebSocket 连接、二进制帧发送、`visual_state` 接收、断线重连。
-- `gaze_control`: stale 检查、deadband、滤波、限速、目标保持、头部命令输出。
+- `gaze_target_output`: stale 检查、target 映射、DDS gaze target 发布、失效 sample 输出。
 - `botified_output`: 语义事件去重，写 stdout `<botified>...</botified>`。
 
 CLI 默认行为：
@@ -119,7 +121,7 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 
 产出：
 
-- C++ DDS JPEG 持续订阅。
+- DDS JPEG 持续订阅 adapter。
 - 复用 `image-capture` 的 JPEG 字段校验、DDS domain/network 配置思路。
 
 验收：
@@ -171,18 +173,19 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 - Botified frame 符合 `id/request/expect/urgency/timeout_secs` 约束。
 - `head_motion.state=moving` 或 `unknown` 时，不触发路过、靠近、停留这三类运动敏感事件。
 
-### M6 头部注视控制
+### M6 Gaze DDS Target 输出
 
 产出：
 
-- `gaze_control` 本地闭环。
-- 头部接口 adapter：先实现 `log` 和 `disabled`，接入真实接口后实现 `head_velocity` 或 `head_position`。
+- `gaze_target_output` DDS publisher。
+- `/visual_events/gaze_target` topic contract、QoS、stale/lifespan 语义。
+- `tracking|lost|stale|disabled` 状态输出。
 
 验收：
 
-- `log` adapter 模式下，给定固定 `target_uv` 序列，输出命令满足 deadband、低通、速度限制和 stale 丢弃。
-- 接入真实 `head_velocity` 或等价接口后，在目标稳定、初始归一化误差 <= 0.20、`deadband_norm=0.03` 的测试条件下，1s 内进入 deadband 并保持至少 5 帧。
-- 目标丢失时保持或回中，不抽动。
+- CLI 不直接操纵运控，不调用头部速度、位置或 `look_at` API。
+- 给定固定 `target_uv` 序列，DDS gaze target payload 坐标、confidence、track id、stale time 正确。
+- 目标丢失、server 超时或 frame 过期时，250ms 内发布 invalid/stale sample；DDS lifespan 只作为后备失效保护。
 - frame header 标记头部运动或未知时，服务端暂停 `person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot` 这类运动敏感事件。
 
 ### M7 RK3588 Spike
@@ -204,7 +207,7 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 覆盖：
 
 - bbox 面积、中心点、头部 fallback 点。
-- `target_uv` 低通和 deadband。
+- gaze target 坐标映射、stale/invalid 语义。
 - 最大人物选择和滞回。
 - track history 时间窗口。
 - event rising-edge、cooldown、同 track 去重。
@@ -249,7 +252,7 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 
 覆盖：
 
-- CLI mock JPEG input -> server -> visual_state。
+- CLI mock JPEG input -> server -> visual_state -> DDS gaze target。
 - CLI DDS input -> mock server。
 - server 推理 -> tracking -> events。
 - semantic_event -> Botified frame stdout。
@@ -286,7 +289,7 @@ RK3588：
 - 两人并列时注视最大稳定人物。
 - 目标短暂遮挡时保持。
 - 无人时保持或回中。
-- 服务断开时停止发送头部追踪命令。
+- 服务断开时 250ms 内发布 invalid/stale sample，并停止发送有效 gaze target。
 
 ## 6. 配置
 
@@ -313,11 +316,10 @@ tracking:
 events:
   cooldown_ms: 5000
 
-gaze:
+gaze_target:
   enabled: true
-  mode: log
+  topic: /visual_events/gaze_target
   stale_ms: 250
-  deadband_norm: 0.03
 ```
 
 不为每个规则开放大量配置。阈值先放在一个小配置块里，只有调试证明需要时再暴露。
@@ -326,24 +328,24 @@ gaze:
 
 开发前必须确认：
 
-- 头部控制接口：角速度、角度目标，还是已有 `look_at` API。
+- Gaze target DDS topic/type/QoS 是否已被运控/头控 owner 接受。
 - 摄像头是否安装在头部，以及能否读取头部 yaw/pitch/角速度。
 - Botified 启动 CLI 的命令、工作目录、环境变量和日志采集方式。
 - 产品授权路径：AGPL 开源还是 Ultralytics Enterprise。
 
 未确认时的默认策略：
 
-- 头部控制接口未确认：使用 `gaze.mode=log`，只验收命令计算，不发送真实头控命令。
+- 运控/头控 owner 未确认：CLI 仍只发布 `/visual_events/gaze_target`，使用 test sink 验收，不发送任何真实头控命令。
 - 摄像头是否头载或头部运动状态未知：frame header 标记 `head_motion.state=unknown`，服务端暂停运动敏感事件。
 - 授权未确认：只做内部 POC 和性能验证，不进入产品发布。
-- 其他模块是否需要高频 DDS 未确认：不发布高频 DDS，只在 CLI 内部消费 `visual_state`。
+- 其他模块是否需要完整高频状态未确认：不发布完整 `visual_state` DDS，只发布 gaze target。
 
 首版完成必须满足：
 
 - 同 repo 中有 server 和 robot CLI。
 - 高频状态走 WebSocket，不走 Botified。
 - 低频事件走 Botified frame。
-- 注视控制在 CLI 本地闭环。
+- 注视 target 由 CLI 发布 DDS；真实动作由运控/头控 owner 本地闭环。
 - V1 事件不会刷屏。
 - 有回放测试和性能报告。
 
@@ -359,7 +361,7 @@ gaze:
 
 - `YOLOv8n-pose + 项目内 ByteTrack-style IoU/TTL tracker baseline` 是当前兼顾服务端可用性和 RK3588 未来迁移的最好 baseline。
 - WebSocket streaming 比 gRPC 更适合 V1。
-- 服务端不接 DDS；机器人 CLI 是 DDS、Botified、头控的集成边界。
+- 服务端不接 DDS；机器人 CLI 是 DDS 图像输入、DDS gaze target 输出和 Botified 事件输出的集成边界，不是运控边界。
 - RK3588 迁移风险必须用 E2E spike 验证，不能只看 NPU inference benchmark。
 
 ## 9. 参考资料

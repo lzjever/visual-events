@@ -243,7 +243,7 @@ Important caveat: S8 metrics are available only when explicitly enabled and are 
 
 ## 7. Known Limitations / Failure Scenarios
 
-- No server DDS integration, Botified output, formal robot CLI, or gaze controller.
+- No server DDS integration, Botified output, formal robot CLI, or gaze target publisher.
 - No face identity, face recognition, long-term identity, or gaze/eye-contact judgement.
 - Motion-sensitive events are suppressed when `head_motion.state` is `moving`, `unknown`, or missing: `person_passing_by`, `person_approaching_robot`, `person_stopped_near_robot`.
 - `head_motion=unknown` suppression is full 7-scene coverage; `head_motion=moving` suppression is targeted 5-scene coverage and only uses the events gate.

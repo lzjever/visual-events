@@ -4,7 +4,7 @@
 
 本文档是 `visual-events-server` 的 wire protocol 事实来源。V1 只有一条主通道：WebSocket streaming。
 
-S0-S4 当前实现范围是 server WebSocket 协议、mock/推理 `visual_state`、项目内 ByteTrack-style IoU/TTL tracker baseline、attention selector 和 `tools/replay_val_data.py` 回放工具。本文中提到的 robot CLI、DDS、gaze controller 和 Botified frame 行为是未来客户端侧约定，不是当前 server 实现范围。
+S0-S8 当前实现范围是 server WebSocket 协议、mock/真实推理 `visual_state`、项目内 ByteTrack-style IoU/TTL tracker baseline、attention selector、semantic events、`val-data` E2E/perf/soak、runtime smoke 和 opt-in metrics evidence。本文中提到的 robot CLI、DDS、gaze target 和 Botified frame 行为是未来客户端侧约定，不是当前 server 实现范围。
 
 ## 1. 连接
 
@@ -259,7 +259,7 @@ CLI 行为：
 - WebSocket 断开后，服务端丢弃该连接的 tracker 和 event state。
 - CLI 重连后从新的 `frame_id` 继续发送。
 - CLI 重连后的前 1s 内不输出 Botified frame，避免旧状态造成事件突发。
-- 断线期间 gaze controller 使用保持或回中策略，不使用过期 `attention`。
+- 断线期间 CLI 不使用过期 `attention` 发布有效 gaze target；必须在 250ms 内发布一次 invalid/stale sample，DDS lifespan 只作为后备失效保护。
 
 ## 8. Botified Frame 输出
 
