@@ -504,6 +504,13 @@ def botified_frame(event: str = "person_waving", event_id: str = "front:evt_0004
     return f"<botified>{inner}</botified>\n"
 
 
+def gaze_jsonl(*payloads: dict[str, Any]) -> str:
+    return "".join(
+        json.dumps(payload, separators=(",", ":")) + "\n"
+        for payload in payloads
+    )
+
+
 def assert_explicit_partial_smoke_fields(report: dict[str, Any], paths: dict[str, Path]) -> None:
     assert report["server_bin"] == os.fspath(paths["server_bin"])
     assert report["cli_bin"] == os.fspath(paths["cli_bin"])
@@ -1217,6 +1224,414 @@ def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -
     assert_runtime_provenance_success(report, paths, config_hash=None)
     assert report["server_exit_code"] == -15
     assert report["cli_exit_code"] == -15
+
+
+def test_gaze_timestamps_report_latency_and_publish_hz_per_segment(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    gaze_stdout = gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1000,
+            "publish_timestamp_ms": 1010,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1100,
+            "publish_timestamp_ms": 1125,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "lost",
+            "valid": False,
+            "frame_timestamp_ms": 1200,
+            "publish_timestamp_ms": 1230,
+        },
+    )
+    runner = FakeRunner(
+        sync_results={"gaze_subscriber": FakeResult(0, stdout=gaze_stdout)}
+    )
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--head-state-segments",
+            "stationary,moving",
+            "--gaze-count",
+            "3",
+        ),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is True
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+
+    expected_latency = {
+        "available": True,
+        "sample_count": 3,
+        "invalid_sample_count": 0,
+        "p50": 25.0,
+        "p95": 30.0,
+        "p99": 30.0,
+    }
+    expected_hz = 2 / ((1230 - 1010) / 1000)
+    assert [segment["requested_head_state"] for segment in report["gaze_segments"]] == [
+        "stationary",
+        "moving",
+    ]
+    for segment in report["gaze_segments"]:
+        summary = segment["summary"]
+        assert summary["capture_to_gaze_publish_ms"] == expected_latency
+        publish_hz = summary["gaze_publish_hz"]
+        assert publish_hz["available"] is True
+        assert publish_hz["sample_count"] == 3
+        assert publish_hz["first_publish_timestamp_ms"] == 1010.0
+        assert publish_hz["last_publish_timestamp_ms"] == 1230.0
+        assert publish_hz["hz"] == pytest.approx(expected_hz)
+        assert publish_hz["min_hz"] == 9.0
+        assert publish_hz["pass"] is True
+
+    evidence = report["evidence_summary"]
+    assert evidence["gaze"]["total_expected_count"] == 6
+    assert evidence["gaze"]["total_accepted_count"] == 6
+    assert evidence["gaze"]["total_valid_count"] == 4
+    assert evidence["gaze"]["total_invalid_count"] == 2
+    assert evidence["gaze"]["total_rejected_count"] == 0
+    assert evidence["gaze"]["per_segment_accepted_counts"] == {
+        "moving": 3,
+        "stationary": 3,
+    }
+    assert evidence["gaze"]["min_available_gaze_hz"] == pytest.approx(expected_hz)
+    assert evidence["gaze"]["max_available_gaze_hz"] == pytest.approx(expected_hz)
+    assert evidence["gaze"]["rate_pass"] is True
+    expected_global_latency = {
+        "available": True,
+        "sample_count": 6,
+        "invalid_sample_count": 0,
+        "p50": 25.0,
+        "p95": 30.0,
+        "p99": 30.0,
+    }
+    expected_botified_latency = {
+        "available": False,
+        "sample_count": 0,
+        "p50": None,
+        "p95": None,
+        "p99": None,
+    }
+    assert report["latency"] == {
+        "capture_to_gaze_publish_ms": expected_global_latency,
+        "capture_to_botified_stdout_ms": expected_botified_latency,
+    }
+    assert evidence["latency"] == report["latency"]
+
+
+def test_missing_or_invalid_gaze_timestamps_are_unavailable_without_failure(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    gaze_stdout = gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "lost",
+            "valid": False,
+            "frame_timestamp_ms": 1000,
+            "publish_timestamp_ms": 900,
+        },
+    )
+    runner = FakeRunner(
+        sync_results={"gaze_subscriber": FakeResult(0, stdout=gaze_stdout)}
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary", "--gaze-count", "2"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is True
+    assert report["failure_reasons"] == []
+    latency = report["gaze"]["capture_to_gaze_publish_ms"]
+    assert latency == {
+        "available": False,
+        "sample_count": 0,
+        "invalid_sample_count": 2,
+        "p50": None,
+        "p95": None,
+        "p99": None,
+    }
+    publish_hz = report["gaze"]["gaze_publish_hz"]
+    assert publish_hz["available"] is False
+    assert publish_hz["sample_count"] == 1
+    assert publish_hz["hz"] is None
+    assert publish_hz["pass"] is None
+    assert report["evidence_summary"]["gaze"]["rate_pass"] is None
+    assert report["latency"]["capture_to_gaze_publish_ms"] == latency
+    assert report["latency"]["capture_to_botified_stdout_ms"] == {
+        "available": False,
+        "sample_count": 0,
+        "p50": None,
+        "p95": None,
+        "p99": None,
+    }
+    assert report["evidence_summary"]["latency"] == report["latency"]
+
+
+def test_huge_gaze_timestamp_delta_is_unavailable_without_partial_failure(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    gaze_stdout = gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1000,
+            "publish_timestamp_ms": 1_700_000_000_000,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1100,
+            "publish_timestamp_ms": 1_700_000_000_100,
+        },
+    )
+    runner = FakeRunner(
+        sync_results={"gaze_subscriber": FakeResult(0, stdout=gaze_stdout)}
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary", "--gaze-count", "2"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
+    assert report["slice_pass"] is True
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert "latency_p95_p99" in report["not_covered"]
+    assert report["failure_reasons"] == []
+
+    latency = report["gaze"]["capture_to_gaze_publish_ms"]
+    assert latency == {
+        "available": False,
+        "sample_count": 0,
+        "invalid_sample_count": 2,
+        "p50": None,
+        "p95": None,
+        "p99": None,
+    }
+    publish_hz = report["gaze"]["gaze_publish_hz"]
+    assert publish_hz["available"] is True
+    assert publish_hz["sample_count"] == 2
+    assert publish_hz["first_publish_timestamp_ms"] == 1_700_000_000_000.0
+    assert publish_hz["last_publish_timestamp_ms"] == 1_700_000_000_100.0
+    assert publish_hz["hz"] == pytest.approx(10.0)
+    assert publish_hz["pass"] is True
+    assert report["evidence_summary"]["gaze"]["rate_pass"] is True
+    assert report["latency"]["capture_to_gaze_publish_ms"] == latency
+    assert report["evidence_summary"]["latency"] == report["latency"]
+
+
+def test_non_monotonic_gaze_publish_timestamps_make_hz_unavailable_without_partial_failure(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    gaze_stdout = gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 990,
+            "publish_timestamp_ms": 1000,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1990,
+            "publish_timestamp_ms": 2000,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1490,
+            "publish_timestamp_ms": 1500,
+        },
+    )
+    runner = FakeRunner(
+        sync_results={"gaze_subscriber": FakeResult(0, stdout=gaze_stdout)}
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary", "--gaze-count", "3"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
+    assert report["slice_pass"] is True
+    assert report["failure_reasons"] == []
+
+    latency = report["gaze"]["capture_to_gaze_publish_ms"]
+    assert latency == {
+        "available": True,
+        "sample_count": 3,
+        "invalid_sample_count": 0,
+        "p50": 10.0,
+        "p95": 10.0,
+        "p99": 10.0,
+    }
+    publish_hz = report["gaze"]["gaze_publish_hz"]
+    assert publish_hz == {
+        "available": False,
+        "sample_count": 3,
+        "first_publish_timestamp_ms": 1000.0,
+        "last_publish_timestamp_ms": 1500.0,
+        "hz": None,
+        "min_hz": 9.0,
+        "pass": None,
+    }
+    assert report["evidence_summary"]["gaze"]["rate_pass"] is None
+    assert report["latency"]["capture_to_gaze_publish_ms"] == latency
+    assert report["evidence_summary"]["latency"] == report["latency"]
+
+
+def test_low_available_gaze_publish_hz_fails_with_segment_reason(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    gaze_stdout = gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 900,
+            "publish_timestamp_ms": 1000,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1900,
+            "publish_timestamp_ms": 2000,
+        },
+    )
+    runner = FakeRunner(
+        sync_results={"gaze_subscriber": FakeResult(0, stdout=gaze_stdout)}
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "moving", "--gaze-count", "2"),
+        runner=runner,
+    )
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+    assert report["slice_pass"] is False
+    assert "gaze_publish_hz_below_min:segment=moving" in report["failure_reasons"]
+    publish_hz = report["gaze"]["gaze_publish_hz"]
+    assert publish_hz["available"] is True
+    assert publish_hz["hz"] == pytest.approx(1.0)
+    assert publish_hz["pass"] is False
+    assert report["evidence_summary"]["gaze"]["rate_pass"] is False
+
+
+def test_evidence_summary_aggregates_existing_report_fields(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    manifest_path = write_authoritative_manifest(module, paths)
+    runner = successful_runner(cli_stdout=botified_frame())
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--manifest",
+            os.fspath(manifest_path),
+            "--head-state",
+            "stationary",
+        ),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    evidence = report["evidence_summary"]
+    assert evidence["manifest"] == {
+        "manifest_source": report["manifest_source"],
+        "manifest_sha256": report["manifest_sha256"],
+        "manifest_authoritative": report["manifest_authoritative"],
+        "oracle_schema_present": report["oracle_schema_present"],
+        "oracle_schema_valid": report["oracle_schema_valid"],
+    }
+    assert evidence["runtime"] == {
+        "server_bin_is_runtime_venv": report["server_bin_is_runtime_venv"],
+        "cli_bin_is_runtime_venv": report["cli_bin_is_runtime_venv"],
+        "runtime_hash": report["runtime_hash"],
+        "config_hash": report["config_hash"],
+    }
+    assert evidence["head_state"] == {
+        "required": report["head_state"]["required"],
+        "mode": report["head_state"]["publisher_mode"],
+        "hz": report["head_state"]["hz"],
+        "stale_count": report["head_state"]["stale_count"],
+        "unknown_ratio": report["head_state"]["unknown_ratio"],
+        "segments": report["head_state"]["segments"],
+    }
+    assert evidence["botified_stdout"] == {
+        "allowed_frame_count": 1,
+        "pollution_count": 0,
+        "forbidden_event_count": 0,
+        "parse_error_count": 0,
+    }
+    assert evidence["gaze"]["total_expected_count"] == report["gaze"]["expected_count"]
+    assert evidence["gaze"]["total_accepted_count"] == report["gaze"]["accepted_count"]
+    assert evidence["gaze"]["rate_pass"] is None
+    assert evidence["latency"] == report["latency"]
+    assert evidence["latency"]["capture_to_botified_stdout_ms"] == {
+        "available": False,
+        "sample_count": 0,
+        "p50": None,
+        "p95": None,
+        "p99": None,
+    }
 
 
 def test_success_report_hashes_runtime_provenance_and_server_config(tmp_path: Path) -> None:

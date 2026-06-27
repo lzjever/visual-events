@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import json
+import math
 import os
 import re
 import subprocess
@@ -50,6 +51,8 @@ VALID_GAZE_STATES = {"tracking", "lost", "stale", "disabled"}
 VALID_HEAD_STATES = ("stationary", "moving", "unknown")
 DEFAULT_HEAD_STATE_SEGMENTS = VALID_HEAD_STATES
 MIN_HEAD_STATE_HZ = 9.0
+MIN_GAZE_PUBLISH_HZ = 9.0
+MAX_CAPTURE_TO_GAZE_LATENCY_MS = 60_000.0
 PROCESS_COLLECTED_LINE_LIMIT = 4096
 PROCESS_READER_JOIN_TIMEOUT_S = 1.0
 BOTIFIED_OPEN = "<botified>"
@@ -131,6 +134,7 @@ class SegmentSmokeResult:
     image_result: CommandResult | None
     gaze_result: CommandResult | None
     gaze_summary: dict[str, Any]
+    gaze_latency_samples_ms: tuple[float, ...]
     head_stdout_json: dict[str, Any] | None
     head_stdout_parse_error: str | None
     failure_reasons: list[str]
@@ -785,7 +789,10 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
                     segment_failure_reasons.append(
                         f"gaze_subscriber_failed{segment_suffix}"
                     )
-                gaze_summary = _summarize_gaze_jsonl(
+                (
+                    gaze_summary,
+                    gaze_latency_samples_ms,
+                ) = _summarize_gaze_jsonl_with_samples(
                     gaze_result.stdout,
                     config.logical_camera_name,
                     config.gaze_count,
@@ -798,6 +805,14 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
                     segment_failure_reasons.append(
                         f"gaze_target_count_shortfall{segment_suffix}"
                     )
+                gaze_publish_hz = gaze_summary["gaze_publish_hz"]
+                if (
+                    gaze_publish_hz["available"]
+                    and gaze_publish_hz["pass"] is False
+                ):
+                    segment_failure_reasons.append(
+                        f"gaze_publish_hz_below_min{segment_suffix}"
+                    )
                 segment_results.append(
                     SegmentSmokeResult(
                         segment=segment,
@@ -805,6 +820,7 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
                         image_result=image_result,
                         gaze_result=gaze_result,
                         gaze_summary=gaze_summary,
+                        gaze_latency_samples_ms=gaze_latency_samples_ms,
                         head_stdout_json=head_stdout_json,
                         head_stdout_parse_error=head_stdout_parse_error,
                         failure_reasons=segment_failure_reasons,
@@ -1078,6 +1094,12 @@ def _build_smoke_report(
         server_exit_code=server_exit_code,
         cli_exit_code=cli_exit_code,
     )
+    latency_report = {
+        "capture_to_gaze_publish_ms": _aggregate_capture_to_gaze_publish_summary(
+            segment_results
+        ),
+        "capture_to_botified_stdout_ms": _unavailable_latency_summary(),
+    }
     report = _base_report(
         manifest_report=config.manifest_report,
         status="partial_smoke_pass" if slice_pass else "partial_smoke_failed",
@@ -1170,6 +1192,7 @@ def _build_smoke_report(
                 for result in segment_results
             ],
             "botified_stdout": botified_stdout,
+            "latency": latency_report,
             "health": {
                 "ok": False if health_result is None else health_result.passed,
                 "failure_reason": None if health_result is None else health_result.failure_reason,
@@ -1216,7 +1239,144 @@ def _build_smoke_report(
             "elapsed_s": float(elapsed_s),
         }
     )
+    report["evidence_summary"] = _evidence_summary(report)
     return report
+
+
+def _evidence_summary(report: dict[str, Any]) -> dict[str, Any]:
+    head_state = report["head_state"]
+    return {
+        "manifest": {
+            "manifest_source": report.get("manifest_source"),
+            "manifest_sha256": report.get("manifest_sha256"),
+            "manifest_authoritative": report.get("manifest_authoritative"),
+            "oracle_schema_present": report.get("oracle_schema_present"),
+            "oracle_schema_valid": report.get("oracle_schema_valid"),
+        },
+        "runtime": {
+            "server_bin_is_runtime_venv": report.get("server_bin_is_runtime_venv"),
+            "cli_bin_is_runtime_venv": report.get("cli_bin_is_runtime_venv"),
+            "runtime_hash": report.get("runtime_hash"),
+            "config_hash": report.get("config_hash"),
+        },
+        "head_state": {
+            "required": head_state.get("required"),
+            "mode": head_state.get("publisher_mode"),
+            "hz": head_state.get("hz"),
+            "stale_count": head_state.get("stale_count"),
+            "unknown_ratio": head_state.get("unknown_ratio"),
+            "segments": head_state.get("segments"),
+        },
+        "gaze": _gaze_evidence_summary(report.get("gaze_segments", [])),
+        "botified_stdout": _botified_stdout_evidence_summary(
+            report["botified_stdout"]
+        ),
+        "latency": report["latency"],
+    }
+
+
+def _gaze_evidence_summary(gaze_segments: Any) -> dict[str, Any]:
+    total_expected_count = 0
+    total_accepted_count = 0
+    total_valid_count = 0
+    total_invalid_count = 0
+    total_rejected_count = 0
+    per_segment_accepted_counts: dict[str, int] = {}
+    available_hz: list[float] = []
+    saw_available_rate = False
+    all_available_rates_pass = True
+
+    if not isinstance(gaze_segments, list):
+        gaze_segments = []
+
+    for segment in gaze_segments:
+        if not isinstance(segment, dict):
+            continue
+        state = segment.get("requested_head_state")
+        summary = segment.get("summary")
+        if not isinstance(summary, dict):
+            continue
+
+        accepted_count = _int_count(summary.get("accepted_count"))
+        if isinstance(state, str):
+            per_segment_accepted_counts[state] = accepted_count
+        total_expected_count += _int_count(summary.get("expected_count"))
+        total_accepted_count += accepted_count
+        total_valid_count += _int_count(summary.get("valid_count"))
+        total_invalid_count += _int_count(summary.get("invalid_count"))
+        total_rejected_count += _int_count(summary.get("rejected_count"))
+
+        publish_hz = summary.get("gaze_publish_hz")
+        if not isinstance(publish_hz, dict) or publish_hz.get("available") is not True:
+            continue
+        hz = _finite_float(publish_hz.get("hz"))
+        if hz is None:
+            continue
+        saw_available_rate = True
+        available_hz.append(hz)
+        if publish_hz.get("pass") is not True:
+            all_available_rates_pass = False
+
+    rate_pass = None
+    if saw_available_rate:
+        rate_pass = all_available_rates_pass
+
+    return {
+        "total_expected_count": total_expected_count,
+        "total_accepted_count": total_accepted_count,
+        "total_valid_count": total_valid_count,
+        "total_invalid_count": total_invalid_count,
+        "total_rejected_count": total_rejected_count,
+        "per_segment_accepted_counts": dict(
+            sorted(per_segment_accepted_counts.items())
+        ),
+        "min_available_gaze_hz": min(available_hz) if available_hz else None,
+        "max_available_gaze_hz": max(available_hz) if available_hz else None,
+        "rate_pass": rate_pass,
+    }
+
+
+def _botified_stdout_evidence_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "allowed_frame_count": _int_count(summary.get("allowed_frame_count")),
+        "pollution_count": _int_count(summary.get("pollution_count")),
+        "forbidden_event_count": _int_count(summary.get("forbidden_event_count")),
+        "parse_error_count": _int_count(summary.get("parse_error_count")),
+    }
+
+
+def _aggregate_capture_to_gaze_publish_summary(
+    segment_results: list[SegmentSmokeResult],
+) -> dict[str, Any]:
+    samples: list[float] = []
+    invalid_sample_count = 0
+    for result in segment_results:
+        samples.extend(result.gaze_latency_samples_ms)
+        latency_summary = result.gaze_summary.get("capture_to_gaze_publish_ms")
+        if isinstance(latency_summary, dict):
+            invalid_sample_count += _int_count(
+                latency_summary.get("invalid_sample_count")
+            )
+    return _capture_to_gaze_publish_summary(
+        samples,
+        invalid_sample_count=invalid_sample_count,
+    )
+
+
+def _unavailable_latency_summary() -> dict[str, Any]:
+    return {
+        "available": False,
+        "sample_count": 0,
+        "p50": None,
+        "p95": None,
+        "p99": None,
+    }
+
+
+def _int_count(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
 
 
 def _legacy_segment_result(
@@ -1374,6 +1534,19 @@ def _summarize_gaze_jsonl(
     logical_camera_name: str,
     expected_count: int,
 ) -> dict[str, Any]:
+    summary, _ = _summarize_gaze_jsonl_with_samples(
+        stdout,
+        logical_camera_name,
+        expected_count,
+    )
+    return summary
+
+
+def _summarize_gaze_jsonl_with_samples(
+    stdout: str,
+    logical_camera_name: str,
+    expected_count: int,
+) -> tuple[dict[str, Any], tuple[float, ...]]:
     lines = [line for line in stdout.splitlines() if line.strip()]
     accepted_samples: list[dict[str, Any]] = []
     parse_errors: list[str] = []
@@ -1409,7 +1582,10 @@ def _summarize_gaze_jsonl(
         elif payload.get("valid") is False:
             invalid_count += 1
 
-    return {
+    latency_samples, invalid_latency_sample_count = _gaze_latency_samples(
+        accepted_samples
+    )
+    summary = {
         "expected_count": expected_count,
         "received_lines": len(lines),
         "state_counts": dict(sorted(state_counts.items())),
@@ -1420,7 +1596,129 @@ def _summarize_gaze_jsonl(
         "parse_errors": parse_errors,
         "first_sample": accepted_samples[0] if accepted_samples else None,
         "last_sample": accepted_samples[-1] if accepted_samples else None,
+        "capture_to_gaze_publish_ms": _capture_to_gaze_publish_summary(
+            latency_samples,
+            invalid_sample_count=invalid_latency_sample_count,
+        ),
+        "gaze_publish_hz": _gaze_publish_hz_summary(accepted_samples),
     }
+    return summary, tuple(latency_samples)
+
+
+def _gaze_latency_samples(
+    accepted_samples: list[dict[str, Any]],
+) -> tuple[list[float], int]:
+    samples: list[float] = []
+    invalid_sample_count = 0
+    for sample in accepted_samples:
+        frame_timestamp_ms = _finite_float(sample.get("frame_timestamp_ms"))
+        publish_timestamp_ms = _finite_float(sample.get("publish_timestamp_ms"))
+        if (
+            frame_timestamp_ms is None
+            or publish_timestamp_ms is None
+            or publish_timestamp_ms < frame_timestamp_ms
+        ):
+            invalid_sample_count += 1
+            continue
+        latency_ms = publish_timestamp_ms - frame_timestamp_ms
+        if latency_ms > MAX_CAPTURE_TO_GAZE_LATENCY_MS:
+            invalid_sample_count += 1
+            continue
+        samples.append(latency_ms)
+    return samples, invalid_sample_count
+
+
+def _capture_to_gaze_publish_summary(
+    samples: list[float] | tuple[float, ...],
+    *,
+    invalid_sample_count: int,
+) -> dict[str, Any]:
+    if not samples:
+        return {
+            "available": False,
+            "sample_count": 0,
+            "invalid_sample_count": invalid_sample_count,
+            "p50": None,
+            "p95": None,
+            "p99": None,
+        }
+    return {
+        "available": True,
+        "sample_count": len(samples),
+        "invalid_sample_count": invalid_sample_count,
+        "p50": _percentile_nearest_rank(samples, 50),
+        "p95": _percentile_nearest_rank(samples, 95),
+        "p99": _percentile_nearest_rank(samples, 99),
+    }
+
+
+def _gaze_publish_hz_summary(
+    accepted_samples: list[dict[str, Any]],
+) -> dict[str, Any]:
+    publish_timestamps_ms = [
+        timestamp
+        for timestamp in (
+            _finite_float(sample.get("publish_timestamp_ms"))
+            for sample in accepted_samples
+        )
+        if timestamp is not None
+    ]
+    sample_count = len(publish_timestamps_ms)
+    first_timestamp_ms = publish_timestamps_ms[0] if publish_timestamps_ms else None
+    last_timestamp_ms = publish_timestamps_ms[-1] if publish_timestamps_ms else None
+    timestamps_strictly_increasing = all(
+        previous_timestamp_ms < current_timestamp_ms
+        for previous_timestamp_ms, current_timestamp_ms in zip(
+            publish_timestamps_ms, publish_timestamps_ms[1:]
+        )
+    )
+    if (
+        sample_count < 2
+        or first_timestamp_ms is None
+        or last_timestamp_ms is None
+        or last_timestamp_ms <= first_timestamp_ms
+        or not timestamps_strictly_increasing
+    ):
+        return {
+            "available": False,
+            "sample_count": sample_count,
+            "first_publish_timestamp_ms": first_timestamp_ms,
+            "last_publish_timestamp_ms": last_timestamp_ms,
+            "hz": None,
+            "min_hz": MIN_GAZE_PUBLISH_HZ,
+            "pass": None,
+        }
+
+    elapsed_s = (last_timestamp_ms - first_timestamp_ms) / 1000.0
+    hz = (sample_count - 1) / elapsed_s
+    return {
+        "available": True,
+        "sample_count": sample_count,
+        "first_publish_timestamp_ms": first_timestamp_ms,
+        "last_publish_timestamp_ms": last_timestamp_ms,
+        "hz": hz,
+        "min_hz": MIN_GAZE_PUBLISH_HZ,
+        "pass": hz >= MIN_GAZE_PUBLISH_HZ,
+    }
+
+
+def _percentile_nearest_rank(
+    samples: list[float] | tuple[float, ...],
+    percentile: int,
+) -> float:
+    ordered = sorted(samples)
+    rank = math.ceil((percentile / 100.0) * len(ordered))
+    index = min(max(rank - 1, 0), len(ordered) - 1)
+    return float(ordered[index])
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    sample = float(value)
+    if not math.isfinite(sample):
+        return None
+    return sample
 
 
 def _summarize_botified_stdout_from_process(process: ProcessLike | None) -> dict[str, Any]:
