@@ -394,11 +394,13 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "gaze valid/state consistency",
             "finite/range checks",
             "mapping harness 不启 DDS 网络、不调用 Unitree Channel",
-            "真实 DDS backend/factories/adapters",
-            "Unitree Channel reader/writer runtime",
-            "real DDS serialization over wire/QoS",
-            "PC E2E tools",
-            "仍未完成",
+            "Step 4 native Unitree Channel construction harness/smoke slice 已完成",
+            "`visual_events_dds_bridge_construction_harness`",
+            "full-bridge only construction harness",
+            "`runtime_options` pure env parser",
+            "`--construct-once` 解析 env",
+            "CloseChannel 后 Release",
+            "未完成边界统一见 Step 4 剩余缺口",
         ],
     )
 
@@ -543,7 +545,8 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "finite/range checks",
             "mapping harness 不启 DDS 网络、不调用 Unitree Channel",
             "real serialization/QoS",
-            "真实 DDS runtime/PC E2E/RK/真机仍未完成",
+            "该 slice 不覆盖真实 DDS runtime",
+            "未完成边界统一见 Step 4 剩余缺口",
             "`service_client`：WebSocket wire/pack-unpack、连接复用/关闭、timeout、invalid response、frame_id mismatch、retryable/non-retryable error handling 的单元核心",
             "`frame_pump`：one in-flight coordination、keep-latest frame slot/backpressure、gaze stale watchdog、Botified enqueue 的 deterministic unit core",
             "main runtime_runner 注入和默认 DDS factories fail-fast",
@@ -556,7 +559,6 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "Step 3 不实现真实 DDS factories/adapters",
             "### Step 4：实现 DDS adapters（first slice/unit core 已完成；真实 runtime adapters 剩余）",
             "真实 DDS runtime adapters",
-            "按 `docs/dds-stack-decision-record.md` 已冻结决策实现 C++ native DDS helper/bridge",
             "native full-bridge generated Head/Gaze C++ type-support compile/probe slice",
             "real serialization/QoS tests",
             "`native/dds_bridge` CMake project 可构建 very small `visual_events_dds_bridge_probe`",
@@ -587,7 +589,8 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "剩余是 Step 4 真实 DDS factories/adapters",
             "DDS contract/schema Step 1 主要产物已完成",
             "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
-            "真实 DDS backend/factories/adapters、Unitree Channel reader/writer runtime、real serialization/QoS construction tests 仍未完成",
+            "对应真实 DDS backend/factories/adapters、Unitree Channel reader/writer runtime、真实 runtime loop（callbacks -> stdout JSONL、stdin gaze -> DDS Write）仍未完成",
+            "DDS discovery/real serialization over wire/QoS behavior、real serialization/QoS tests 和 real serialization/QoS construction tests 仍未完成",
             "`visual_events_dds_bridge_probe` 可输出既有 JSONL bridge ABI status frame（`protocol_version=1,type=status,code=probe_ok,message=...`）",
             "`visual_events_dds_bridge` target 存在",
             "不带参数运行只 explicit fatal `dds_runtime_not_implemented`",
@@ -602,7 +605,7 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "`--probe-codegen` 和 `tools/build_dds_bridge.py --check-full-bridge` 会实际运行 C++ idlc probe",
             "默认验证 `head_state_v1.idl` 和 `gaze_target_v1.idl` 都生成 expected `.hpp/.cpp`",
             "拒绝版本不是 0.10.2、`cannot load generator cxx`、任一 IDL 只生成 `.hpp` 或缺 `.cpp` 的假阳性",
-            "真实 DDS backend/factories/adapters、Unitree Channel reader/writer runtime、real DDS serialization over wire/QoS behavior、PC E2E tools、release/runtime 真跑、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
+            "未完成边界统一见 Step 4 剩余缺口",
             "CLI 当前 PC gate 必须有 unit、integration、PC local E2E 和 fault matrix",
             "真机 smoke/closed-loop 是 deferred hardware/field gate",
         ],
@@ -681,7 +684,8 @@ def test_ga_plan_repeats_formal_cli_bridge_opt_in_status_in_three_summaries():
         "formal CLI bridge runtime opt-in slice 已完成",
         "默认仍 fail_fast，不因 env 隐式切 bridge",
         '显式 `[dds].runtime="bridge"`/`--dds-runtime bridge` 才走 `bridge_runtime_factories()`',
-        "真实 DDS runtime/PC E2E/RK/真机仍未完成",
+        "该 slice 不覆盖真实 DDS runtime",
+        "未完成边界统一见 Step 4 剩余缺口",
     ]
     snippets = [
         paragraph_containing(text, "当前 repo 已完成 Step 4 first slice/unit core"),
@@ -691,6 +695,59 @@ def test_ga_plan_repeats_formal_cli_bridge_opt_in_status_in_three_summaries():
 
     for snippet in snippets:
         assert_contains_all(snippet, required)
+
+
+def test_ga_plan_keeps_native_channel_construction_harness_done_and_one_remaining_boundary():
+    text = read_text(GA_PLAN)
+    required_done = [
+        "Step 4 native Unitree Channel construction harness/smoke slice 已完成",
+        "`visual_events_dds_bridge_construction_harness`",
+        "full-bridge only construction harness",
+        "`runtime_options` pure env parser",
+        "`--print-options` 单行 JSONL",
+        "`--print-options` 不启 DDS",
+        "`--construct-once` 解析 env",
+        "Unitree ChannelFactory Init(domain/network)",
+        "构造 `CameraFrame_` subscriber",
+        "构造 `HeadStateV1_` subscriber",
+        "构造 `GazeTargetV1_` publisher",
+        "CloseChannel 后 Release",
+    ]
+    snippets = [
+        paragraph_containing(text, "当前 repo 已完成 Step 4 first slice/unit core"),
+        section_between(text, "### Step 4：实现 DDS adapters", "剩余缺口："),
+        paragraph_containing(text, "- Step 4 first slice/unit core 已完成"),
+    ]
+
+    for snippet in snippets:
+        assert_contains_all(snippet, required_done)
+
+    remaining_gap = section_between(text, "剩余缺口：\n\n- 真实 DDS runtime adapters", "验收：\n\n- 无 publisher")
+    assert_contains_all(
+        remaining_gap,
+        [
+            "真实 DDS backend/factories/adapters",
+            "Unitree Channel reader/writer runtime",
+            "真实 runtime loop（callbacks -> stdout JSONL、stdin gaze -> DDS Write）仍未完成",
+            "DDS discovery/real serialization over wire/QoS behavior",
+            "real serialization/QoS tests",
+            "real serialization/QoS construction tests 仍未完成",
+            "PC E2E tools、release/runtime 真跑、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
+        ],
+    )
+
+    assert text.count("对应真实 DDS backend/factories/adapters、Unitree Channel reader/writer runtime") == 1
+    assert text.count("DDS discovery/real serialization over wire/QoS behavior、real serialization/QoS tests 和 real serialization/QoS construction tests 仍未完成") == 1
+    assert text.count("PC E2E tools、release/runtime 真跑、RK/board probe、真机 smoke/closed-loop handoff 仍未完成") == 1
+
+    assert "真实 runtime loop 已完成" not in text
+    assert "PC E2E tools 已完成" not in text
+    assert "DDS discovery 已完成" not in text
+    assert "real serialization over wire 已完成" not in text
+    assert "QoS behavior 已完成" not in text
+    assert "release runtime 真跑已完成" not in text
+    assert "RK/board 已完成" not in text
+    assert "真机 smoke/closed-loop 已完成" not in text
 
 
 def test_protocol_pins_cli_frame_id_stale_watchdog_and_botified_allowlist():

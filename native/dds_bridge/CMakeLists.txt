@@ -32,6 +32,17 @@ target_include_directories(visual_events_dds_bridge_abi PUBLIC
 )
 target_compile_options(visual_events_dds_bridge_abi PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(visual_events_dds_bridge_runtime_options STATIC
+    src/runtime_options.cpp
+)
+target_include_directories(visual_events_dds_bridge_runtime_options PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_link_libraries(visual_events_dds_bridge_runtime_options PUBLIC
+    visual_events_dds_bridge_contract
+)
+target_compile_options(visual_events_dds_bridge_runtime_options PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(visual_events_dds_bridge
     src/runtime_main.cpp
 )
@@ -140,6 +151,45 @@ if (VISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE)
             visual_events_dds_bridge_dds_types
         )
         target_compile_options(visual_events_dds_bridge_mapping_harness PRIVATE -Wall -Wextra -Wpedantic)
+
+        add_executable(visual_events_dds_bridge_construction_harness
+            src/construction_harness_main.cpp
+            src/unitree_channel_runtime.cpp
+            "${CAMERA_FRAME_SOURCE}"
+            ${VISUAL_EVENTS_GENERATED_DDS_SOURCES}
+        )
+        target_include_directories(visual_events_dds_bridge_construction_harness PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${UNITREE_SDK_ROOT}/include"
+            "${VIDEO_DDS_PUBLISHER_DIR}/include"
+            "${VISUAL_EVENTS_GENERATED_DDS_DIR}"
+        )
+        target_compile_definitions(visual_events_dds_bridge_construction_harness PRIVATE
+            VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=1
+        )
+        if (VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR)
+            target_include_directories(visual_events_dds_bridge_construction_harness PRIVATE
+                "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}"
+                "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}/.."
+            )
+        endif()
+        target_link_directories(visual_events_dds_bridge_construction_harness PRIVATE
+            "${UNITREE_SDK_ROOT}/lib"
+        )
+        target_link_libraries(visual_events_dds_bridge_construction_harness PRIVATE
+            visual_events_dds_bridge_abi
+            visual_events_dds_bridge_runtime_options
+            unitree_sdk2
+            -Wl,--no-as-needed
+            ddsc
+            ddscxx
+            -Wl,--as-needed
+        )
+        target_compile_options(visual_events_dds_bridge_construction_harness PRIVATE -Wall -Wextra -Wpedantic)
+        set_target_properties(visual_events_dds_bridge_construction_harness PROPERTIES
+            BUILD_RPATH "${UNITREE_SDK_ROOT}/lib"
+            INSTALL_RPATH "${UNITREE_SDK_ROOT}/lib"
+        )
     endif()
 
     add_executable(visual_events_dds_bridge_probe

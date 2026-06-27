@@ -61,12 +61,101 @@ def _combined_native_source_text() -> str:
 def _make_minimal_unitree_sdk_root(tmp_path: Path) -> Path:
     root = tmp_path / "unitree-sdk"
     (root / "lib" / "cmake" / "unitree_sdk2").mkdir(parents=True)
+    channel_include = root / "include" / "unitree" / "robot" / "channel"
+    channel_include.mkdir(parents=True)
     (root / "lib" / "cmake" / "unitree_sdk2" / "unitree_sdk2Config.cmake").write_text(
         "# fake unitree_sdk2 package\n",
         encoding="utf-8",
     )
     for name in ["libunitree_sdk2.a", "libddsc.so", "libddscxx.so"]:
         (root / "lib" / name).write_text("", encoding="utf-8")
+    (channel_include / "channel_factory.hpp").write_text(
+        "#pragma once\n"
+        "\n"
+        "#include <cstdint>\n"
+        "#include <functional>\n"
+        "#include <memory>\n"
+        "#include <string>\n"
+        "\n"
+        "namespace unitree { namespace robot {\n"
+        "template<typename MSG>\n"
+        "class FakeChannel {\n"
+        "public:\n"
+        "  bool Write(const MSG&, int64_t = 0) { return true; }\n"
+        "  int64_t GetLastDataAvailableTime() const { return -1; }\n"
+        "};\n"
+        "template<typename MSG>\n"
+        "using ChannelPtr = std::shared_ptr<FakeChannel<MSG>>;\n"
+        "class ChannelFactory {\n"
+        "public:\n"
+        "  static ChannelFactory* Instance() { static ChannelFactory inst; return &inst; }\n"
+        "  void Init(int32_t domain_id, const std::string& network = \"\") {\n"
+        "    domain_id_ = domain_id;\n"
+        "    network_ = network;\n"
+        "    inited_ = true;\n"
+        "  }\n"
+        "  void Release() { inited_ = false; }\n"
+        "  template<typename MSG>\n"
+        "  ChannelPtr<MSG> CreateSendChannel(const std::string&) {\n"
+        "    return std::make_shared<FakeChannel<MSG>>();\n"
+        "  }\n"
+        "  template<typename MSG>\n"
+        "  ChannelPtr<MSG> CreateRecvChannel(const std::string&, std::function<void(const void*)>, int32_t = 0) {\n"
+        "    return std::make_shared<FakeChannel<MSG>>();\n"
+        "  }\n"
+        "private:\n"
+        "  bool inited_ = false;\n"
+        "  int32_t domain_id_ = 0;\n"
+        "  std::string network_;\n"
+        "};\n"
+        "}}\n",
+        encoding="utf-8",
+    )
+    (channel_include / "channel_subscriber.hpp").write_text(
+        "#pragma once\n"
+        "\n"
+        "#include <functional>\n"
+        "#include <string>\n"
+        "\n"
+        "#include \"unitree/robot/channel/channel_factory.hpp\"\n"
+        "\n"
+        "namespace unitree { namespace robot {\n"
+        "template<typename MSG>\n"
+        "class ChannelSubscriber {\n"
+        "public:\n"
+        "  explicit ChannelSubscriber(const std::string& channel_name) : channel_name_(channel_name) {}\n"
+        "  void InitChannel(const std::function<void(const void*)>& handler, int64_t queuelen = 0) {\n"
+        "    channel_ = ChannelFactory::Instance()->CreateRecvChannel<MSG>(channel_name_, handler, static_cast<int32_t>(queuelen));\n"
+        "  }\n"
+        "  void CloseChannel() { channel_.reset(); }\n"
+        "private:\n"
+        "  std::string channel_name_;\n"
+        "  ChannelPtr<MSG> channel_;\n"
+        "};\n"
+        "}}\n",
+        encoding="utf-8",
+    )
+    (channel_include / "channel_publisher.hpp").write_text(
+        "#pragma once\n"
+        "\n"
+        "#include <string>\n"
+        "\n"
+        "#include \"unitree/robot/channel/channel_factory.hpp\"\n"
+        "\n"
+        "namespace unitree { namespace robot {\n"
+        "template<typename MSG>\n"
+        "class ChannelPublisher {\n"
+        "public:\n"
+        "  explicit ChannelPublisher(const std::string& channel_name) : channel_name_(channel_name) {}\n"
+        "  void InitChannel() { channel_ = ChannelFactory::Instance()->CreateSendChannel<MSG>(channel_name_); }\n"
+        "  void CloseChannel() { channel_.reset(); }\n"
+        "private:\n"
+        "  std::string channel_name_;\n"
+        "  ChannelPtr<MSG> channel_;\n"
+        "};\n"
+        "}}\n",
+        encoding="utf-8",
+    )
     return root
 
 
@@ -125,6 +214,34 @@ def _make_minimal_video_dds_publisher_dir(tmp_path: Path) -> Path:
     )
     source.write_text(
         '#include "unitree_camera/msg/dds/CameraFrame_.hpp"\n',
+        encoding="utf-8",
+    )
+    return root
+
+
+def _make_minimal_generated_head_gaze_dir(tmp_path: Path) -> Path:
+    root = tmp_path / "generated-head-gaze"
+    root.mkdir()
+    (root / "head_state_v1.hpp").write_text(
+        "#pragma once\n"
+        "namespace visual_events { namespace msg { namespace dds_ {\n"
+        "class HeadStateV1_ {};\n"
+        "}}}\n",
+        encoding="utf-8",
+    )
+    (root / "head_state_v1.cpp").write_text(
+        '#include "head_state_v1.hpp"\n',
+        encoding="utf-8",
+    )
+    (root / "gaze_target_v1.hpp").write_text(
+        "#pragma once\n"
+        "namespace visual_events { namespace msg { namespace dds_ {\n"
+        "class GazeTargetV1_ {};\n"
+        "}}}\n",
+        encoding="utf-8",
+    )
+    (root / "gaze_target_v1.cpp").write_text(
+        '#include "gaze_target_v1.hpp"\n',
         encoding="utf-8",
     )
     return root
@@ -705,6 +822,61 @@ def native_full_bridge_mapping_build(tmp_path):
     shutil.rmtree(generated_dir, ignore_errors=True)
 
 
+@pytest.fixture
+def native_full_bridge_construction_build(tmp_path):
+    if shutil.which("cmake") is None:
+        pytest.skip("cmake is required for native construction harness target tests")
+    if (
+        shutil.which("c++") is None
+        and shutil.which("g++") is None
+        and shutil.which("clang++") is None
+    ):
+        pytest.skip("a C++ compiler is required for native construction harness target tests")
+
+    unitree_root = _make_minimal_unitree_sdk_root(tmp_path)
+    video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
+    generated_dir = _make_minimal_generated_head_gaze_dir(tmp_path)
+    build_dir = REPO_ROOT / "build" / "test-dds-bridge" / f"{tmp_path.name}-construction"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    configure = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            os.fspath(NATIVE_BRIDGE),
+            "-B",
+            os.fspath(build_dir),
+            f"-DUNITREE_SDK_ROOT={unitree_root}",
+            f"-DVIDEO_DDS_PUBLISHER_DIR={video_dir}",
+            "-DVISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=ON",
+            f"-DVISUAL_EVENTS_GENERATED_DDS_DIR={generated_dir}",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert configure.returncode == 0, configure.stderr
+
+    build = subprocess.run(
+        [
+            "cmake",
+            "--build",
+            os.fspath(build_dir),
+            "--target",
+            "visual_events_dds_bridge_construction_harness",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+
+    yield build_dir
+
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+
 def test_native_bridge_source_allowlist_has_only_camera_head_gaze_and_no_motion_tokens():
     text = _combined_native_source_text()
 
@@ -796,6 +968,84 @@ def test_native_bridge_declares_dds_type_mapping_core_and_full_bridge_harness():
     ]
     missing = [item for item in required if item not in text]
     assert missing == []
+
+
+def test_native_bridge_declares_unitree_channel_construction_harness_without_direct_cyclonedds_pubsub():
+    text = _combined_native_source_text()
+
+    required = [
+        "visual_events_dds_bridge_construction_harness",
+        "src/construction_harness_main.cpp",
+        "unitree_channel_runtime.hpp",
+        "src/unitree_channel_runtime.cpp",
+        "ChannelFactory::Instance()->Init",
+        "unitree::robot::ChannelSubscriber<unitree_camera::msg::dds_::CameraFrame_>",
+        "unitree::robot::ChannelSubscriber<visual_events::msg::dds_::HeadStateV1_>",
+        "unitree::robot::ChannelPublisher<visual_events::msg::dds_::GazeTargetV1_>",
+    ]
+    missing = [item for item in required if item not in text]
+    assert missing == []
+
+    forbidden = [
+        "dds::pub::Publisher",
+        "dds::sub::Subscriber",
+        "dds::topic::Topic",
+        "dds_create_participant",
+        "dds_create_writer",
+        "dds_create_reader",
+        "ddsc/",
+    ]
+    offenders = [item for item in forbidden if item in text]
+    assert offenders == []
+
+
+def test_native_bridge_full_bridge_construction_target_includes_camera_head_gaze_type_support():
+    text = (NATIVE_BRIDGE / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    required = [
+        "visual_events_dds_bridge_construction_harness",
+        "src/construction_harness_main.cpp",
+        "src/unitree_channel_runtime.cpp",
+        "${CAMERA_FRAME_SOURCE}",
+        "${VISUAL_EVENTS_GENERATED_DDS_SOURCES}",
+        "VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=1",
+    ]
+    missing = [item for item in required if item not in text]
+    assert missing == []
+
+
+def test_native_runtime_options_are_pure_env_parser_without_unitree_dependency():
+    header = NATIVE_BRIDGE / "include" / "visual_events" / "dds_bridge" / "runtime_options.hpp"
+    source = NATIVE_BRIDGE / "src" / "runtime_options.cpp"
+    assert header.exists()
+    assert source.exists()
+    text = header.read_text(encoding="utf-8") + source.read_text(encoding="utf-8")
+
+    required = [
+        "VISUAL_EVENTS_DDS_DOMAIN",
+        "VISUAL_EVENTS_DDS_NETWORK",
+        "VISUAL_EVENTS_CAMERA_TOPIC",
+        "VISUAL_EVENTS_HEAD_STATE_TOPIC",
+        "VISUAL_EVENTS_GAZE_TOPIC",
+        "kCameraTopic.name",
+        "kHeadTopic.name",
+        "kGazeTopic.name",
+    ]
+    missing = [item for item in required if item not in text]
+    assert missing == []
+    assert "unitree/" not in text
+
+
+def test_native_construction_runtime_closes_channels_before_releasing_factory():
+    source = NATIVE_BRIDGE / "src" / "unitree_channel_runtime.cpp"
+    assert source.exists()
+    text = source.read_text(encoding="utf-8")
+
+    assert "CloseChannel" in text
+    assert "ChannelFactory::Instance()->Release" in text
+    assert text.rfind("CloseChannel") < text.rfind("ChannelFactory::Instance()->Release")
+    assert "Write(" not in text
+    assert "std::cout" not in text
 
 
 def test_native_dds_type_mapping_foundation_target_builds_without_generated_head_gaze(tmp_path):
@@ -937,6 +1187,111 @@ def test_native_runtime_probe_and_no_args_fail_fast_as_jsonl(native_abi_build):
     assert error.fatal is True
     assert error.code == "dds_runtime_not_implemented"
     assert runtime.stderr
+
+
+def test_native_construction_harness_print_options_defaults_and_env_contract(
+    native_full_bridge_construction_build,
+):
+    binary = native_full_bridge_construction_build / "visual_events_dds_bridge_construction_harness"
+
+    default_env = os.environ.copy()
+    for name in [
+        "VISUAL_EVENTS_DDS_DOMAIN",
+        "VISUAL_EVENTS_DDS_NETWORK",
+        "VISUAL_EVENTS_CAMERA_TOPIC",
+        "VISUAL_EVENTS_HEAD_STATE_TOPIC",
+        "VISUAL_EVENTS_GAZE_TOPIC",
+    ]:
+        default_env.pop(name, None)
+
+    defaults = subprocess.run(
+        [os.fspath(binary), "--print-options"],
+        cwd=REPO_ROOT,
+        env=default_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert defaults.returncode == 0
+    assert len(defaults.stdout.splitlines()) == 1
+    default_status = json.loads(defaults.stdout)
+    assert default_status == {
+        "protocol_version": 1,
+        "type": "status",
+        "code": "options_ok",
+        "message": "native Unitree channel construction options ok",
+        "mode": "print_options",
+        "domain": 0,
+        "network": "eth0",
+        "camera_topic": "/camera/image/jpeg",
+        "head_state_topic": "/robot/head_state",
+        "gaze_topic": "/visual_events/gaze_target",
+    }
+
+    env = default_env | {
+        "VISUAL_EVENTS_DDS_DOMAIN": "7",
+        "VISUAL_EVENTS_DDS_NETWORK": "enp4s0",
+        "VISUAL_EVENTS_CAMERA_TOPIC": "/camera/image/jpeg",
+        "VISUAL_EVENTS_HEAD_STATE_TOPIC": "/robot/head_state",
+        "VISUAL_EVENTS_GAZE_TOPIC": "/visual_events/gaze_target",
+    }
+    overridden = subprocess.run(
+        [os.fspath(binary), "--print-options"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert overridden.returncode == 0
+    assert len(overridden.stdout.splitlines()) == 1
+    status = json.loads(overridden.stdout)
+    assert status["domain"] == 7
+    assert status["network"] == "enp4s0"
+    assert status["camera_topic"] == "/camera/image/jpeg"
+    assert status["head_state_topic"] == "/robot/head_state"
+    assert status["gaze_topic"] == "/visual_events/gaze_target"
+
+
+@pytest.mark.parametrize(
+    ("env_name", "env_value", "expected_fragment"),
+    [
+        ("VISUAL_EVENTS_DDS_DOMAIN", "not-an-int", "VISUAL_EVENTS_DDS_DOMAIN"),
+        ("VISUAL_EVENTS_DDS_DOMAIN", "-1", "VISUAL_EVENTS_DDS_DOMAIN"),
+        ("VISUAL_EVENTS_DDS_NETWORK", "", "VISUAL_EVENTS_DDS_NETWORK"),
+        ("VISUAL_EVENTS_CAMERA_TOPIC", "", "VISUAL_EVENTS_CAMERA_TOPIC"),
+        ("VISUAL_EVENTS_HEAD_STATE_TOPIC", "", "VISUAL_EVENTS_HEAD_STATE_TOPIC"),
+        ("VISUAL_EVENTS_GAZE_TOPIC", "", "VISUAL_EVENTS_GAZE_TOPIC"),
+    ],
+)
+def test_native_construction_harness_print_options_invalid_env_is_single_fatal_jsonl(
+    native_full_bridge_construction_build,
+    env_name: str,
+    env_value: str,
+    expected_fragment: str,
+):
+    binary = native_full_bridge_construction_build / "visual_events_dds_bridge_construction_harness"
+    env = os.environ.copy() | {env_name: env_value}
+    result = subprocess.run(
+        [os.fspath(binary), "--print-options"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    stdout_lines = result.stdout.splitlines()
+    assert len(stdout_lines) == 1
+    error = json.loads(stdout_lines[0])
+    assert error["protocol_version"] == 1
+    assert error["type"] == "error"
+    assert error["code"] == "invalid_runtime_options"
+    assert error["fatal"] is True
+    assert expected_fragment in error["message"]
+    assert "log" not in error
+    assert result.stderr
 
 
 @pytest.mark.parametrize("gaze_state", ["tracking", "lost", "stale", "disabled"])
