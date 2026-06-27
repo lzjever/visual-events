@@ -59,7 +59,7 @@ ldd build/dds_bridge/visual_events_dds_bridge_probe
 readelf -d build/dds_bridge/visual_events_dds_bridge_probe
 ```
 
-The foundation build/probe gate does not require an IDL generator and its report must distinguish `foundation_ready` from `visual_events_codegen_ready`. The repo-local codegen toolchain proof is dry-run/check only and must not download, build, or write outside ignored repo paths:
+The foundation build/probe gate does not require an IDL generator and its report must distinguish `foundation_ready` from `visual_events_codegen_ready`. The dry-run codegen check must not download, build, write files, or claim that generation/oracle passed:
 
 ```bash
 UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
@@ -68,7 +68,16 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   --idlc "$VISUAL_EVENTS_IDLC"
 ```
 
-The full bridge type-support/codegen gate is explicit and does not search `PATH`; pass the same pinned `idlc` with `--idlc` or `VISUAL_EVENTS_IDLC`:
+The generator oracle hardening check is explicit and writes only under ignored repo `build/`. It runs real C++ idlc codegen and requires the expected `.hpp` and `.cpp` probe outputs:
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/prepare_dds_codegen_toolchain.py \
+  --probe-codegen \
+  --idlc "$VISUAL_EVENTS_IDLC"
+```
+
+The full bridge type-support/codegen gate is explicit, does not search `PATH`, and reuses the same codegen probe; pass the same pinned `idlc` with `--idlc` or `VISUAL_EVENTS_IDLC`:
 
 ```bash
 UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
@@ -80,6 +89,8 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   --out artifacts/dds_bridge/full-bridge-toolchain-report.json
 ```
 
-If neither `--idlc` nor `VISUAL_EVENTS_IDLC` is provided, if the generator is not pinned to 0.10.2, or if it does not expose a `cxx` backend, the full bridge gate must fail fast while the foundation gate can still pass.
+If neither `--idlc` nor `VISUAL_EVENTS_IDLC` is provided, if the generator is not pinned to 0.10.2, if stdout/stderr contains `cannot load generator` or `cannot load generator cxx`, or if the probe does not write the expected `.hpp` and `.cpp`, the full bridge gate must fail fast even when idlc returns 0. The foundation gate can still pass.
+
+This only proves generator oracle hardening. It does not prove that a real CycloneDDS 0.10.2 toolchain is prepared, does not generate or connect `HeadStateV1_`/`GazeTargetV1_` type support, and does not complete full bridge/runtime/PC E2E/RK/real-device validation.
 
 The `ldd`/`readelf` commands are only meaningful after a local CMake probe build. Build output must stay under ignored `build/`; reports must stay under ignored `artifacts/`.

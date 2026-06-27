@@ -27,7 +27,9 @@ DEFAULT_REPORT = REPO_ROOT / "artifacts" / "dds_bridge" / "build_report.json"
 
 
 class CheckError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, report: dict[str, object] | None = None) -> None:
+        super().__init__(message)
+        self.report = report or {}
 
 
 def _env_path(*names: str) -> Path | None:
@@ -44,6 +46,30 @@ def _resolve_required_dir(path: Path | None, label: str) -> Path:
     resolved = path.expanduser().resolve()
     if not resolved.is_dir():
         raise CheckError(f"{label} does not exist or is not a directory: {resolved}")
+    return resolved
+
+
+def _resolve_path(path: Path) -> Path:
+    return path.expanduser().resolve()
+
+
+def _require_repo_build_path(path: Path, label: str) -> Path:
+    resolved = _resolve_path(path)
+    build_root = (REPO_ROOT / "build").resolve()
+    try:
+        resolved.relative_to(build_root)
+    except ValueError as exc:
+        raise CheckError(f"{label} must be under repo build/: {resolved}") from exc
+    return resolved
+
+
+def _require_repo_artifact_path(path: Path, label: str) -> Path:
+    resolved = _resolve_path(path)
+    artifacts_root = (REPO_ROOT / "artifacts").resolve()
+    try:
+        resolved.relative_to(artifacts_root)
+    except ValueError as exc:
+        raise CheckError(f"{label} must be under repo artifacts/: {resolved}") from exc
     return resolved
 
 
@@ -99,18 +125,30 @@ def check_foundation_environment(
     }
 
 
-def check_visual_events_codegen(idlc: Path | None) -> dict[str, object]:
+def check_visual_events_codegen(
+    idlc: Path | None,
+    *,
+    probe_idl: Path | None = None,
+    probe_output_dir: Path | None = None,
+) -> dict[str, object]:
     try:
-        result = check_idlc_codegen_toolchain(idlc)
+        result = check_idlc_codegen_toolchain(
+            idlc,
+            probe_codegen=True,
+            probe_idl=probe_idl,
+            probe_output_dir=probe_output_dir,
+        )
     except CodegenToolchainError as exc:
-        raise CheckError(str(exc)) from exc
-    return {
+        raise CheckError(str(exc), report=exc.report) from exc
+    report = {
         "idl_generator": result["idlc"],
         "idl_generator_version": result["idlc_version"],
         "idl_generator_cxx_backend": result["cxx_backend_available"],
-        "visual_events_codegen_ready": True,
+        "visual_events_codegen_ready": result["oracle_ok"] is True,
         "visual_events_codegen_error": "",
     }
+    report.update(result)
+    return report
 
 
 def configure_and_build(
@@ -184,6 +222,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--build-dir", type=Path, default=DEFAULT_BUILD_DIR)
     parser.add_argument("--out", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--idlc", type=Path, default=_env_path("VISUAL_EVENTS_IDLC"))
+    parser.add_argument(
+        "--codegen-probe-idl",
+        type=Path,
+        default=None,
+        help="IDL file for the full-bridge C++ idlc codegen oracle",
+    )
+    parser.add_argument(
+        "--codegen-probe-output-dir",
+        type=Path,
+        default=None,
+        help="repo build/ directory for the full-bridge C++ idlc codegen oracle",
+    )
     parser.add_argument("--check", action="store_true", help="only validate foundation inputs")
     parser.add_argument(
         "--check-full-bridge",
@@ -205,8 +255,11 @@ def main(argv: list[str] | None = None) -> int:
         "visual_events_codegen_ready": False,
         "visual_events_codegen_error": "not checked",
     }
+    report_path: Path | None = None
 
     try:
+        report_path = _require_repo_artifact_path(args.out, "report path")
+        build_dir = _require_repo_build_path(args.build_dir, "build dir")
         unitree_sdk_root = _resolve_required_dir(args.unitree_sdk_root, "UNITREE_SDK_ROOT")
         video_dds_publisher_dir = _resolve_required_dir(
             args.video_dds_publisher_dir,
@@ -217,8 +270,15 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.check_full_bridge:
             try:
-                report.update(check_visual_events_codegen(args.idlc))
+                report.update(
+                    check_visual_events_codegen(
+                        args.idlc,
+                        probe_idl=args.codegen_probe_idl,
+                        probe_output_dir=args.codegen_probe_output_dir,
+                    )
+                )
             except CheckError as exc:
+                report.update(exc.report)
                 report["visual_events_codegen_ready"] = False
                 report["visual_events_codegen_error"] = str(exc)
                 raise
@@ -229,19 +289,20 @@ def main(argv: list[str] | None = None) -> int:
                 configure_and_build(
                     unitree_sdk_root=unitree_sdk_root,
                     video_dds_publisher_dir=video_dds_publisher_dir,
-                    build_dir=args.build_dir,
+                    build_dir=build_dir,
                     target="visual_events_dds_bridge_probe",
                 )
             )
         if args.probe:
-            report.update(run_probe(args.build_dir))
+            report.update(run_probe(build_dir))
 
         report["ok"] = True
-        _write_report(args.out, report)
+        _write_report(report_path, report)
         return 0
     except (CheckError, json.JSONDecodeError) as exc:
         report["error"] = str(exc)
-        _write_report(args.out, report)
+        if report_path is not None:
+            _write_report(report_path, report)
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

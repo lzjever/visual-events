@@ -430,16 +430,24 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "`foundation_ready=true`",
             "`visual_events_codegen_ready=false`",
             '`visual_events_codegen_error="not required for foundation check"`',
-            "Step 4 DDS C++ IDL codegen toolchain proof slice 已完成",
+            "Step 4 DDS C++ idlc generator oracle hardening slice 已完成",
             "`tools/prepare_dds_codegen_toolchain.py`",
             "默认 pinned CycloneDDS/CycloneDDS-CXX 0.10.2",
             "`build/tools/cyclonedds-cxx-idlc-0.10.2/`",
-            "`--check`/`--dry-run` 只验证版本、路径、显式 `idlc` 和 cxx backend",
             "不下载、不构建、不写系统或用户目录",
-            "fake idlc 覆盖 0.10.2+cxx pass、0.11.0 fail、缺 cxx backend fail",
+            "只做版本、路径、显式 `idlc` 和 cxx backend 文本检查",
+            "`probe_codegen=false`、`oracle_ok=false`",
+            "`--probe-codegen` 是显式非 dry-run oracle",
+            "`idlc -l cxx -o <probe-output-dir> <probe-idl>`",
+            "`cannot load generator`/`cannot load generator cxx`",
+            "`generated_files`、`expected_generated_files_present`、`cxx_backend_available` 和 `oracle_ok`",
+            "fake idlc 覆盖成功生成、0.11.0 fail、missing cxx generator 但 rc=0 fail、只生成 `.hpp` fail",
             "`tools/build_dds_bridge.py --check-full-bridge` 不再搜索 PATH",
             "只接受显式 `--idlc` 或 `VISUAL_EVENTS_IDLC`",
+            "复用同一个 codegen probe",
+            "expected `.hpp/.cpp` 都写出",
             "`visual_events_codegen_ready=true`",
+            "真实 CycloneDDS 0.10.2 toolchain 仍未准备完成",
             "Head/Gaze generated type support 仍未生成或接入",
             "full bridge runtime",
             "real serialization/QoS",
@@ -463,10 +471,11 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "`tools/build_dds_bridge.py` 拆分 foundation gate 和 full-bridge gate",
             "`foundation_ready`、`visual_events_codegen_ready`、`visual_events_codegen_error`",
             "`tools/prepare_dds_codegen_toolchain.py` 默认 pinned CycloneDDS/CycloneDDS-CXX 0.10.2",
+            "`build/tools/cyclonedds-cxx-idlc-0.10.2/codegen_probe/`",
             "`tools/build_dds_bridge.py --check-full-bridge` 不再搜索 PATH",
-            "缺显式 `--idlc`/`VISUAL_EVENTS_IDLC`、版本不是 0.10.2 或缺 cxx backend 时 fail-fast",
-            "只证明未来 `HeadStateV1_`/`GazeTargetV1_` C++ type support 可以走 pinned generator route",
-            "不生成或提交外部源码/构建输出，也不接入 generated type support",
+            "缺显式 idlc、版本不是 0.10.2、backend 不能实际加载或缺 expected `.hpp/.cpp` 时 fail-fast",
+            "`oracle_ok=true`",
+            "只证明 gate 会实际执行 C++ codegen probe 并拒绝假阳性",
             "只证明 camera/probe foundation",
             "不实现 `HeadStateV1_`/`GazeTargetV1_` C++ type support",
             "不实现 full bridge runtime loop",
@@ -489,8 +498,9 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` generated C++ type support 接入、full bridge runtime、real serialization/QoS 和 native bridge ABI implementation 仍未完成",
             "`visual_events_dds_bridge_probe` 可输出既有 JSONL bridge ABI status frame（`protocol_version=1,type=status,code=probe_ok,message=...`）",
             "`tools/build_dds_bridge.py` foundation gate 可在无 IDL generator 时通过并报告 `foundation_ready=true`",
-            "`tools/prepare_dds_codegen_toolchain.py` 和 `tools/build_dds_bridge.py --check-full-bridge` 证明显式 `--idlc`/`VISUAL_EVENTS_IDLC` 指向的 0.10.2+cxx fake idlc route 可重复校验",
-            "但这只证明 pinned generator route",
+            "`tools/prepare_dds_codegen_toolchain.py --probe-codegen` 和 `tools/build_dds_bridge.py --check-full-bridge` 会实际运行 C++ idlc probe",
+            "拒绝版本不是 0.10.2、`cannot load generator cxx`、只生成 `.hpp` 或缺 `.cpp` 的假阳性",
+            "这只证明 generator oracle hardening 完成",
             "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` generated C++ type support 接入、full bridge runtime、real serialization/QoS tests / construction tests、板端 compatibility probe、PC E2E tools、board/RK probe、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
@@ -512,6 +522,9 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     assert "真实 DDS factories/adapters 已完成" not in text
     assert "Step 4 完全完成" not in text
     assert "full bridge ready" not in text
+    assert "Step 4 DDS C++ IDL codegen toolchain proof slice 已完成" not in text
+    assert "但这只证明 pinned generator route" not in text
+    assert "真实 CycloneDDS 0.10.2 toolchain 已准备完成" not in text
     assert "检查 SDK root、video publisher dir 和 IDL generator/toolchain，缺失时 fail-fast" not in text
     assert "随便依赖 PATH 上的 idlc" not in text
     assert "Step 4 Python JSONL bridge runtime integration slice 仍未完成" not in text
