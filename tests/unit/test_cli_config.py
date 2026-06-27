@@ -35,6 +35,8 @@ def config_error(module) -> type[Exception]:
 def assert_default_config(config: Any) -> None:
     assert config.dds.domain == 0
     assert config.dds.network == "eth0"
+    assert config.dds.runtime == "fail_fast"
+    assert config.dds.bridge_bin is None
     assert config.camera.name == "front"
     assert config.camera.image_topic == "/camera/image/jpeg"
     assert config.camera.hz == 10
@@ -79,6 +81,8 @@ def test_load_config_parses_toml_and_merges_with_defaults(tmp_path):
 [dds]
 domain = 57
 network = "lo"
+runtime = "bridge"
+bridge_bin = "/opt/visual-events/bin/visual-events-dds-bridge"
 
 [camera]
 name = "rear"
@@ -126,6 +130,10 @@ jsonl_path = "{log_path}"
 
     assert config.dds.domain == 57
     assert config.dds.network == "lo"
+    assert config.dds.runtime == "bridge"
+    assert config.dds.bridge_bin == Path(
+        "/opt/visual-events/bin/visual-events-dds-bridge"
+    )
     assert config.camera.name == "rear"
     assert config.camera.image_topic == "/camera/rear/jpeg"
     assert config.camera.hz == 15
@@ -179,6 +187,8 @@ def test_load_config_parses_json_and_merges_with_defaults(tmp_path):
 
     assert config.dds.domain == 3
     assert config.dds.network == "wlan0"
+    assert config.dds.runtime == "fail_fast"
+    assert config.dds.bridge_bin is None
     assert config.service.url == "ws://192.168.1.20:8765/v1/stream"
     assert config.service.response_timeout_ms == 2000
     assert config.gaze_target.stale_ms == 300
@@ -197,6 +207,8 @@ def test_apply_overrides_covers_runtime_flags(tmp_path):
             "camera": "rear",
             "dds_domain": 57,
             "dds_network": "lo",
+            "dds_runtime": "bridge",
+            "dds_bridge_bin": str(tmp_path / "visual-events-dds-bridge"),
             "image_topic": "/camera/rear/jpeg",
             "head_state_topic": "/robot/head_state_test",
             "gaze_topic": "/visual_events/gaze_test",
@@ -208,6 +220,8 @@ def test_apply_overrides_covers_runtime_flags(tmp_path):
     assert config.camera.name == "rear"
     assert config.dds.domain == 57
     assert config.dds.network == "lo"
+    assert config.dds.runtime == "bridge"
+    assert config.dds.bridge_bin == tmp_path / "visual-events-dds-bridge"
     assert config.camera.image_topic == "/camera/rear/jpeg"
     assert config.head_state.topic == "/robot/head_state_test"
     assert config.gaze_target.topic == "/visual_events/gaze_test"
@@ -245,6 +259,21 @@ def test_load_config_rejects_non_positive_timeouts(tmp_path, body, expected):
     config_path.write_text(body, encoding="utf-8")
 
     with pytest.raises(config_error(module), match=expected):
+        module.load_config(config_path)
+
+
+def test_load_config_rejects_unknown_dds_runtime(tmp_path):
+    module = import_config_module()
+    config_path = tmp_path / "cli.toml"
+    config_path.write_text(
+        """
+[dds]
+runtime = "native"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(config_error(module), match="dds.runtime"):
         module.load_config(config_path)
 
 

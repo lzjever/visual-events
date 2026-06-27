@@ -45,6 +45,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera")
     parser.add_argument("--dds-domain", type=int)
     parser.add_argument("--dds-network")
+    parser.add_argument("--dds-runtime", choices=("fail_fast", "bridge"))
+    parser.add_argument("--dds-bridge-bin")
     parser.add_argument("--image-topic")
     parser.add_argument("--head-state-topic")
     parser.add_argument("--gaze-topic")
@@ -58,6 +60,8 @@ def _overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
         "camera": args.camera,
         "dds_domain": args.dds_domain,
         "dds_network": args.dds_network,
+        "dds_runtime": args.dds_runtime,
+        "dds_bridge_bin": args.dds_bridge_bin,
         "image_topic": args.image_topic,
         "head_state_topic": args.head_state_topic,
         "gaze_topic": args.gaze_topic,
@@ -66,6 +70,14 @@ def _overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _default_runtime_runner(_config: object) -> int:
+    if getattr(_config.dds, "runtime", "fail_fast") == "bridge":
+        from visual_events_cli.runtime_factories import bridge_runtime_factories
+
+        bridge_bin = _config.dds.bridge_bin
+        factories = bridge_runtime_factories(
+            bridge_bin=str(bridge_bin) if bridge_bin is not None else None
+        )
+        return run_runtime(_config, factories=factories)
     return run_runtime(_config)
 
 

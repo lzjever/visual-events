@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import builtins
 import importlib
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +14,27 @@ def import_main():
         return importlib.import_module("visual_events_cli.main").main
     except ModuleNotFoundError as exc:
         pytest.fail(f"expected visual_events_cli.main module: {exc}")
+
+
+def import_main_module():
+    try:
+        return importlib.import_module("visual_events_cli.main")
+    except ModuleNotFoundError as exc:
+        pytest.fail(f"expected visual_events_cli.main module: {exc}")
+
+
+def import_fresh_main_module_blocking_bridge_factories(monkeypatch: pytest.MonkeyPatch):
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "visual_events_cli.runtime_factories":
+            raise AssertionError("runtime_factories must be imported only for bridge")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.delitem(sys.modules, "visual_events_cli.main", raising=False)
+    monkeypatch.delitem(sys.modules, "visual_events_cli.runtime_factories", raising=False)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    return import_main_module()
 
 
 def test_check_config_returns_zero_writes_no_output_and_skips_runtime(capsys):
@@ -105,6 +130,146 @@ def test_default_runtime_runner_writes_dds_not_implemented_and_returns_two(capsy
     assert "Step 4 DDS adapters not implemented" in captured.err
 
 
+def test_default_runtime_runner_does_not_use_bridge_when_env_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+):
+    module = import_fresh_main_module_blocking_bridge_factories(monkeypatch)
+    monkeypatch.setenv("VISUAL_EVENTS_DDS_BRIDGE_BIN", "/tmp/visual-events-dds-bridge")
+
+    result = module.main([])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert "Step 4 DDS adapters not implemented" in captured.err
+
+
+def test_check_config_does_not_load_bridge_factories(monkeypatch: pytest.MonkeyPatch, capsys):
+    module = import_fresh_main_module_blocking_bridge_factories(monkeypatch)
+    monkeypatch.delenv("VISUAL_EVENTS_DDS_BRIDGE_BIN", raising=False)
+
+    result = module.main(["--check-config", "--dds-runtime", "bridge"])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_explicit_bridge_runtime_without_bridge_bin_returns_two(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+):
+    main = import_main()
+    monkeypatch.delenv("VISUAL_EVENTS_DDS_BRIDGE_BIN", raising=False)
+
+    result = main(["--dds-runtime", "bridge"])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert "VISUAL_EVENTS_DDS_BRIDGE_BIN" in captured.err
+
+
+def test_check_config_does_not_require_explicit_bridge_bin(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+):
+    main = import_main()
+    monkeypatch.delenv("VISUAL_EVENTS_DDS_BRIDGE_BIN", raising=False)
+
+    result = main(["--check-config", "--dds-runtime", "bridge"])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_default_runtime_runner_uses_bridge_factories_for_explicit_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = import_main_module()
+    sentinels = []
+
+    def fake_bridge_runtime_factories(*, bridge_bin):
+        sentinels.append(("factory", bridge_bin))
+        return "bridge-factories"
+
+    def fake_run_runtime(config, *, factories=None):
+        sentinels.append(("run", config.dds.runtime, config.dds.bridge_bin, factories))
+        return 0
+
+    monkeypatch.setitem(
+        sys.modules,
+        "visual_events_cli.runtime_factories",
+        SimpleNamespace(bridge_runtime_factories=fake_bridge_runtime_factories),
+    )
+    monkeypatch.setattr(module, "run_runtime", fake_run_runtime)
+
+    result = module.main(
+        [
+            "--dds-runtime",
+            "bridge",
+            "--dds-bridge-bin",
+            "/tmp/visual-events-dds-bridge",
+        ]
+    )
+
+    assert result == 0
+    assert sentinels == [
+        ("factory", "/tmp/visual-events-dds-bridge"),
+        (
+            "run",
+            "bridge",
+            Path("/tmp/visual-events-dds-bridge"),
+            "bridge-factories",
+        ),
+    ]
+
+
+def test_default_runtime_runner_uses_bridge_factories_from_config_file(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    module = import_main_module()
+    config_path = tmp_path / "cli.toml"
+    bridge_bin = tmp_path / "visual-events-dds-bridge"
+    config_path.write_text(
+        f"""
+[dds]
+runtime = "bridge"
+bridge_bin = "{bridge_bin}"
+""".strip(),
+        encoding="utf-8",
+    )
+    sentinels = []
+
+    def fake_bridge_runtime_factories(*, bridge_bin):
+        sentinels.append(("factory", bridge_bin))
+        return "bridge-factories"
+
+    def fake_run_runtime(config, *, factories=None):
+        sentinels.append(("run", config.dds.runtime, config.dds.bridge_bin, factories))
+        return 0
+
+    monkeypatch.setitem(
+        sys.modules,
+        "visual_events_cli.runtime_factories",
+        SimpleNamespace(bridge_runtime_factories=fake_bridge_runtime_factories),
+    )
+    monkeypatch.setattr(module, "run_runtime", fake_run_runtime)
+
+    result = module.main(["--config", str(config_path)])
+
+    assert result == 0
+    assert sentinels == [
+        ("factory", str(bridge_bin)),
+        ("run", "bridge", bridge_bin, "bridge-factories"),
+    ]
+
+
 def test_runtime_runner_receives_config_after_cli_overrides(capsys):
     main = import_main()
     received_configs = []
@@ -123,6 +288,10 @@ def test_runtime_runner_receives_config_after_cli_overrides(capsys):
             "57",
             "--dds-network",
             "lo",
+            "--dds-runtime",
+            "bridge",
+            "--dds-bridge-bin",
+            "/tmp/visual-events-dds-bridge",
         ],
         runtime_runner=fake_runtime_runner,
     )
@@ -137,3 +306,5 @@ def test_runtime_runner_receives_config_after_cli_overrides(capsys):
     assert config.camera.name == "rear"
     assert config.dds.domain == 57
     assert config.dds.network == "lo"
+    assert config.dds.runtime == "bridge"
+    assert config.dds.bridge_bin == Path("/tmp/visual-events-dds-bridge")

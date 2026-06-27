@@ -19,6 +19,19 @@ def assert_contains_all(text: str, required: list[str]) -> None:
     assert missing == []
 
 
+def section_between(text: str, start: str, end: str) -> str:
+    start_index = text.index(start)
+    end_index = text.index(end, start_index)
+    return text[start_index:end_index]
+
+
+def paragraph_containing(text: str, marker: str) -> str:
+    for paragraph in text.split("\n\n"):
+        if marker in paragraph:
+            return paragraph
+    raise AssertionError(f"missing paragraph containing {marker!r}")
+
+
 def test_dds_stack_decision_record_freezes_ga_handoff_fields():
     assert DDS_STACK_DECISION.exists()
     text = read_text(DDS_STACK_DECISION)
@@ -399,12 +412,13 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "subprocess lifecycle",
             "no DDS/native import audit tests",
             "Step 4 Python JSONL bridge runtime integration slice 已完成",
+            "formal CLI bridge runtime opt-in slice 已完成",
             "真实 subprocess fake JSONL child + `bridge_runtime_factories()`/`run_runtime`",
             "camera/head -> service -> gaze stdin",
             "logical camera",
             "stale/cleanup",
             "child nonzero/fatal",
-            "不代表真实 DDS/C++ bridge/PC E2E/RK probe 完成",
+            "真实 DDS/C++/IDL/QoS/PC E2E/RK/真机仍未完成",
             "`service_client`：WebSocket wire/pack-unpack、连接复用/关闭、timeout、invalid response、frame_id mismatch、retryable/non-retryable error handling 的单元核心",
             "`frame_pump`：one in-flight coordination、keep-latest frame slot/backpressure、gaze stale watchdog、Botified enqueue 的 deterministic unit core",
             "main runtime_runner 注入和默认 DDS factories fail-fast",
@@ -420,6 +434,8 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "按 `docs/dds-stack-decision-record.md` 已冻结决策实现 C++ native DDS helper/bridge",
             "C++ native bridge binary",
             "IDL codegen/toolchain implementation",
+            "real serialization/QoS tests",
+            "PC E2E",
             "native bridge ABI implementation",
             "real serialization/QoS construction tests",
             "real serialization/QoS tests",
@@ -488,6 +504,24 @@ def test_ga_plan_baseline_and_team_review_match_current_server_state():
     )
     assert "Server S8 baseline 不重写，只补 frame/timestamp reset、尺寸策略、`someone_near_center`、多连接推理和 metrics error 收口" not in text
     assert "这些改进是 GA 前 server 必做收口项" not in text
+
+
+def test_ga_plan_repeats_formal_cli_bridge_opt_in_status_in_three_summaries():
+    text = read_text(GA_PLAN)
+    required = [
+        "formal CLI bridge runtime opt-in slice 已完成",
+        "默认仍 fail_fast，不因 env 隐式切 bridge",
+        '显式 `[dds].runtime="bridge"`/`--dds-runtime bridge` 才走 `bridge_runtime_factories()`',
+        "真实 DDS/C++/IDL/QoS/PC E2E/RK/真机仍未完成",
+    ]
+    snippets = [
+        paragraph_containing(text, "当前 repo 已完成 Step 4 first slice/unit core"),
+        section_between(text, "### Step 4：实现 DDS adapters", "剩余缺口："),
+        paragraph_containing(text, "- Step 4 first slice/unit core 已完成"),
+    ]
+
+    for snippet in snippets:
+        assert_contains_all(snippet, required)
 
 
 def test_protocol_pins_cli_frame_id_stale_watchdog_and_botified_allowlist():

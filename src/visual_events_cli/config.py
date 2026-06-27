@@ -26,6 +26,8 @@ class ConfigError(Exception):
 class DdsConfig:
     domain: int = 0
     network: str = "eth0"
+    runtime: str = "fail_fast"
+    bridge_bin: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,25 @@ def apply_overrides(config: CliConfig, overrides: dict[str, Any]) -> CliConfig:
                 network=_as_str(updates["dds_network"], "dds_network"),
             ),
         )
+    if "dds_runtime" in updates:
+        result = replace(
+            result,
+            dds=replace(
+                result.dds,
+                runtime=_as_str(updates["dds_runtime"], "dds_runtime"),
+            ),
+        )
+    if "dds_bridge_bin" in updates:
+        result = replace(
+            result,
+            dds=replace(
+                result.dds,
+                bridge_bin=_as_optional_path(
+                    updates["dds_bridge_bin"],
+                    "dds_bridge_bin",
+                ),
+            ),
+        )
     if "image_topic" in updates:
         result = replace(
             result,
@@ -187,12 +208,15 @@ _OVERRIDE_KEYS = {
     "camera",
     "dds_domain",
     "dds_network",
+    "dds_runtime",
+    "dds_bridge_bin",
     "image_topic",
     "head_state_topic",
     "gaze_topic",
     "log_path",
 }
 _LOG_LEVELS = {"debug", "info", "warning", "error", "critical"}
+_DDS_RUNTIMES = {"fail_fast", "bridge"}
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:
@@ -248,10 +272,15 @@ def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def _parse_dds(data: dict[str, Any], defaults: DdsConfig) -> DdsConfig:
-    _reject_unknown_keys(data, "dds", {"domain", "network"})
+    _reject_unknown_keys(data, "dds", {"domain", "network", "runtime", "bridge_bin"})
     return DdsConfig(
         domain=_as_int(data.get("domain", defaults.domain), "dds.domain"),
         network=_as_str(data.get("network", defaults.network), "dds.network"),
+        runtime=_as_str(data.get("runtime", defaults.runtime), "dds.runtime"),
+        bridge_bin=_as_optional_path(
+            data.get("bridge_bin", defaults.bridge_bin),
+            "dds.bridge_bin",
+        ),
     )
 
 
@@ -477,6 +506,8 @@ def _as_str_tuple(value: Any, name: str) -> tuple[str, ...]:
 
 def _validate_config(config: CliConfig) -> None:
     _validate_nonnegative(config.dds.domain, "dds.domain")
+    if config.dds.runtime not in _DDS_RUNTIMES:
+        raise ConfigError("dds.runtime must be fail_fast or bridge")
     _validate_positive(config.camera.hz, "camera.hz")
     _validate_topic(config.camera.image_topic, "camera.image_topic")
     _validate_topic(config.head_state.topic, "head_state.topic")
