@@ -229,13 +229,34 @@ def _make_minimal_generated_head_gaze_dir(tmp_path: Path) -> Path:
         "namespace visual_events { namespace msg { namespace dds_ {\n"
         "class HeadStateV1_ {\n"
         "public:\n"
+        "  HeadStateV1_() = default;\n"
+        "  HeadStateV1_(uint32_t schema_version, int64_t timestamp_ms, bool valid,\n"
+        "      double yaw_rad, double pitch_rad, double yaw_vel_rad_s,\n"
+        "      double pitch_vel_rad_s)\n"
+        "      : schema_version_(schema_version), timestamp_ms_(timestamp_ms), valid_(valid),\n"
+        "        yaw_rad_(yaw_rad), pitch_rad_(pitch_rad), yaw_vel_rad_s_(yaw_vel_rad_s),\n"
+        "        pitch_vel_rad_s_(pitch_vel_rad_s) {}\n"
         "  uint32_t schema_version() const { return schema_version_; }\n"
+        "  uint32_t& schema_version() { return schema_version_; }\n"
+        "  void schema_version(uint32_t value) { schema_version_ = value; }\n"
         "  bool valid() const { return valid_; }\n"
+        "  bool& valid() { return valid_; }\n"
+        "  void valid(bool value) { valid_ = value; }\n"
         "  int64_t timestamp_ms() const { return timestamp_ms_; }\n"
+        "  int64_t& timestamp_ms() { return timestamp_ms_; }\n"
+        "  void timestamp_ms(int64_t value) { timestamp_ms_ = value; }\n"
         "  double yaw_rad() const { return yaw_rad_; }\n"
+        "  double& yaw_rad() { return yaw_rad_; }\n"
+        "  void yaw_rad(double value) { yaw_rad_ = value; }\n"
         "  double pitch_rad() const { return pitch_rad_; }\n"
+        "  double& pitch_rad() { return pitch_rad_; }\n"
+        "  void pitch_rad(double value) { pitch_rad_ = value; }\n"
         "  double yaw_vel_rad_s() const { return yaw_vel_rad_s_; }\n"
+        "  double& yaw_vel_rad_s() { return yaw_vel_rad_s_; }\n"
+        "  void yaw_vel_rad_s(double value) { yaw_vel_rad_s_ = value; }\n"
         "  double pitch_vel_rad_s() const { return pitch_vel_rad_s_; }\n"
+        "  double& pitch_vel_rad_s() { return pitch_vel_rad_s_; }\n"
+        "  void pitch_vel_rad_s(double value) { pitch_vel_rad_s_ = value; }\n"
         "private:\n"
         "  uint32_t schema_version_ = 1;\n"
         "  bool valid_ = true;\n"
@@ -272,6 +293,60 @@ def _make_minimal_generated_head_gaze_dir(tmp_path: Path) -> Path:
         "        target_v_(target_v), target_norm_x_(target_norm_x), target_norm_y_(target_norm_y),\n"
         "        image_width_(image_width), image_height_(image_height), confidence_(confidence),\n"
         "        reason_(reason), stale_after_ms_(stale_after_ms) {}\n"
+        "  uint32_t schema_version() const { return schema_version_; }\n"
+        "  uint32_t& schema_version() { return schema_version_; }\n"
+        "  void schema_version(uint32_t value) { schema_version_ = value; }\n"
+        "  const std::string& camera() const { return camera_; }\n"
+        "  std::string& camera() { return camera_; }\n"
+        "  void camera(const std::string& value) { camera_ = value; }\n"
+        "  void camera(std::string&& value) { camera_ = std::move(value); }\n"
+        "  int64_t frame_id() const { return frame_id_; }\n"
+        "  int64_t& frame_id() { return frame_id_; }\n"
+        "  void frame_id(int64_t value) { frame_id_ = value; }\n"
+        "  int64_t frame_timestamp_ms() const { return frame_timestamp_ms_; }\n"
+        "  int64_t& frame_timestamp_ms() { return frame_timestamp_ms_; }\n"
+        "  void frame_timestamp_ms(int64_t value) { frame_timestamp_ms_ = value; }\n"
+        "  int64_t publish_timestamp_ms() const { return publish_timestamp_ms_; }\n"
+        "  int64_t& publish_timestamp_ms() { return publish_timestamp_ms_; }\n"
+        "  void publish_timestamp_ms(int64_t value) { publish_timestamp_ms_ = value; }\n"
+        "  bool valid() const { return valid_; }\n"
+        "  bool& valid() { return valid_; }\n"
+        "  void valid(bool value) { valid_ = value; }\n"
+        "  const std::string& state() const { return state_; }\n"
+        "  std::string& state() { return state_; }\n"
+        "  void state(const std::string& value) { state_ = value; }\n"
+        "  void state(std::string&& value) { state_ = std::move(value); }\n"
+        "  int64_t target_track_id() const { return target_track_id_; }\n"
+        "  int64_t& target_track_id() { return target_track_id_; }\n"
+        "  void target_track_id(int64_t value) { target_track_id_ = value; }\n"
+        "  float target_u() const { return target_u_; }\n"
+        "  float& target_u() { return target_u_; }\n"
+        "  void target_u(float value) { target_u_ = value; }\n"
+        "  float target_v() const { return target_v_; }\n"
+        "  float& target_v() { return target_v_; }\n"
+        "  void target_v(float value) { target_v_ = value; }\n"
+        "  float target_norm_x() const { return target_norm_x_; }\n"
+        "  float& target_norm_x() { return target_norm_x_; }\n"
+        "  void target_norm_x(float value) { target_norm_x_ = value; }\n"
+        "  float target_norm_y() const { return target_norm_y_; }\n"
+        "  float& target_norm_y() { return target_norm_y_; }\n"
+        "  void target_norm_y(float value) { target_norm_y_ = value; }\n"
+        "  uint32_t image_width() const { return image_width_; }\n"
+        "  uint32_t& image_width() { return image_width_; }\n"
+        "  void image_width(uint32_t value) { image_width_ = value; }\n"
+        "  uint32_t image_height() const { return image_height_; }\n"
+        "  uint32_t& image_height() { return image_height_; }\n"
+        "  void image_height(uint32_t value) { image_height_ = value; }\n"
+        "  float confidence() const { return confidence_; }\n"
+        "  float& confidence() { return confidence_; }\n"
+        "  void confidence(float value) { confidence_ = value; }\n"
+        "  const std::string& reason() const { return reason_; }\n"
+        "  std::string& reason() { return reason_; }\n"
+        "  void reason(const std::string& value) { reason_ = value; }\n"
+        "  void reason(std::string&& value) { reason_ = std::move(value); }\n"
+        "  uint32_t stale_after_ms() const { return stale_after_ms_; }\n"
+        "  uint32_t& stale_after_ms() { return stale_after_ms_; }\n"
+        "  void stale_after_ms(uint32_t value) { stale_after_ms_ = value; }\n"
         "private:\n"
         "  uint32_t schema_version_ = 1;\n"
         "  std::string camera_;\n"
@@ -981,6 +1056,63 @@ def native_full_bridge_construction_build(tmp_path):
     shutil.rmtree(build_dir, ignore_errors=True)
 
 
+@pytest.fixture
+def native_full_bridge_pc_test_tools_build(tmp_path):
+    if shutil.which("cmake") is None:
+        pytest.skip("cmake is required for native DDS PC test participant target tests")
+    if (
+        shutil.which("c++") is None
+        and shutil.which("g++") is None
+        and shutil.which("clang++") is None
+    ):
+        pytest.skip("a C++ compiler is required for native DDS PC test participant target tests")
+
+    unitree_root = _make_minimal_unitree_sdk_root(tmp_path)
+    video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
+    generated_dir = _make_minimal_generated_head_gaze_dir(tmp_path)
+    build_dir = REPO_ROOT / "build" / "test-dds-bridge" / f"{tmp_path.name}-pc-test-tools"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    configure = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            os.fspath(NATIVE_BRIDGE),
+            "-B",
+            os.fspath(build_dir),
+            f"-DUNITREE_SDK_ROOT={unitree_root}",
+            f"-DVIDEO_DDS_PUBLISHER_DIR={video_dir}",
+            "-DVISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=ON",
+            f"-DVISUAL_EVENTS_GENERATED_DDS_DIR={generated_dir}",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert configure.returncode == 0, configure.stderr
+
+    build = subprocess.run(
+        [
+            "cmake",
+            "--build",
+            os.fspath(build_dir),
+            "--target",
+            "visual_events_dds_bridge_publish_test_dds_images",
+            "visual_events_dds_bridge_publish_test_head_state",
+            "visual_events_dds_bridge_subscribe_test_gaze_targets",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+
+    yield build_dir
+
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+
 def test_native_bridge_source_allowlist_has_only_camera_head_gaze_and_no_motion_tokens():
     text = _combined_native_source_text()
 
@@ -1139,6 +1271,32 @@ def test_native_bridge_full_bridge_construction_target_includes_camera_head_gaze
     ]
     missing = [item for item in required if item not in text]
     assert missing == []
+
+
+def test_native_bridge_declares_full_bridge_only_pc_over_wire_test_participant_targets():
+    text = (NATIVE_BRIDGE / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    required = [
+        "visual_events_dds_bridge_publish_test_dds_images",
+        "src/publish_test_dds_images_main.cpp",
+        "visual_events_dds_bridge_publish_test_head_state",
+        "src/publish_test_head_state_main.cpp",
+        "visual_events_dds_bridge_subscribe_test_gaze_targets",
+        "src/subscribe_test_gaze_targets_main.cpp",
+        "visual_events_dds_bridge_pc_test_tools",
+        "src/pc_test_tools.cpp",
+        "include/visual_events/dds_bridge/pc_test_tools.hpp",
+    ]
+    missing = [item for item in required if item not in text]
+    assert missing == []
+
+    full_bridge_block = text[text.index("if (VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE)") :]
+    for target in [
+        "visual_events_dds_bridge_publish_test_dds_images",
+        "visual_events_dds_bridge_publish_test_head_state",
+        "visual_events_dds_bridge_subscribe_test_gaze_targets",
+    ]:
+        assert target in full_bridge_block
 
 
 def test_native_runtime_options_are_pure_env_parser_without_unitree_dependency():
@@ -1438,6 +1596,183 @@ def test_native_construction_harness_print_options_invalid_env_is_single_fatal_j
     assert expected_fragment in error["message"]
     assert "log" not in error
     assert result.stderr
+
+
+@pytest.mark.parametrize(
+    ("binary_name", "args", "expected_usage"),
+    [
+        (
+            "visual_events_dds_bridge_publish_test_dds_images",
+            [],
+            "usage: visual_events_dds_bridge_publish_test_dds_images",
+        ),
+        (
+            "visual_events_dds_bridge_publish_test_head_state",
+            ["--state", "bogus", "--count", "1", "--hz", "1"],
+            "stationary|moving|unknown",
+        ),
+        (
+            "visual_events_dds_bridge_subscribe_test_gaze_targets",
+            ["--count", "0", "--timeout-ms", "10"],
+            "--count must be a positive integer",
+        ),
+    ],
+)
+def test_native_pc_over_wire_test_participants_fail_fast_as_single_jsonl(
+    native_full_bridge_pc_test_tools_build,
+    binary_name: str,
+    args: list[str],
+    expected_usage: str,
+):
+    result = subprocess.run(
+        [os.fspath(native_full_bridge_pc_test_tools_build / binary_name), *args],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    stdout_lines = result.stdout.splitlines()
+    assert len(stdout_lines) == 1
+    error = json.loads(stdout_lines[0])
+    assert error["protocol_version"] == 1
+    assert error["type"] == "error"
+    assert error["fatal"] is True
+    assert error["code"] in {"invalid_arguments", "invalid_runtime_options"}
+    assert expected_usage in error["message"]
+    assert "log" not in error
+    assert result.stderr
+
+
+def test_native_publish_test_dds_images_parses_jpeg_dimensions_and_emits_summary_jsonl(
+    native_full_bridge_pc_test_tools_build,
+    tmp_path,
+):
+    from tests.jpeg_fixtures import jpeg_with_sof0_dimensions
+
+    image = tmp_path / "front.jpeg"
+    image.write_bytes(jpeg_with_sof0_dimensions(width=640, height=360))
+
+    result = subprocess.run(
+        [
+            os.fspath(
+                native_full_bridge_pc_test_tools_build
+                / "visual_events_dds_bridge_publish_test_dds_images"
+            ),
+            "--input",
+            os.fspath(image),
+            "--count",
+            "2",
+            "--hz",
+            "1000",
+            "--camera-name",
+            "front",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    stdout_lines = result.stdout.splitlines()
+    assert len(stdout_lines) == 1
+    summary = json.loads(stdout_lines[0])
+    assert summary["protocol_version"] == 1
+    assert summary["type"] == "status"
+    assert summary["code"] == "publish_test_dds_images_ok"
+    assert summary["published"] == 2
+    assert summary["camera_name"] == "front"
+    assert summary["width"] == 640
+    assert summary["height"] == 360
+    assert summary["encoding"] == "JPEG"
+    assert summary["camera_topic"] == "/camera/image/jpeg"
+    assert "log" not in summary
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_valid", "expected_mapped_state"),
+    [
+        ("stationary", True, "stationary"),
+        ("moving", True, "moving"),
+        ("unknown", False, "unknown"),
+    ],
+)
+def test_native_publish_test_head_state_builds_fields_that_map_to_existing_abi_states(
+    native_full_bridge_pc_test_tools_build,
+    state: str,
+    expected_valid: bool,
+    expected_mapped_state: str,
+):
+    result = subprocess.run(
+        [
+            os.fspath(
+                native_full_bridge_pc_test_tools_build
+                / "visual_events_dds_bridge_publish_test_head_state"
+            ),
+            "--state",
+            state,
+            "--count",
+            "1",
+            "--hz",
+            "1000",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    stdout_lines = result.stdout.splitlines()
+    assert len(stdout_lines) == 1
+    summary = json.loads(stdout_lines[0])
+    assert summary["protocol_version"] == 1
+    assert summary["type"] == "status"
+    assert summary["code"] == "publish_test_head_state_ok"
+    assert summary["published"] == 1
+    assert summary["state"] == state
+    assert summary["dds_valid"] is expected_valid
+    assert summary["mapped_state"] == expected_mapped_state
+    assert summary["mapped_valid"] is expected_valid
+    assert summary["head_state_topic"] == "/robot/head_state"
+    assert "log" not in summary
+
+
+def test_native_subscribe_test_gaze_targets_times_out_without_fake_messages_as_jsonl(
+    native_full_bridge_pc_test_tools_build,
+):
+    result = subprocess.run(
+        [
+            os.fspath(
+                native_full_bridge_pc_test_tools_build
+                / "visual_events_dds_bridge_subscribe_test_gaze_targets"
+            ),
+            "--count",
+            "1",
+            "--timeout-ms",
+            "10",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    stdout_lines = result.stdout.splitlines()
+    assert len(stdout_lines) == 1
+    error = json.loads(stdout_lines[0])
+    assert error["protocol_version"] == 1
+    assert error["type"] == "error"
+    assert error["code"] == "timeout"
+    assert error["fatal"] is True
+    assert "timed out" in error["message"]
+    assert "gaze_target" in result.stderr
 
 
 @pytest.mark.parametrize("gaze_state", ["tracking", "lost", "stale", "disabled"])

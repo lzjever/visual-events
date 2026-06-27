@@ -410,7 +410,7 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "async backend fatal 不被 stdin 阻塞",
             "shutdown late fatal 仍输出 fatal JSONL",
             "full-bridge 构建显式传入 repo-local CycloneDDS C++ include dir",
-            "不证明 PC 本地 DDS E2E tools、真实 DDS over-wire 端到端发布订阅 gate、release report、RK/board 或真机闭环",
+            "只证明 native runtime loop，不证明完整 PC local E2E GA gate、release report、RK/board 或真机闭环",
             "未完成边界统一见 Step 4 剩余缺口",
         ],
     )
@@ -569,7 +569,7 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "Step 3 不直接链接真实 DDS SDK",
             "native bridge runtime/wiring 属于 Step 4",
             "### Step 4：实现 DDS adapters（first slice/unit core 和 native runtime loop 已完成；PC E2E/over-wire gate 剩余）",
-            "PC 本地 DDS E2E tools 和真实 DDS over-wire 端到端发布订阅 gate",
+            "完整 PC local E2E GA gate",
             "native full-bridge generated Head/Gaze C++ type-support compile/probe slice",
             "real serialization/QoS tests",
             "`native/dds_bridge` CMake project 可构建 very small `visual_events_dds_bridge_probe`",
@@ -588,17 +588,17 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "real serialization/QoS tests",
             "板端 compatibility probe",
             "board/RK probe",
-            "PC 本地 DDS E2E tools",
+            "Python runner/wrappers",
             "PC E2E",
             "release report",
             "真机 smoke",
             "closed-loop handoff",
-            "剩余是 Step 4 PC 本地 DDS E2E tools、真实 DDS over-wire 端到端发布订阅 gate、release report、RK/board probe、真机 smoke 和 closed-loop handoff",
+            "剩余是 Python runner/wrappers、manifest reader/report、mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff",
             "DDS contract/schema Step 1 主要产物已完成",
-            "DDS PC E2E/over-wire gate 和板端 compatibility probe 仍必须补齐",
+            "完整 DDS PC E2E/over-wire GA gate 和板端 compatibility probe 仍必须补齐",
             "native runtime loop core 和 full-bridge wiring 已完成",
-            "PC 本地 DDS E2E tools 和真实 DDS over-wire 端到端发布订阅 gate 仍未完成",
-            "DDS discovery/real serialization over wire/QoS behavior、real serialization/QoS tests 和 release report 仍未完成",
+            "完整 PC 本地 DDS E2E GA gate 仍未完成",
+            "DDS discovery/real serialization over wire/QoS behavior 的完整测试矩阵、real serialization/QoS tests 和 release report 仍未完成",
             "`visual_events_dds_bridge_probe` 可输出既有 JSONL bridge ABI status frame（`protocol_version=1,type=status,code=probe_ok,message=...`）",
             "`visual_events_dds_bridge` target 存在",
             "ABI-only 不带参数运行仍 explicit fatal `dds_runtime_not_implemented`",
@@ -729,7 +729,7 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
         "async backend fatal 不被 stdin 阻塞",
         "shutdown late fatal 仍输出 fatal JSONL",
         "full-bridge 构建显式传入 repo-local CycloneDDS C++ include dir",
-        "不证明 PC 本地 DDS E2E tools、真实 DDS over-wire 端到端发布订阅 gate、release report、RK/board 或真机闭环",
+        "只证明 native runtime loop，不证明完整 PC local E2E GA gate、release report、RK/board 或真机闭环",
     ]
     snippets = [
         paragraph_containing(text, "当前 repo 已完成 Step 4 first slice/unit core"),
@@ -744,23 +744,27 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
     assert_contains_all(
         remaining_gap,
         [
-            "PC 本地 DDS E2E tools 和真实 DDS over-wire 端到端发布订阅 gate 仍未完成",
-            "synthetic camera/head publishers",
+            "native PC DDS over-wire test participants 已完成",
+            "完整 PC 本地 DDS E2E GA gate 仍未完成",
+            "Python runner/wrappers",
+            "manifest reader/report",
+            "mock visual_state server",
+            "正式 CLI+real server 编排",
             "真实 runtime server/CLI",
-            "DDS gaze subscriber/stdout collector",
+            "stdout collector",
             "`/camera/image/jpeg` -> bridge/CLI -> server -> `/visual_events/gaze_target` over wire",
             "native runtime loop core 和 full-bridge wiring 已完成",
             "不能替代这个端到端 gate",
-            "DDS discovery/real serialization over wire/QoS behavior",
+            "DDS discovery/real serialization over wire/QoS behavior 的完整测试矩阵",
             "real serialization/QoS tests",
             "release report 仍未完成",
-            "PC 本地 DDS E2E tools、真实 DDS over-wire 端到端发布订阅 gate、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
+            "Python runner/wrappers、manifest reader/report、mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
 
-    assert text.count("PC 本地 DDS E2E tools 和真实 DDS over-wire 端到端发布订阅 gate 仍未完成") == 1
-    assert text.count("DDS discovery/real serialization over wire/QoS behavior、real serialization/QoS tests 和 release report 仍未完成") == 1
-    assert text.count("PC 本地 DDS E2E tools、真实 DDS over-wire 端到端发布订阅 gate、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成") == 1
+    assert text.count("完整 PC 本地 DDS E2E GA gate 仍未完成") >= 1
+    assert text.count("DDS discovery/real serialization over wire/QoS behavior 的完整测试矩阵、real serialization/QoS tests 和 release report 仍未完成") == 1
+    assert "PC 本地 DDS E2E tools、真实 DDS over-wire 端到端发布订阅 gate、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成" not in text
 
     assert "PC E2E tools 已完成" not in text
     assert "DDS discovery 已完成" not in text
@@ -769,6 +773,64 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
     assert "release runtime 真跑已完成" not in text
     assert "RK/board 已完成" not in text
     assert "真机 smoke/closed-loop 已完成" not in text
+
+
+def test_ga_plan_records_step5_native_participants_without_claiming_full_pc_e2e():
+    text = read_text(GA_PLAN)
+    step5 = section_between(text, "### Step 5：实现 PC 本地测试工具", "### Step 6：CLI 单元与集成测试")
+
+    assert_contains_all(
+        step5,
+        [
+            "Python `tools/*.py` 是 runner/wrapper",
+            "真实 DDS participants 由 native full-bridge binaries 承担",
+            "Python CLI 不直接 import/link DDS SDK",
+            "Step 5 native PC DDS over-wire test participant slice 已完成",
+            "`visual_events_dds_bridge_publish_test_dds_images`",
+            "`visual_events_dds_bridge_publish_test_head_state`",
+            "`visual_events_dds_bridge_subscribe_test_gaze_targets`",
+            "`pc_test_tools`",
+            "full-bridge only",
+            "Unitree Channel 真实 DDS participant",
+            "loopback over-wire smoke",
+            "domain/network=58/lo",
+            "bridge stdout 收到 `camera_jpeg` 和 `head_state`",
+            "canonical gaze",
+            "gaze subscriber 收到 DDS `gaze_target`",
+            "frame_id=77",
+            "track_id=12",
+            "Python runner/wrappers",
+            "manifest reader/report",
+            "mock visual_state server",
+            "正式 CLI+real server 编排",
+            "完整 PC local E2E GA gate",
+            "fault matrix",
+            "release report",
+            "RK/board",
+            "真机",
+        ],
+    )
+
+    current_status = paragraph_containing(text, "当前 repo 已完成 CLI Step 3A skeleton")
+    assert_contains_all(
+        current_status,
+        [
+            "Step 5 native PC DDS over-wire test participant slice 已完成",
+            "image publisher、head publisher、gaze subscriber 和 `pc_test_tools`",
+            "loopback over-wire smoke",
+            "Python runner/wrappers、manifest reader/report、mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff 仍未完成",
+        ],
+    )
+
+    assert "完整 PC local E2E GA gate 已完成" not in text
+    assert "Python runner/wrappers 已完成" not in text
+    assert "manifest reader/report 已完成" not in text
+    assert "mock visual_state server 已完成" not in text
+    assert "正式 CLI+real server 编排已完成" not in text
+    assert "fault matrix 已完成" not in text
+    assert "release report 已完成" not in text
+    assert "RK/board probe 已完成" not in text
+    assert "真机 smoke 已完成" not in text
 
 
 def test_protocol_pins_cli_frame_id_stale_watchdog_and_botified_allowlist():

@@ -248,6 +248,83 @@ if (VISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE)
             BUILD_RPATH "${UNITREE_SDK_ROOT}/lib"
             INSTALL_RPATH "${UNITREE_SDK_ROOT}/lib"
         )
+
+        add_library(visual_events_dds_bridge_pc_test_tools STATIC
+            src/pc_test_tools.cpp
+            include/visual_events/dds_bridge/pc_test_tools.hpp
+        )
+        target_include_directories(visual_events_dds_bridge_pc_test_tools PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${UNITREE_SDK_ROOT}/include"
+        )
+        target_link_directories(visual_events_dds_bridge_pc_test_tools PUBLIC
+            "${UNITREE_SDK_ROOT}/lib"
+        )
+        target_link_libraries(visual_events_dds_bridge_pc_test_tools PUBLIC
+            visual_events_dds_bridge_abi
+            visual_events_dds_bridge_runtime_options
+            unitree_sdk2
+        )
+        target_compile_options(visual_events_dds_bridge_pc_test_tools PRIVATE -Wall -Wextra -Wpedantic)
+
+        function(configure_visual_events_dds_bridge_pc_test_target TARGET_NAME)
+            target_include_directories(${TARGET_NAME} PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/include"
+                "${UNITREE_SDK_ROOT}/include"
+                "${VIDEO_DDS_PUBLISHER_DIR}/include"
+                "${VISUAL_EVENTS_GENERATED_DDS_DIR}"
+            )
+            target_compile_definitions(${TARGET_NAME} PRIVATE
+                VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=1
+            )
+            if (VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR)
+                target_include_directories(${TARGET_NAME} PRIVATE
+                    "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}"
+                    "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}/.."
+                )
+            endif()
+            target_link_directories(${TARGET_NAME} PRIVATE
+                "${UNITREE_SDK_ROOT}/lib"
+            )
+            target_link_libraries(${TARGET_NAME} PRIVATE
+                visual_events_dds_bridge_pc_test_tools
+                visual_events_dds_bridge_dds_types
+                unitree_sdk2
+                -Wl,--no-as-needed
+                ddsc
+                ddscxx
+                -Wl,--as-needed
+            )
+            target_compile_options(${TARGET_NAME} PRIVATE -Wall -Wextra -Wpedantic)
+            set_target_properties(${TARGET_NAME} PROPERTIES
+                BUILD_RPATH "${UNITREE_SDK_ROOT}/lib"
+                INSTALL_RPATH "${UNITREE_SDK_ROOT}/lib"
+            )
+        endfunction()
+
+        add_executable(visual_events_dds_bridge_publish_test_dds_images
+            src/publish_test_dds_images_main.cpp
+            "${CAMERA_FRAME_SOURCE}"
+            ${VISUAL_EVENTS_GENERATED_DDS_SOURCES}
+        )
+        configure_visual_events_dds_bridge_pc_test_target(
+            visual_events_dds_bridge_publish_test_dds_images)
+
+        add_executable(visual_events_dds_bridge_publish_test_head_state
+            src/publish_test_head_state_main.cpp
+            "${CAMERA_FRAME_SOURCE}"
+            ${VISUAL_EVENTS_GENERATED_DDS_SOURCES}
+        )
+        configure_visual_events_dds_bridge_pc_test_target(
+            visual_events_dds_bridge_publish_test_head_state)
+
+        add_executable(visual_events_dds_bridge_subscribe_test_gaze_targets
+            src/subscribe_test_gaze_targets_main.cpp
+            "${CAMERA_FRAME_SOURCE}"
+            ${VISUAL_EVENTS_GENERATED_DDS_SOURCES}
+        )
+        configure_visual_events_dds_bridge_pc_test_target(
+            visual_events_dds_bridge_subscribe_test_gaze_targets)
     endif()
 
     add_executable(visual_events_dds_bridge_probe
