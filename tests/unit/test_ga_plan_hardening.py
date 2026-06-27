@@ -629,10 +629,17 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "gaze subscriber wrapper",
             "head/image publisher wrappers",
             "partial smoke report",
+            "live bounded CLI stdout/stderr collector",
+            'additive `report["botified_stdout"]`',
+            "只把 CLI stdout 按 Botified stdout 解析",
+            "CLI stderr 保留为 diagnostics，不计入 stdout pollution",
+            "`botified_stdout` 汇总 `frame_count`、`allowed_frame_count`、`event_counts`、`pollution_count`、`parse_error_count`、`forbidden_event_count`、`collection_truncated`、`collection_incomplete` 和 `contract_violations`",
+            "stdout pollution、malformed/contract-invalid Botified frame、forbidden event（例如 `attention_target_changed`）或 truncated/incomplete untrustworthy collection 都会使 partial smoke failed",
             "`ga_gate_pass=false`",
             "`pc_local_e2e_status` 只能是 `partial_smoke_pass|partial_smoke_failed|preflight_failed`",
             "不能声明 full PC gate pass",
             "fake-runner 单测覆盖 command construction、preflight、cleanup、gaze JSON summary、failure report",
+            "Botified stdout collector/report hardening",
             "`pc_local_e2e_status=partial_smoke_pass`",
             "`slice_pass=true`",
             "`overall_pass=false`",
@@ -644,8 +651,11 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "payload `valid=false`",
             "publisher/subscriber returncodes 0",
             "只证明 real server + CLI bridge runtime + DDS participant plumbing",
+            "partial runner 对 observed CLI stdout 的 bounded Botified stdout collector/checks",
             "默认 server mock backend 产生 lost gaze",
-            "不证明 attention/event oracle/Botified/full matrix/latency/soak/fault/release",
+            "runner 仍不使用 val-data oracle 作为 full matrix",
+            "仍是 partial",
+            "不证明 full PC gate、full event oracle、Botified 端到端业务、latency、soak、fault matrix、release report、RK/board 或 real robot",
             "PC E2E",
             "release report",
             "真机 smoke",
@@ -840,6 +850,7 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
             "`/camera/image/jpeg` -> bridge/CLI -> server -> `/visual_events/gaze_target` over wire",
             "manifest skeleton 只做数据集身份和报告骨架",
             "partial smoke runner 只证明 real server + CLI bridge runtime + DDS participant plumbing",
+            "observed CLI stdout 的 bounded Botified stdout checks",
             "mock visual_state server 和 CLI runtime + mock server integration 只覆盖 CLI deterministic/failure-path",
             "native runtime loop core 和 full-bridge wiring 已完成",
             "不能替代这个端到端 gate",
@@ -951,11 +962,19 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "gaze subscriber wrapper",
             "head/image publisher wrappers",
             "partial smoke report",
+            "live bounded CLI stdout/stderr collector",
+            'additive `report["botified_stdout"]`',
+            "observed Botified stdout",
+            "只把 CLI stdout 按 Botified stdout 解析",
+            "CLI stderr 保留为 diagnostics，不计入 stdout pollution",
+            "`botified_stdout` 汇总 `frame_count`、`allowed_frame_count`、`event_counts`、`pollution_count`、`parse_error_count`、`forbidden_event_count`、`collection_truncated`、`collection_incomplete` 和 `contract_violations`",
+            "stdout pollution、malformed/contract-invalid Botified frame、forbidden event（例如 `attention_target_changed`）或 truncated/incomplete untrustworthy collection 都会使 partial smoke failed",
             "report 固定 `overall_pass=false`",
             "`ga_gate_pass=false`",
             "`pc_local_e2e_status` 只能是 `partial_smoke_pass|partial_smoke_failed|preflight_failed`",
             "不能声明 full PC gate pass",
             "fake-runner 单测覆盖 command construction、preflight、cleanup、gaze JSON summary、failure report",
+            "Botified stdout collector/report hardening",
             "本机真实 partial smoke 已通过",
             "`pc_local_e2e_status=partial_smoke_pass`",
             "`slice_pass=true`",
@@ -966,8 +985,11 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "payload `valid=false`",
             "publisher/subscriber returncodes 0",
             "只证明 real server + CLI bridge runtime + DDS participant plumbing",
+            "partial runner 对 observed CLI stdout 的 bounded Botified stdout collector/checks",
             "默认 server mock backend 产生 lost gaze",
-            "不证明 attention/event oracle/Botified/full matrix/latency/soak/fault/release",
+            "runner 仍不使用 val-data oracle 作为 full matrix",
+            "仍是 partial",
+            "不证明 full PC gate、full event oracle、Botified 端到端业务、latency、soak、fault matrix、release report、RK/board 或 real robot",
             "完整 PC local E2E 的 manifest/oracle 仍需列出",
             "mock visual_state server",
             "正式 full CLI+real server 编排的完整 PC local E2E GA gate",
@@ -993,9 +1015,15 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "`pc_local_e2e_status=not_run`",
             "Step 5 run_cli_local_e2e partial smoke runner slice 已完成",
             "`tools/run_cli_local_e2e.py`",
+            'additive `report["botified_stdout"]`',
+            "CLI stderr 保留为 diagnostics，不计入 stdout pollution",
+            "forbidden event（例如 `attention_target_changed`）",
+            "truncated/incomplete untrustworthy collection",
             "`pc_local_e2e_status=partial_smoke_pass`",
             "`slice_pass=true`",
             "`ga_gate_pass=false`",
+            "runner 仍不使用 val-data oracle 作为 full matrix",
+            "不证明 full PC gate、full event oracle、Botified 端到端业务、latency、soak、fault matrix、release report、RK/board 或 real robot",
             "Step 5 mock visual_state server slice 已完成",
             "`tools/cli_local_e2e_manifest.py`",
             "本机 ignored `val-data` 当前可识别 7 scene / 576 frames",
@@ -1032,6 +1060,25 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
     partial_smoke_runner = line_containing(
         step5, "Step 5 run_cli_local_e2e partial smoke runner slice 已完成"
     )
+    assert_contains_all(
+        partial_smoke_runner,
+        [
+            'additive `report["botified_stdout"]`',
+            "`frame_count`",
+            "`allowed_frame_count`",
+            "`event_counts`",
+            "`pollution_count`",
+            "`parse_error_count`",
+            "`forbidden_event_count`",
+            "`collection_truncated`",
+            "`collection_incomplete`",
+            "`contract_violations`",
+            "`overall_pass=false`",
+            "`ga_gate_pass=false`",
+            "`pc_local_e2e_status` 只能是 `partial_smoke_pass|partial_smoke_failed|preflight_failed`",
+            "不证明 full PC gate、full event oracle、Botified 端到端业务、latency、soak、fault matrix、release report、RK/board 或 real robot",
+        ],
+    )
     assert "`pc_local_e2e_status=not_run`" not in partial_smoke_runner
 
     assert "完整 PC local E2E GA gate 已完成" not in text
@@ -1044,6 +1091,7 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
     assert "release report 已完成" not in text
     assert "RK/board probe 已完成" not in text
     assert "真机 smoke 已完成" not in text
+    assert "val-data oracle 作为 full matrix 已完成" not in text
 
 
 def test_protocol_pins_cli_frame_id_stale_watchdog_and_botified_allowlist():

@@ -5,6 +5,8 @@ import importlib
 import json
 import os
 import stat
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,9 @@ class FakeResult:
     returncode: int
     stdout: str = ""
     stderr: str = ""
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    collection_incomplete: bool = False
 
 
 @dataclass
@@ -32,13 +37,28 @@ class FakeHealth:
 
 
 class FakeProcess:
-    def __init__(self, name: str, pid: int) -> None:
+    def __init__(
+        self,
+        name: str,
+        pid: int,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        stdout_truncated: bool = False,
+        stderr_truncated: bool = False,
+        collection_incomplete: bool = False,
+    ) -> None:
         self.name = name
         self.pid = pid
         self.returncode: int | None = None
         self.stopped = False
-        self.stdout_tail = f"{name} stdout tail"
-        self.stderr_tail = f"{name} stderr tail"
+        self.stdout_lines = stdout.splitlines()
+        self.stderr_lines = stderr.splitlines()
+        self.stdout_tail = stdout if stdout else f"{name} stdout tail"
+        self.stderr_tail = stderr if stderr else f"{name} stderr tail"
+        self.stdout_truncated = stdout_truncated
+        self.stderr_truncated = stderr_truncated
+        self.collection_incomplete = collection_incomplete
 
     def poll(self) -> int | None:
         return self.returncode
@@ -64,6 +84,7 @@ class FakeRunner:
         *,
         health: FakeHealth | None = None,
         sync_results: dict[str, FakeResult] | None = None,
+        process_results: dict[str, FakeResult] | None = None,
     ) -> None:
         self.health = health or FakeHealth(
             passed=True,
@@ -71,6 +92,7 @@ class FakeRunner:
             healthz_identity_verified=True,
         )
         self.sync_results = sync_results or {}
+        self.process_results = process_results or {}
         self.events: list[tuple[str, str]] = []
         self.started: dict[str, FakeProcess] = {}
         self.commands: dict[str, list[str]] = {}
@@ -86,7 +108,16 @@ class FakeRunner:
         name: str,
     ) -> FakeProcess:
         del cwd, env
-        process = FakeProcess(name, self._next_pid)
+        result = self.process_results.get(name, FakeResult(0))
+        process = FakeProcess(
+            name,
+            self._next_pid,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            stdout_truncated=result.stdout_truncated,
+            stderr_truncated=result.stderr_truncated,
+            collection_incomplete=result.collection_incomplete,
+        )
         self._next_pid += 1
         self.started[name] = process
         self.commands[name] = command
@@ -201,6 +232,36 @@ def base_argv(paths: dict[str, Path], *extra: str) -> list[str]:
 
 def load_report(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def successful_runner(
+    *,
+    cli_stdout: str = "",
+    cli_stderr: str = "",
+) -> FakeRunner:
+    return FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+            )
+        },
+        process_results={
+            "cli": FakeResult(0, stdout=cli_stdout, stderr=cli_stderr),
+        },
+    )
+
+
+def botified_frame(event: str = "person_waving", event_id: str = "front:evt_000456") -> str:
+    payload = {
+        "id": f"visual:{event_id}",
+        "urgency": "normal",
+        "timeout_secs": 8,
+        "request": f"event={event} camera=front track_id=7 confidence=0.86",
+        "expect": "ack",
+    }
+    inner = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"<botified>{inner}</botified>\n"
 
 
 def assert_explicit_partial_smoke_fields(report: dict[str, Any], paths: dict[str, Path]) -> None:
@@ -466,7 +527,315 @@ def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -
     assert report["gaze"]["state_counts"] == {"lost": 1, "tracking": 1}
     assert report["gaze"]["first_sample"]["state"] == "tracking"
     assert report["gaze"]["last_sample"]["state"] == "lost"
+    assert report["botified_stdout"] == {
+        "source": "cli_stdout",
+        "required_frame_count": None,
+        "line_count": 0,
+        "frame_count": 0,
+        "allowed_frame_count": 0,
+        "pollution_count": 0,
+        "parse_error_count": 0,
+        "forbidden_event_count": 0,
+        "event_counts": {},
+        "first_frame": None,
+        "last_frame": None,
+        "collection_truncated": False,
+        "collection_incomplete": False,
+        "contract_violations": [],
+    }
     assert "full_scene_matrix" in report["not_covered"]
+
+
+def test_botified_stdout_valid_frame_is_reported_without_required_count(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner(cli_stdout=botified_frame())
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is True
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    botified = report["botified_stdout"]
+    assert botified["source"] == "cli_stdout"
+    assert botified["required_frame_count"] is None
+    assert botified["line_count"] == 1
+    assert botified["frame_count"] == 1
+    assert botified["allowed_frame_count"] == 1
+    assert botified["event_counts"] == {"person_waving": 1}
+    assert botified["pollution_count"] == 0
+    assert botified["parse_error_count"] == 0
+    assert botified["forbidden_event_count"] == 0
+    assert botified["contract_violations"] == []
+    assert botified["first_frame"] == {
+        "line": 1,
+        "event": "person_waving",
+        "payload": {
+            "id": "visual:front:evt_000456",
+            "urgency": "normal",
+            "timeout_secs": 8,
+            "request": "event=person_waving camera=front track_id=7 confidence=0.86",
+            "expect": "ack",
+        },
+    }
+    assert botified["last_frame"] == botified["first_frame"]
+
+
+@pytest.mark.parametrize(
+    "cli_stdout",
+    [
+        '{"type":"gaze_target","camera":"front","state":"tracking"}\n',
+        "status: connected to visual events service\n",
+        "visual_state frame=1 gaze_target=front:track-7\n",
+    ],
+)
+def test_botified_stdout_pollution_fails_partial_slice(
+    tmp_path: Path,
+    cli_stdout: str,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner(cli_stdout=cli_stdout)
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is False
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+    assert "botified_stdout_pollution" in report["failure_reasons"]
+    assert report["botified_stdout"]["pollution_count"] == 1
+    assert report["botified_stdout"]["frame_count"] == 0
+
+
+def test_botified_stdout_malformed_frame_fails_partial_slice(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner(cli_stdout="<botified>{not-json}</botified>\n")
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is False
+    assert "botified_stdout_parse_errors" in report["failure_reasons"]
+    assert report["botified_stdout"]["parse_error_count"] == 1
+    assert report["botified_stdout"]["pollution_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "event": "person_waving",
+            "id": "visual:front:evt_000456",
+            "urgency": "normal",
+            "timeout_secs": 8,
+            "expect": "ack",
+        },
+        {
+            "id": "front:evt_000456",
+            "urgency": "normal",
+            "timeout_secs": 8,
+            "request": "event=person_waving camera=front",
+            "expect": "ack",
+        },
+        {
+            "id": "visual:front:evt_000456",
+            "urgency": "urgent",
+            "timeout_secs": 8,
+            "request": "event=person_waving camera=front",
+            "expect": "ack",
+        },
+        {
+            "id": "visual:front:evt_000456",
+            "urgency": "normal",
+            "timeout_secs": "8",
+            "request": "event=person_waving camera=front",
+            "expect": "ack",
+        },
+        {
+            "id": "visual:front:evt_000456",
+            "urgency": "normal",
+            "timeout_secs": 8,
+            "request": "event=unknown_visual_event camera=front",
+            "expect": "ack",
+        },
+        {
+            "id": "visual:front:evt_000456",
+            "urgency": "normal",
+            "timeout_secs": 8,
+            "request": "event=person_waving camera=front",
+            "expect": "reply",
+        },
+    ],
+)
+def test_botified_stdout_contract_violations_fail_as_parse_errors(
+    tmp_path: Path,
+    payload: dict[str, Any],
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    inner = json.dumps(payload, separators=(",", ":"))
+    runner = successful_runner(cli_stdout=f"<botified>{inner}</botified>\n")
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is False
+    assert "botified_stdout_parse_errors" in report["failure_reasons"]
+    botified = report["botified_stdout"]
+    assert botified["parse_error_count"] == 1
+    assert botified["frame_count"] == 0
+    assert botified["allowed_frame_count"] == 0
+    assert botified["forbidden_event_count"] == 0
+    assert botified["contract_violations"]
+
+
+def test_botified_stdout_forbidden_event_fails_partial_slice(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner(cli_stdout=botified_frame("attention_target_changed"))
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is False
+    assert "botified_stdout_forbidden_event" in report["failure_reasons"]
+    botified = report["botified_stdout"]
+    assert botified["frame_count"] == 1
+    assert botified["allowed_frame_count"] == 0
+    assert botified["forbidden_event_count"] == 1
+    assert botified["event_counts"] == {}
+
+
+def test_cli_stderr_tail_does_not_pollute_botified_stdout(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    cli_stderr = '{"type":"visual_state","status":"debug"}\n'
+    runner = successful_runner(cli_stderr=cli_stderr)
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is True
+    assert report["botified_stdout"]["pollution_count"] == 0
+    assert report["botified_stdout"]["contract_violations"] == []
+    assert report["stdout_stderr_tails"]["cli"]["stderr_tail"] == cli_stderr
+
+
+@pytest.mark.parametrize(
+    ("process_result", "expected_reason", "expected_field"),
+    [
+        (
+            FakeResult(0, stdout=botified_frame(), stdout_truncated=True),
+            "botified_stdout_collection_truncated",
+            "collection_truncated",
+        ),
+        (
+            FakeResult(0, stdout=botified_frame(), collection_incomplete=True),
+            "botified_stdout_collection_incomplete",
+            "collection_incomplete",
+        ),
+    ],
+)
+def test_botified_stdout_untrustworthy_collection_fails_partial_slice(
+    tmp_path: Path,
+    process_result: FakeResult,
+    expected_reason: str,
+    expected_field: str,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+            )
+        },
+        process_results={"cli": process_result},
+    )
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is False
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+    assert expected_reason in report["failure_reasons"]
+    assert report["botified_stdout"][expected_field] is True
+
+
+def test_botified_stdout_summary_flags_untrustworthy_collection_as_failure_reasons() -> None:
+    module = import_runner_module()
+
+    summary = module._summarize_botified_stdout(
+        [botified_frame().strip()],
+        line_count=3,
+        collection_truncated=True,
+        collection_incomplete=True,
+    )
+
+    assert summary["collection_truncated"] is True
+    assert summary["collection_incomplete"] is True
+    assert module._botified_stdout_failure_reasons(summary) == [
+        "botified_stdout_collection_truncated",
+        "botified_stdout_collection_incomplete",
+    ]
+
+
+def test_local_process_runner_stop_process_drains_live_stdout_and_stderr(tmp_path: Path) -> None:
+    module = import_runner_module()
+    script = tmp_path / "writer.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import sys",
+                "import time",
+                "print('stdout-one', flush=True)",
+                "print('stderr-one', file=sys.stderr, flush=True)",
+                "print('stdout-two', flush=True)",
+                "print('stderr-two', file=sys.stderr, flush=True)",
+                "time.sleep(30)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runner = module.LocalProcessRunner()
+    process = runner.start_process(
+        [sys.executable, os.fspath(script)],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        name="writer",
+    )
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if process.stdout_line_count >= 2 and process.stderr_line_count >= 2:
+            break
+        time.sleep(0.01)
+
+    runner.stop_process(process)
+
+    assert process.poll() is not None
+    assert process.stdout_lines == ["stdout-one", "stdout-two"]
+    assert process.stderr_lines == ["stderr-one", "stderr-two"]
+    assert process.stdout_tail == "stdout-one\nstdout-two\n"
+    assert process.stderr_tail == "stderr-one\nstderr-two\n"
+    assert process.stdout_truncated is False
+    assert process.stderr_truncated is False
+    assert process.collection_incomplete is False
 
 
 @pytest.mark.parametrize(

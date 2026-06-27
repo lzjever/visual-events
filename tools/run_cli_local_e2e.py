@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -42,6 +45,19 @@ DEFAULT_SERVER_URL = "ws://127.0.0.1:8767/v1/stream"
 DEFAULT_DDS_BRIDGE_BINARY = "visual_events_dds_bridge"
 STOP_TIMEOUT_S = 5.0
 VALID_GAZE_STATES = {"tracking", "lost", "stale", "disabled"}
+PROCESS_COLLECTED_LINE_LIMIT = 4096
+PROCESS_READER_JOIN_TIMEOUT_S = 1.0
+BOTIFIED_OPEN = "<botified>"
+BOTIFIED_CLOSE = "</botified>"
+BOTIFIED_ALLOWED_EVENTS = {
+    "person_appeared",
+    "person_left",
+    "person_passing_by",
+    "person_approaching_robot",
+    "person_stopped_near_robot",
+    "person_waving",
+}
+BOTIFIED_EVENT_RE = re.compile(r"\bevent=([A-Za-z0-9_]+)\b")
 NOT_COVERED = [
     "full_scene_matrix",
     "oracle",
@@ -157,6 +173,21 @@ class ManagedProcess:
     popen: subprocess.Popen[str]
     stdout_tail: str = ""
     stderr_tail: str = ""
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    collection_incomplete: bool = False
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _stdout_lines: deque[str] = field(init=False, repr=False)
+    _stderr_lines: deque[str] = field(init=False, repr=False)
+    _stdout_line_count: int = field(default=0, init=False, repr=False)
+    _stderr_line_count: int = field(default=0, init=False, repr=False)
+    _reader_threads: list[threading.Thread] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._stdout_lines = deque(maxlen=PROCESS_COLLECTED_LINE_LIMIT)
+        self._stderr_lines = deque(maxlen=PROCESS_COLLECTED_LINE_LIMIT)
+        self._start_reader("stdout", self.popen.stdout)
+        self._start_reader("stderr", self.popen.stderr)
 
     @property
     def pid(self) -> int:
@@ -175,10 +206,87 @@ class ManagedProcess:
         self.popen.kill()
 
     def communicate(self, timeout: float | None = None) -> tuple[str, str]:
-        stdout, stderr = self.popen.communicate(timeout=timeout)
-        self.stdout_tail = _tail(stdout)
-        self.stderr_tail = _tail(stderr)
-        return stdout or "", stderr or ""
+        self.wait(timeout=timeout)
+        self.join_readers(PROCESS_READER_JOIN_TIMEOUT_S)
+        return self.collected_stdout(), self.collected_stderr()
+
+    @property
+    def stdout_lines(self) -> list[str]:
+        with self._lock:
+            return list(self._stdout_lines)
+
+    @property
+    def stderr_lines(self) -> list[str]:
+        with self._lock:
+            return list(self._stderr_lines)
+
+    @property
+    def stdout_line_count(self) -> int:
+        with self._lock:
+            return self._stdout_line_count
+
+    @property
+    def stderr_line_count(self) -> int:
+        with self._lock:
+            return self._stderr_line_count
+
+    def collected_stdout(self) -> str:
+        return _lines_to_text(self.stdout_lines)
+
+    def collected_stderr(self) -> str:
+        return _lines_to_text(self.stderr_lines)
+
+    def join_readers(self, timeout_s: float) -> None:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        for thread in self._reader_threads:
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=remaining)
+            if thread.is_alive():
+                with self._lock:
+                    self.collection_incomplete = True
+
+    def _start_reader(self, stream_name: str, stream: Any | None) -> None:
+        if stream is None:
+            return
+        thread = threading.Thread(
+            target=self._drain_stream,
+            args=(stream_name, stream),
+            name=f"{self.name}-{stream_name}-reader",
+            daemon=True,
+        )
+        self._reader_threads.append(thread)
+        thread.start()
+
+    def _drain_stream(self, stream_name: str, stream: Any) -> None:
+        try:
+            for chunk in stream:
+                self._record_stream_line(stream_name, chunk)
+        except Exception:
+            with self._lock:
+                self.collection_incomplete = True
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    def _record_stream_line(self, stream_name: str, chunk: str) -> None:
+        line = chunk.rstrip("\n")
+        if line.endswith("\r"):
+            line = line[:-1]
+        with self._lock:
+            if stream_name == "stdout":
+                self.stdout_tail = _tail(self.stdout_tail + chunk)
+                self._stdout_line_count += 1
+                if len(self._stdout_lines) >= PROCESS_COLLECTED_LINE_LIMIT:
+                    self.stdout_truncated = True
+                self._stdout_lines.append(line)
+            else:
+                self.stderr_tail = _tail(self.stderr_tail + chunk)
+                self._stderr_line_count += 1
+                if len(self._stderr_lines) >= PROCESS_COLLECTED_LINE_LIMIT:
+                    self.stderr_truncated = True
+                self._stderr_lines.append(line)
 
 
 @dataclass(frozen=True)
@@ -346,18 +454,19 @@ class LocalProcessRunner:
         del name
         if isinstance(process, ManagedProcess):
             try:
-                stdout, stderr = process.communicate(timeout=timeout_s)
+                returncode = process.wait(timeout=timeout_s)
+                process.join_readers(PROCESS_READER_JOIN_TIMEOUT_S)
                 return CommandResult(
-                    returncode=process.poll() if process.poll() is not None else 0,
-                    stdout=stdout,
-                    stderr=stderr,
+                    returncode=int(returncode),
+                    stdout=process.collected_stdout(),
+                    stderr=process.collected_stderr(),
                 )
             except subprocess.TimeoutExpired:
                 self.stop_process(process)
                 return CommandResult(
                     returncode=process.poll() if process.poll() is not None else -9,
-                    stdout=process.stdout_tail,
-                    stderr=process.stderr_tail,
+                    stdout=process.collected_stdout(),
+                    stderr=process.collected_stderr(),
                 )
         returncode = process.wait(timeout=timeout_s)
         return CommandResult(returncode=int(returncode))
@@ -373,15 +482,18 @@ class LocalProcessRunner:
         process.terminate()
         try:
             if isinstance(process, ManagedProcess):
-                process.communicate(timeout=STOP_TIMEOUT_S)
+                process.wait(timeout=STOP_TIMEOUT_S)
             else:
                 process.wait(timeout=STOP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             process.kill()
             if isinstance(process, ManagedProcess):
-                process.communicate(timeout=STOP_TIMEOUT_S)
+                process.wait(timeout=STOP_TIMEOUT_S)
             else:
                 process.wait(timeout=STOP_TIMEOUT_S)
+        finally:
+            if isinstance(process, ManagedProcess):
+                process.join_readers(PROCESS_READER_JOIN_TIMEOUT_S)
 
 
 def main(
@@ -515,6 +627,7 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
     image_result: CommandResult | None = None
     gaze_result: CommandResult | None = None
     gaze_summary = _summarize_gaze_jsonl("", config.logical_camera_name, config.gaze_count)
+    botified_stdout = _summarize_botified_stdout_from_process(None)
 
     try:
         server_process = runner.start_process(
@@ -587,6 +700,8 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
         if server_process is not None:
             runner.stop_process(server_process)
 
+    botified_stdout = _summarize_botified_stdout_from_process(cli_process)
+    failure_reasons.extend(_botified_stdout_failure_reasons(botified_stdout))
     failure_reasons = _dedupe(failure_reasons)
     slice_pass = _slice_pass(
         failure_reasons=failure_reasons,
@@ -612,6 +727,7 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
         image_result=image_result,
         gaze_result=gaze_result,
         gaze_summary=gaze_summary,
+        botified_stdout=botified_stdout,
     )
     _write_report(config.out, report)
     print(str(config.out))
@@ -729,6 +845,7 @@ def _build_smoke_report(
     image_result: CommandResult | None,
     gaze_result: CommandResult | None,
     gaze_summary: dict[str, Any],
+    botified_stdout: dict[str, Any],
 ) -> dict[str, Any]:
     report = _base_report(
         manifest_report=config.manifest_report,
@@ -779,6 +896,7 @@ def _build_smoke_report(
                 "count": config.frame_count,
             },
             "gaze": gaze_summary,
+            "botified_stdout": botified_stdout,
             "health": {
                 "ok": False if health_result is None else health_result.passed,
                 "failure_reason": None if health_result is None else health_result.failure_reason,
@@ -919,6 +1037,161 @@ def _summarize_gaze_jsonl(
         "first_sample": accepted_samples[0] if accepted_samples else None,
         "last_sample": accepted_samples[-1] if accepted_samples else None,
     }
+
+
+def _summarize_botified_stdout_from_process(process: ProcessLike | None) -> dict[str, Any]:
+    lines = _collected_stream_lines(process, "stdout")
+    line_count = _collected_stream_line_count(process, "stdout", fallback=len(lines))
+    collection_truncated = _collection_truncated(process, "stdout", collected_count=len(lines))
+    collection_incomplete = bool(getattr(process, "collection_incomplete", False))
+    return _summarize_botified_stdout(
+        lines,
+        line_count=line_count,
+        collection_truncated=collection_truncated,
+        collection_incomplete=collection_incomplete,
+    )
+
+
+def _summarize_botified_stdout(
+    lines: list[str],
+    *,
+    line_count: int,
+    collection_truncated: bool,
+    collection_incomplete: bool,
+) -> dict[str, Any]:
+    frame_count = 0
+    allowed_frame_count = 0
+    pollution_count = 0
+    parse_error_count = 0
+    forbidden_event_count = 0
+    event_counts: dict[str, int] = {}
+    first_frame: dict[str, Any] | None = None
+    last_frame: dict[str, Any] | None = None
+    contract_violations: list[str] = []
+
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if BOTIFIED_OPEN not in line and BOTIFIED_CLOSE not in line:
+            pollution_count += 1
+            contract_violations.append(f"line {line_number}: stdout pollution")
+            continue
+
+        if not _is_wrapped_botified_frame(line):
+            parse_error_count += 1
+            contract_violations.append(f"line {line_number}: malformed Botified frame")
+            continue
+
+        payload = _parse_botified_payload(line)
+        if payload is None:
+            parse_error_count += 1
+            contract_violations.append(f"line {line_number}: invalid Botified JSON payload")
+            continue
+
+        event, contract_violation = _botified_contract_event(payload)
+        if contract_violation is not None:
+            parse_error_count += 1
+            contract_violations.append(f"line {line_number}: {contract_violation}")
+            continue
+        if event is None:
+            parse_error_count += 1
+            contract_violations.append(f"line {line_number}: invalid Botified contract")
+            continue
+
+        frame_count += 1
+        frame = {
+            "line": line_number,
+            "event": event,
+            "payload": payload,
+        }
+        if first_frame is None:
+            first_frame = frame
+        last_frame = frame
+
+        if event not in BOTIFIED_ALLOWED_EVENTS:
+            forbidden_event_count += 1
+            contract_violations.append(f"line {line_number}: forbidden Botified event {event}")
+            continue
+
+        allowed_frame_count += 1
+        event_counts[event] = event_counts.get(event, 0) + 1
+
+    return {
+        "source": "cli_stdout",
+        "required_frame_count": None,
+        "line_count": int(line_count),
+        "frame_count": frame_count,
+        "allowed_frame_count": allowed_frame_count,
+        "pollution_count": pollution_count,
+        "parse_error_count": parse_error_count,
+        "forbidden_event_count": forbidden_event_count,
+        "event_counts": dict(sorted(event_counts.items())),
+        "first_frame": first_frame,
+        "last_frame": last_frame,
+        "collection_truncated": collection_truncated,
+        "collection_incomplete": collection_incomplete,
+        "contract_violations": contract_violations,
+    }
+
+
+def _is_wrapped_botified_frame(line: str) -> bool:
+    return (
+        line.startswith(BOTIFIED_OPEN)
+        and line.endswith(BOTIFIED_CLOSE)
+        and line.count(BOTIFIED_OPEN) == 1
+        and line.count(BOTIFIED_CLOSE) == 1
+    )
+
+
+def _parse_botified_payload(line: str) -> dict[str, Any] | None:
+    inner = line[len(BOTIFIED_OPEN) : -len(BOTIFIED_CLOSE)]
+    try:
+        payload = json.loads(inner)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _botified_contract_event(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    frame_id = payload.get("id")
+    if not isinstance(frame_id, str) or not frame_id.startswith("visual:"):
+        return None, "invalid Botified id"
+    if payload.get("urgency") != "normal":
+        return None, "invalid Botified urgency"
+    timeout_secs = payload.get("timeout_secs")
+    if not isinstance(timeout_secs, int) or isinstance(timeout_secs, bool):
+        return None, "invalid Botified timeout_secs"
+    if payload.get("expect") != "ack":
+        return None, "invalid Botified expect"
+    request = payload.get("request")
+    if not isinstance(request, str):
+        return None, "invalid Botified request"
+    match = BOTIFIED_EVENT_RE.search(request)
+    if match is None:
+        return None, "missing Botified request event"
+    event = match.group(1)
+    if event == "attention_target_changed":
+        return event, None
+    if event not in BOTIFIED_ALLOWED_EVENTS:
+        return None, f"unsupported Botified event {event}"
+    return event, None
+
+
+def _botified_stdout_failure_reasons(summary: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if summary["collection_truncated"]:
+        reasons.append("botified_stdout_collection_truncated")
+    if summary["collection_incomplete"]:
+        reasons.append("botified_stdout_collection_incomplete")
+    if summary["pollution_count"] > 0:
+        reasons.append("botified_stdout_pollution")
+    if summary["parse_error_count"] > 0:
+        reasons.append("botified_stdout_parse_errors")
+    if summary["forbidden_event_count"] > 0:
+        reasons.append("botified_stdout_forbidden_event")
+    return reasons
 
 
 def _slice_pass(
@@ -1063,19 +1336,60 @@ def _tail_report(process: ProcessLike | None) -> dict[str, str]:
     }
 
 
+def _collected_stream_lines(process: ProcessLike | None, stream_name: str) -> list[str]:
+    if process is None:
+        return []
+    lines = getattr(process, f"{stream_name}_lines", None)
+    if lines is None:
+        return []
+    return [str(line) for line in lines]
+
+
+def _collected_stream_line_count(
+    process: ProcessLike | None,
+    stream_name: str,
+    *,
+    fallback: int,
+) -> int:
+    if process is None:
+        return 0
+    line_count = getattr(process, f"{stream_name}_line_count", None)
+    if isinstance(line_count, int) and not isinstance(line_count, bool):
+        return line_count
+    return fallback
+
+
+def _collection_truncated(
+    process: ProcessLike | None,
+    stream_name: str,
+    *,
+    collected_count: int,
+) -> bool:
+    if process is None:
+        return False
+    explicit = bool(getattr(process, f"{stream_name}_truncated", False))
+    observed_count = _collected_stream_line_count(
+        process,
+        stream_name,
+        fallback=collected_count,
+    )
+    return explicit or observed_count > collected_count
+
+
 def _capture_finished_process(process: ManagedProcess) -> None:
-    if process.stdout_tail or process.stderr_tail:
-        return
-    try:
-        process.communicate(timeout=0)
-    except (ValueError, subprocess.TimeoutExpired):
-        return
+    process.join_readers(PROCESS_READER_JOIN_TIMEOUT_S)
 
 
 def _tail(value: str, *, limit: int = 4096) -> str:
     if len(value) <= limit:
         return value
     return value[-limit:]
+
+
+def _lines_to_text(lines: list[str]) -> str:
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
 
 
 def _dedupe(values: list[str]) -> list[str]:
