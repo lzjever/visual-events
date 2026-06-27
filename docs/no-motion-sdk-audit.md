@@ -68,7 +68,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   --idlc "$VISUAL_EVENTS_IDLC"
 ```
 
-The generator oracle hardening check is explicit and writes only under ignored repo `build/`. It runs real C++ idlc codegen and requires the expected `.hpp` and `.cpp` probe outputs:
+The generator oracle hardening check is explicit and writes only under ignored repo `build/`. By default it probes this repo's `common/schema/dds/head_state_v1.idl` and `common/schema/dds/gaze_target_v1.idl`, runs real C++ idlc codegen for both, and requires each IDL's expected `.hpp` and `.cpp` outputs:
 
 ```bash
 UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
@@ -77,7 +77,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   --idlc "$VISUAL_EVENTS_IDLC"
 ```
 
-The repo-local CycloneDDS/CycloneDDS-CXX 0.10.2 C++ idlc prepare step is also explicit. It clones/builds only under ignored `build/tools/cyclonedds-cxx-idlc-0.10.2/`, creates the `bin/idlc-cxx` wrapper, requires the installed idlc/idlcxx/ddsc artifacts, and reuses the same codegen oracle:
+The repo-local CycloneDDS/CycloneDDS-CXX 0.10.2 C++ idlc prepare step is also explicit. It clones/builds only under ignored `build/tools/cyclonedds-cxx-idlc-0.10.2/`, creates the `bin/idlc-cxx` wrapper, requires the installed idlc/idlcxx/ddsc artifacts, and reuses the same Head/Gaze multi-IDL codegen oracle:
 
 ```bash
 UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
@@ -85,7 +85,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   --prepare
 ```
 
-The full bridge type-support/codegen gate is explicit, does not search `PATH`, and reuses the same codegen probe; pass the same pinned `idlc` with `--idlc` or `VISUAL_EVENTS_IDLC`:
+The full bridge type-support/codegen gate is explicit, does not search `PATH`, and reuses the same Head/Gaze multi-IDL codegen probe; pass the same pinned `idlc` with `--idlc` or `VISUAL_EVENTS_IDLC`:
 
 ```bash
 UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
@@ -97,8 +97,8 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   --out artifacts/dds_bridge/full-bridge-toolchain-report.json
 ```
 
-If neither `--idlc` nor `VISUAL_EVENTS_IDLC` is provided, if the generator is not pinned to 0.10.2, if stdout/stderr contains `cannot load generator` or `cannot load generator cxx`, or if the probe does not write the expected `.hpp` and `.cpp`, the full bridge gate must fail fast even when idlc returns 0. The foundation gate can still pass.
+If neither `--idlc` nor `VISUAL_EVENTS_IDLC` is provided, if the generator is not pinned to 0.10.2, if stdout/stderr contains `cannot load generator` or `cannot load generator cxx`, or if either Head/Gaze IDL probe does not write its expected `.hpp` and `.cpp`, the full bridge gate must fail fast even when idlc returns 0. The report must list every probed IDL, its expected outputs, generated files, and per-IDL file presence. The foundation gate can still pass.
 
-This only proves repo-local toolchain preparation orchestration and generator oracle hardening. It does not commit external source/build/install/probe output, does not generate or connect `HeadStateV1_`/`GazeTargetV1_` type support, and does not complete full bridge/runtime/PC E2E/RK/real-device validation.
+This only proves repo-local toolchain preparation orchestration and the Head/Gaze IDL codegen oracle. It does not commit external source/build/install/probe output, does not connect `HeadStateV1_`/`GazeTargetV1_` generated type support into CMake/native runtime, and does not complete full bridge/runtime/PC E2E/RK/real-device validation.
 
 The `ldd`/`readelf` commands are only meaningful after a local CMake probe build. Build output must stay under ignored `build/`; reports must stay under ignored `artifacts/`.

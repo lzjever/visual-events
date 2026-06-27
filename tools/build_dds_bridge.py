@@ -128,14 +128,14 @@ def check_foundation_environment(
 def check_visual_events_codegen(
     idlc: Path | None,
     *,
-    probe_idl: Path | None = None,
+    probe_idls: list[Path] | None = None,
     probe_output_dir: Path | None = None,
 ) -> dict[str, object]:
     try:
         result = check_idlc_codegen_toolchain(
             idlc,
             probe_codegen=True,
-            probe_idl=probe_idl,
+            probe_idls=probe_idls,
             probe_output_dir=probe_output_dir,
         )
     except CodegenToolchainError as exc:
@@ -225,8 +225,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--codegen-probe-idl",
         type=Path,
+        action="append",
         default=None,
-        help="IDL file for the full-bridge C++ idlc codegen oracle",
+        help="IDL file for the full-bridge C++ idlc codegen oracle; repeatable; defaults to repo Head/Gaze IDLs",
     )
     parser.add_argument(
         "--codegen-probe-output-dir",
@@ -273,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
                 report.update(
                     check_visual_events_codegen(
                         args.idlc,
-                        probe_idl=args.codegen_probe_idl,
+                        probe_idls=args.codegen_probe_idl,
                         probe_output_dir=args.codegen_probe_output_dir,
                     )
                 )

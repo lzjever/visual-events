@@ -20,7 +20,10 @@ CYCLONEDDS_CXX_REPO = "https://github.com/eclipse-cyclonedds/cyclonedds-cxx.git"
 DEFAULT_TOOLCHAIN_DIR = (
     REPO_ROOT / "build" / "tools" / f"cyclonedds-cxx-idlc-{PINNED_CYCLONEDDS_VERSION}"
 )
-DEFAULT_PROBE_IDL = Path("/home/galbot/works/video_dds_publisher/idl/CameraFrame_.idl")
+DEFAULT_PROBE_IDLS = (
+    REPO_ROOT / "common" / "schema" / "dds" / "head_state_v1.idl",
+    REPO_ROOT / "common" / "schema" / "dds" / "gaze_target_v1.idl",
+)
 DEFAULT_PROBE_OUTPUT_DIR = DEFAULT_TOOLCHAIN_DIR / "codegen_probe"
 REQUIRED_PREPARE_TOOLS = ("git", "cmake", "make", "gcc", "g++")
 OPTIONAL_PREPARE_TOOLS = ("ninja", "bison", "flex")
@@ -177,20 +180,18 @@ def _inspect_backend_text(idlc: Path) -> dict[str, object]:
     return report
 
 
-def _resolve_probe_idl(probe_idl: Path | None, *, require_exists: bool) -> Path | None:
-    selected = probe_idl
-    if selected is None and DEFAULT_PROBE_IDL.is_file():
-        selected = DEFAULT_PROBE_IDL
-    if selected is None:
-        if require_exists:
-            raise CodegenToolchainError(
-                f"--probe-idl is required because default probe IDL does not exist: {DEFAULT_PROBE_IDL}"
-            )
-        return None
-
-    resolved = _resolve_path(selected)
-    if require_exists and not resolved.is_file():
-        raise CodegenToolchainError(f"probe IDL does not exist or is not a file: {resolved}")
+def _resolve_probe_idls(
+    probe_idls: list[Path] | None,
+    *,
+    require_exists: bool,
+) -> list[Path]:
+    selected = probe_idls or list(DEFAULT_PROBE_IDLS)
+    resolved = [_resolve_path(path) for path in selected]
+    if require_exists:
+        missing = [path for path in resolved if not path.is_file()]
+        if missing:
+            formatted = ", ".join(os.fspath(path) for path in missing)
+            raise CodegenToolchainError(f"probe IDL does not exist or is not a file: {formatted}")
     return resolved
 
 
@@ -201,10 +202,16 @@ def _probe_output_dir(probe_output_dir: Path | None) -> Path:
     )
 
 
-def _expected_probe_files(probe_idl: Path | None) -> list[str]:
-    if probe_idl is None:
-        return []
+def _expected_probe_files(probe_idl: Path) -> list[str]:
     return [f"{probe_idl.stem}.hpp", f"{probe_idl.stem}.cpp"]
+
+
+def _expected_probe_files_for_idls(probe_idls: list[Path]) -> list[str]:
+    return [
+        filename
+        for probe_idl in probe_idls
+        for filename in _expected_probe_files(probe_idl)
+    ]
 
 
 def _list_generated_files(output_dir: Path) -> list[str]:
@@ -229,66 +236,109 @@ def _remove_expected_probe_outputs(output_dir: Path, expected_files: list[str]) 
 def _probe_idlc_codegen(
     idlc: Path,
     *,
-    probe_idl: Path,
+    probe_idls: list[Path],
     output_dir: Path,
 ) -> dict[str, object]:
-    expected_files = _expected_probe_files(probe_idl)
+    expected_files = _expected_probe_files_for_idls(probe_idls)
     output_dir.mkdir(parents=True, exist_ok=True)
     _remove_expected_probe_outputs(output_dir, expected_files)
 
-    try:
-        result = _run_idlc_args(
-            idlc,
-            ["-l", "cxx", "-o", os.fspath(output_dir), os.fspath(probe_idl)],
-            timeout=30,
-        )
-    except OSError as exc:
-        raise CodegenToolchainError(f"failed to execute idlc codegen probe: {idlc}: {exc}") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise CodegenToolchainError(f"idlc codegen probe timed out: {idlc}") from exc
+    codegen_probes: list[dict[str, object]] = []
+    errors: list[str] = []
 
-    combined_output = result.stdout + result.stderr
+    for probe_idl in probe_idls:
+        idl_expected_files = _expected_probe_files(probe_idl)
+        try:
+            result = _run_idlc_args(
+                idlc,
+                ["-l", "cxx", "-o", os.fspath(output_dir), os.fspath(probe_idl)],
+                timeout=30,
+            )
+        except OSError as exc:
+            raise CodegenToolchainError(
+                f"failed to execute idlc codegen probe for {probe_idl}: {idlc}: {exc}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise CodegenToolchainError(f"idlc codegen probe timed out for {probe_idl}: {idlc}") from exc
+
+        combined_output = result.stdout + result.stderr
+        generated_files = _list_generated_files(output_dir)
+        presence = {
+            filename: (output_dir / filename).is_file()
+            for filename in idl_expected_files
+        }
+        expected_present = all(presence.values())
+        cannot_load_generator = CANNOT_LOAD_GENERATOR_RE.search(combined_output) is not None
+        idl_oracle_ok = result.returncode == 0 and not cannot_load_generator and expected_present
+        generated_for_idl = [
+            filename
+            for filename in generated_files
+            if Path(filename).name.startswith(f"{probe_idl.stem}.")
+        ]
+        codegen_probes.append(
+            {
+                "idl": os.fspath(probe_idl),
+                "expected_generated_files": idl_expected_files,
+                "generated_files": generated_for_idl,
+                "expected_generated_file_presence": presence,
+                "expected_generated_files_present": expected_present,
+                "idlc_codegen_returncode": result.returncode,
+                "idlc_codegen_stdout": result.stdout,
+                "idlc_codegen_stderr": result.stderr,
+                "cannot_load_generator": cannot_load_generator,
+                "oracle_ok": idl_oracle_ok,
+            }
+        )
+        if cannot_load_generator:
+            errors.append(f"{probe_idl}: idlc cannot load generator cxx: {_compact_output(combined_output)}")
+        elif result.returncode != 0:
+            errors.append(
+                f"{probe_idl}: idlc cxx codegen probe failed with rc={result.returncode}: "
+                f"{_compact_output(combined_output)}"
+            )
+        elif not expected_present:
+            missing = [filename for filename, present in presence.items() if not present]
+            errors.append(
+                f"{probe_idl}: missing expected generated files: " + ", ".join(missing)
+            )
+
     generated_files = _list_generated_files(output_dir)
     presence = {
         filename: (output_dir / filename).is_file()
         for filename in expected_files
     }
     expected_present = bool(expected_files) and all(presence.values())
-    cannot_load_generator = CANNOT_LOAD_GENERATOR_RE.search(combined_output) is not None
-    oracle_ok = result.returncode == 0 and not cannot_load_generator and expected_present
-
+    oracle_ok = not errors and expected_present
+    first_probe_idl = probe_idls[0] if len(probe_idls) == 1 else None
+    returncodes = [
+        probe["idlc_codegen_returncode"]
+        for probe in codegen_probes
+        if isinstance(probe["idlc_codegen_returncode"], int)
+    ]
+    aggregate_returncode = next((returncode for returncode in returncodes if returncode != 0), 0)
     report: dict[str, object] = {
         "probe_codegen": True,
-        "probe_idl": os.fspath(probe_idl),
+        "probe_idl": os.fspath(first_probe_idl) if first_probe_idl is not None else None,
+        "probe_idls": [os.fspath(path) for path in probe_idls],
         "probe_output_dir": os.fspath(output_dir),
         "generated_files": generated_files,
         "expected_generated_files": expected_files,
         "expected_generated_file_presence": presence,
         "expected_generated_files_present": expected_present,
-        "idlc_codegen_returncode": result.returncode,
-        "idlc_codegen_stdout": result.stdout,
-        "idlc_codegen_stderr": result.stderr,
+        "codegen_probes": codegen_probes,
+        "idlc_codegen_returncode": aggregate_returncode,
+        "idlc_codegen_stdout": "\n".join(
+            str(probe["idlc_codegen_stdout"]) for probe in codegen_probes
+        ),
+        "idlc_codegen_stderr": "\n".join(
+            str(probe["idlc_codegen_stderr"]) for probe in codegen_probes
+        ),
         "cxx_backend_available": oracle_ok,
         "oracle_ok": oracle_ok,
     }
 
-    if cannot_load_generator:
-        raise CodegenToolchainError(
-            f"idlc cannot load generator cxx: {_compact_output(combined_output)}",
-            report=report,
-        )
-    if result.returncode != 0:
-        raise CodegenToolchainError(
-            f"idlc cxx codegen probe failed with rc={result.returncode}: "
-            f"{_compact_output(combined_output)}",
-            report=report,
-        )
-    if not expected_present:
-        missing = [filename for filename, present in presence.items() if not present]
-        raise CodegenToolchainError(
-            "missing expected generated files: " + ", ".join(missing),
-            report=report,
-        )
+    if errors:
+        raise CodegenToolchainError("; ".join(errors), report=report)
 
     return report
 
@@ -299,6 +349,7 @@ def check_idlc_codegen_toolchain(
     expected_version: str = PINNED_CYCLONEDDS_VERSION,
     probe_codegen: bool = False,
     probe_idl: Path | None = None,
+    probe_idls: list[Path] | None = None,
     probe_output_dir: Path | None = None,
 ) -> dict[str, object]:
     if idlc is None:
@@ -311,18 +362,22 @@ def check_idlc_codegen_toolchain(
         raise CodegenToolchainError(f"idlc does not exist or is not a file: {resolved}")
 
     resolved_probe_output_dir = _probe_output_dir(probe_output_dir)
-    resolved_probe_idl = _resolve_probe_idl(probe_idl, require_exists=probe_codegen)
-    expected_files = _expected_probe_files(resolved_probe_idl)
+    selected_probe_idls = probe_idls if probe_idls is not None else ([probe_idl] if probe_idl is not None else None)
+    resolved_probe_idls = _resolve_probe_idls(selected_probe_idls, require_exists=probe_codegen)
+    expected_files = _expected_probe_files_for_idls(resolved_probe_idls)
+    first_probe_idl = resolved_probe_idls[0] if len(resolved_probe_idls) == 1 else None
 
     report: dict[str, object] = {
         "idlc": os.fspath(resolved),
         "probe_codegen": probe_codegen,
-        "probe_idl": os.fspath(resolved_probe_idl) if resolved_probe_idl is not None else None,
+        "probe_idl": os.fspath(first_probe_idl) if first_probe_idl is not None else None,
+        "probe_idls": [os.fspath(path) for path in resolved_probe_idls],
         "probe_output_dir": os.fspath(resolved_probe_output_dir),
         "generated_files": [],
         "expected_generated_files": expected_files,
         "expected_generated_file_presence": {filename: False for filename in expected_files},
         "expected_generated_files_present": False,
+        "codegen_probes": [],
         "cxx_backend_available": False,
         "oracle_ok": False,
     }
@@ -345,7 +400,7 @@ def check_idlc_codegen_toolchain(
             report.update(
                 _probe_idlc_codegen(
                     resolved,
-                    probe_idl=resolved_probe_idl,
+                    probe_idls=resolved_probe_idls,
                     output_dir=resolved_probe_output_dir,
                 )
             )
@@ -727,7 +782,7 @@ def prepare_codegen_toolchain(
     cyclonedds_version: str,
     cyclonedds_cxx_version: str,
     toolchain_dir: Path,
-    probe_idl: Path | None,
+    probe_idls: list[Path] | None,
 ) -> dict[str, object]:
     _require_pinned_version(
         cyclonedds_version,
@@ -837,7 +892,7 @@ def prepare_codegen_toolchain(
                 layout["wrapper_idlc"],
                 expected_version=cyclonedds_version,
                 probe_codegen=True,
-                probe_idl=probe_idl,
+                probe_idls=probe_idls,
                 probe_output_dir=layout["probe_output_dir"],
             )
         )
@@ -859,7 +914,7 @@ def build_plan(
     idlc: Path | None,
     dry_run: bool,
     probe_codegen: bool,
-    probe_idl: Path | None,
+    probe_idls: list[Path] | None,
     probe_output_dir: Path | None,
 ) -> dict[str, object]:
     _require_pinned_version(
@@ -891,7 +946,7 @@ def build_plan(
             idlc,
             expected_version=cyclonedds_version,
             probe_codegen=probe_codegen,
-            probe_idl=probe_idl,
+            probe_idls=probe_idls,
             probe_output_dir=resolved_probe_output_dir,
         )
     )
@@ -936,8 +991,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--probe-idl",
         type=Path,
+        action="append",
         default=None,
-        help=f"IDL file for --probe-codegen; defaults to {DEFAULT_PROBE_IDL} when present",
+        help="IDL file for --probe-codegen; repeatable; defaults to the repo Head/Gaze IDLs",
     )
     parser.add_argument(
         "--probe-output-dir",
@@ -977,7 +1033,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         report["probe_output_dir"] = os.fspath(_resolve_path(DEFAULT_PROBE_OUTPUT_DIR))
     if args.probe_idl is not None:
-        report["probe_idl"] = os.fspath(_resolve_path(args.probe_idl))
+        resolved_arg_probe_idls = [_resolve_path(path) for path in args.probe_idl]
+        report["probe_idl"] = (
+            os.fspath(resolved_arg_probe_idls[0])
+            if len(resolved_arg_probe_idls) == 1
+            else None
+        )
+        report["probe_idls"] = [os.fspath(path) for path in resolved_arg_probe_idls]
 
     try:
         if prepare:
@@ -992,7 +1054,7 @@ def main(argv: list[str] | None = None) -> int:
                     cyclonedds_version=args.cyclonedds_version,
                     cyclonedds_cxx_version=args.cyclonedds_cxx_version,
                     toolchain_dir=args.toolchain_dir,
-                    probe_idl=args.probe_idl,
+                    probe_idls=args.probe_idl,
                 )
             )
             print(json.dumps(report, indent=2, sort_keys=True))
@@ -1013,7 +1075,7 @@ def main(argv: list[str] | None = None) -> int:
                 idlc=selected_idlc,
                 dry_run=dry_run,
                 probe_codegen=probe_codegen,
-                probe_idl=args.probe_idl,
+                probe_idls=args.probe_idl,
                 probe_output_dir=args.probe_output_dir,
             )
         )

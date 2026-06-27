@@ -15,6 +15,8 @@ NATIVE_BRIDGE = REPO_ROOT / "native" / "dds_bridge"
 TOOLS_BUILD = REPO_ROOT / "tools" / "build_dds_bridge.py"
 TOOLS_PREPARE_CODEGEN = REPO_ROOT / "tools" / "prepare_dds_codegen_toolchain.py"
 GITIGNORE = REPO_ROOT / ".gitignore"
+HEAD_STATE_IDL = REPO_ROOT / "common" / "schema" / "dds" / "head_state_v1.idl"
+GAZE_TARGET_IDL = REPO_ROOT / "common" / "schema" / "dds" / "gaze_target_v1.idl"
 CYCLONEDDS_COMMIT = "9995905bce6c4cf9f740d6438bbf7fcfd1c83dfd"
 CYCLONEDDS_CXX_COMMIT = "2a372d2c4597faea54543b925755fa2d7cdd4232"
 
@@ -137,6 +139,52 @@ def _make_fake_idlc(
         "    printf '%s\\n' 'idlc: cannot load generator cxx' >&2\n"
         "    ;;\n"
         "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _make_fake_idlc_hpp_only_for_stem(
+    tmp_path: Path,
+    *,
+    version: str,
+    backends: str,
+    hpp_only_stem: str,
+) -> Path:
+    script = tmp_path / f"fake-idlc-{version}-{backends.replace(' ', '-')}-hpp-only-{hpp_only_stem}"
+    script.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = '--version' ] || [ \"$1\" = '-v' ]; then\n"
+        f"    printf '%s\\n' 'CycloneDDS idlc {version}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = '--help' ] || { [ \"$1\" = '-l' ] && [ \"$#\" -eq 1 ]; }; then\n"
+        f"    printf '%s\\n' 'available backends: {backends}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "lang=''\n"
+        "out_dir=''\n"
+        "idl=''\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "    case \"$1\" in\n"
+        "      -l) shift; lang=\"$1\" ;;\n"
+        "      -o) shift; out_dir=\"$1\" ;;\n"
+        "      *.idl) idl=\"$1\" ;;\n"
+        "    esac\n"
+        "    shift\n"
+        "done\n"
+        "if [ \"$lang\" != 'cxx' ] || [ -z \"$out_dir\" ] || [ -z \"$idl\" ]; then\n"
+        "    printf '%s\\n' 'fake idlc only supports --version, --help, -l, and -l cxx -o OUT IDL' >&2\n"
+        "    exit 64\n"
+        "fi\n"
+        "base=${idl##*/}\n"
+        "base=${base%.idl}\n"
+        "printf '%s\\n' '// fake generated header' > \"$out_dir/$base.hpp\"\n"
+        f"if [ \"$base\" != '{hpp_only_stem}' ]; then\n"
+        "    printf '%s\\n' '// fake generated source' > \"$out_dir/$base.cpp\"\n"
+        "fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -684,6 +732,94 @@ def test_prepare_dds_codegen_toolchain_probe_codegen_accepts_fake_idlc_that_writ
         assert report["oracle_ok"] is True
         assert (probe_output_dir / "CameraFrame_.hpp").is_file()
         assert (probe_output_dir / "CameraFrame_.cpp").is_file()
+    finally:
+        shutil.rmtree(probe_output_dir, ignore_errors=True)
+
+
+def test_prepare_dds_codegen_toolchain_probe_codegen_defaults_to_repo_head_and_gaze_idls(
+    tmp_path,
+):
+    fake_idlc = _make_fake_idlc(tmp_path, version="0.10.2", backends="c cxx")
+    probe_output_dir = _repo_build_probe_dir(tmp_path, "prepare-default-head-gaze")
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--probe-codegen",
+                "--idlc",
+                os.fspath(fake_idlc),
+                "--probe-output-dir",
+                os.fspath(probe_output_dir),
+            ]
+        )
+
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout)
+        assert report["oracle_ok"] is True
+        assert report["probe_idls"] == [
+            os.fspath(HEAD_STATE_IDL.resolve()),
+            os.fspath(GAZE_TARGET_IDL.resolve()),
+        ]
+        assert set(report["generated_files"]) == {
+            "head_state_v1.hpp",
+            "head_state_v1.cpp",
+            "gaze_target_v1.hpp",
+            "gaze_target_v1.cpp",
+        }
+        assert report["expected_generated_file_presence"] == {
+            "head_state_v1.hpp": True,
+            "head_state_v1.cpp": True,
+            "gaze_target_v1.hpp": True,
+            "gaze_target_v1.cpp": True,
+        }
+        assert [
+            probe["expected_generated_files"]
+            for probe in report["codegen_probes"]
+        ] == [
+            ["head_state_v1.hpp", "head_state_v1.cpp"],
+            ["gaze_target_v1.hpp", "gaze_target_v1.cpp"],
+        ]
+    finally:
+        shutil.rmtree(probe_output_dir, ignore_errors=True)
+
+
+def test_prepare_dds_codegen_toolchain_probe_codegen_accepts_repeatable_probe_idls(
+    tmp_path,
+):
+    fake_idlc = _make_fake_idlc(tmp_path, version="0.10.2", backends="c cxx")
+    first_idl = _make_probe_idl(tmp_path, stem="FirstProbe_")
+    second_idl = _make_probe_idl(tmp_path, stem="SecondProbe_")
+    probe_output_dir = _repo_build_probe_dir(tmp_path, "prepare-repeatable")
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--probe-codegen",
+                "--idlc",
+                os.fspath(fake_idlc),
+                "--probe-idl",
+                os.fspath(first_idl),
+                "--probe-idl",
+                os.fspath(second_idl),
+                "--probe-output-dir",
+                os.fspath(probe_output_dir),
+            ]
+        )
+
+        assert result.returncode == 0, result.stderr
+        report = json.loads(result.stdout)
+        assert report["oracle_ok"] is True
+        assert report["probe_idls"] == [
+            os.fspath(first_idl.resolve()),
+            os.fspath(second_idl.resolve()),
+        ]
+        assert set(report["generated_files"]) == {
+            "FirstProbe_.hpp",
+            "FirstProbe_.cpp",
+            "SecondProbe_.hpp",
+            "SecondProbe_.cpp",
+        }
+        assert len(report["codegen_probes"]) == 2
     finally:
         shutil.rmtree(probe_output_dir, ignore_errors=True)
 
@@ -1295,6 +1431,65 @@ def test_build_tool_full_bridge_accepts_explicit_pinned_fake_idlc(tmp_path, repo
         shutil.rmtree(probe_output_dir, ignore_errors=True)
 
 
+def test_build_tool_full_bridge_default_probes_repo_head_and_gaze_idls(
+    tmp_path,
+    repo_report_path,
+):
+    unitree_root = _make_minimal_unitree_sdk_root(tmp_path)
+    video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
+    fake_idlc = _make_fake_idlc(tmp_path, version="0.10.2", backends="c cxx")
+    probe_output_dir = _repo_build_probe_dir(tmp_path, "build-default-head-gaze")
+    report_path = repo_report_path("full-bridge-default-head-gaze")
+    env = os.environ.copy()
+    env["PATH"] = ""
+
+    try:
+        result = _run_build_tool(
+            [
+                "--check",
+                "--check-full-bridge",
+                "--idlc",
+                os.fspath(fake_idlc),
+                "--codegen-probe-output-dir",
+                os.fspath(probe_output_dir),
+                "--unitree-sdk-root",
+                os.fspath(unitree_root),
+                "--video-dds-publisher-dir",
+                os.fspath(video_dir),
+                "--out",
+                os.fspath(report_path),
+            ],
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["ok"] is True
+        assert report["visual_events_codegen_ready"] is True
+        assert report["probe_idls"] == [
+            os.fspath(HEAD_STATE_IDL.resolve()),
+            os.fspath(GAZE_TARGET_IDL.resolve()),
+        ]
+        assert set(report["generated_files"]) == {
+            "head_state_v1.hpp",
+            "head_state_v1.cpp",
+            "gaze_target_v1.hpp",
+            "gaze_target_v1.cpp",
+        }
+        assert report["expected_generated_file_presence"] == {
+            "head_state_v1.hpp": True,
+            "head_state_v1.cpp": True,
+            "gaze_target_v1.hpp": True,
+            "gaze_target_v1.cpp": True,
+        }
+        assert [probe["idl"] for probe in report["codegen_probes"]] == [
+            os.fspath(HEAD_STATE_IDL.resolve()),
+            os.fspath(GAZE_TARGET_IDL.resolve()),
+        ]
+    finally:
+        shutil.rmtree(probe_output_dir, ignore_errors=True)
+
+
 def test_build_tool_full_bridge_accepts_visual_events_idlc_env(tmp_path, repo_report_path):
     unitree_root = _make_minimal_unitree_sdk_root(tmp_path)
     video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
@@ -1329,6 +1524,64 @@ def test_build_tool_full_bridge_accepts_visual_events_idlc_env(tmp_path, repo_re
         assert report["visual_events_codegen_ready"] is True
         assert report["idl_generator"] == os.fspath(fake_idlc.resolve())
         assert report["oracle_ok"] is True
+    finally:
+        shutil.rmtree(probe_output_dir, ignore_errors=True)
+
+
+def test_build_tool_full_bridge_default_fails_when_one_repo_idl_lacks_cpp(
+    tmp_path,
+    repo_report_path,
+):
+    unitree_root = _make_minimal_unitree_sdk_root(tmp_path)
+    video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
+    fake_idlc = _make_fake_idlc_hpp_only_for_stem(
+        tmp_path,
+        version="0.10.2",
+        backends="c cxx",
+        hpp_only_stem="gaze_target_v1",
+    )
+    probe_output_dir = _repo_build_probe_dir(tmp_path, "build-default-gaze-hpp-only")
+    report_path = repo_report_path("full-bridge-default-gaze-hpp-only")
+    env = os.environ.copy()
+    env["PATH"] = ""
+
+    try:
+        result = _run_build_tool(
+            [
+                "--check",
+                "--check-full-bridge",
+                "--idlc",
+                os.fspath(fake_idlc),
+                "--codegen-probe-output-dir",
+                os.fspath(probe_output_dir),
+                "--unitree-sdk-root",
+                os.fspath(unitree_root),
+                "--video-dds-publisher-dir",
+                os.fspath(video_dir),
+                "--out",
+                os.fspath(report_path),
+            ],
+            env=env,
+        )
+
+        assert result.returncode != 0
+        assert "gaze_target_v1.cpp" in result.stderr
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["ok"] is False
+        assert report["foundation_ready"] is True
+        assert report["visual_events_codegen_ready"] is False
+        assert "gaze_target_v1.cpp" in report["visual_events_codegen_error"]
+        assert report["expected_generated_file_presence"] == {
+            "head_state_v1.hpp": True,
+            "head_state_v1.cpp": True,
+            "gaze_target_v1.hpp": True,
+            "gaze_target_v1.cpp": False,
+        }
+        assert report["codegen_probes"][1]["idl"] == os.fspath(GAZE_TARGET_IDL.resolve())
+        assert report["codegen_probes"][1]["expected_generated_file_presence"] == {
+            "gaze_target_v1.hpp": True,
+            "gaze_target_v1.cpp": False,
+        }
     finally:
         shutil.rmtree(probe_output_dir, ignore_errors=True)
 
