@@ -80,7 +80,7 @@ PC 本地拓扑：
 val-data JPEG sequence
   -> tools/publish_test_dds_images
   -> real visual-events-cli
-  -> real or mock visual-events-server
+  -> real visual-events-server
   -> tools/subscribe_test_gaze_targets
   -> stdout collector / Botified frame assert
   -> tools/run_cli_local_e2e report
@@ -203,7 +203,9 @@ common/
     protocol.md
     dds/
       camera_jpeg_contract.md
+      gaze_target_v1.idl
       gaze_target_v1.md
+      head_state_v1.idl
       head_state_v1.md
 tools/
   publish_test_dds_images.py
@@ -384,6 +386,7 @@ CLI 单元测试必须覆盖：
 - Gaze DDS sink 或运控 owner shadow consumer 订阅验证。
 - 现场场景记录：空场、进入、路过、靠近、停留、挥手、目标丢失、server restart、head moving/unknown。
 - 30 分钟 soak report。
+- Camera owner、gaze consumer/运控 owner、Botified owner 的验收 sign-off。
 
 验收：
 
@@ -393,6 +396,7 @@ CLI 单元测试必须覆盖：
 - Botified 只收到低频语义事件，不收到 10Hz 状态。
 - 30 分钟无 crash、无明显 RSS 增长、无 stdout 污染、无事件刷屏。
 - 现场失败恢复行为符合文档。
+- 真机 handoff 不能只有本 repo 自测通过；必须有 camera DDS、gaze consumer/运控、Botified 三方 owner sign-off artifact。
 
 ### Step 9：Release 和 handoff
 
@@ -405,6 +409,7 @@ CLI 单元测试必须覆盖：
 - Botified task command。
 - Artifact hash：server baseline、CLI unit/integration、PC local E2E、真机 smoke、30 分钟 soak。
 - Model manifest 和 license owner sign-off。
+- Camera DDS owner、gaze consumer/运控 owner、Botified owner sign-off。
 - Rollback 操作。
 
 验收：
