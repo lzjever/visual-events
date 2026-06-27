@@ -76,8 +76,57 @@ def _make_minimal_video_dds_publisher_dir(tmp_path: Path) -> Path:
     source = root / "src" / "CameraFrame_.cpp"
     header.parent.mkdir(parents=True)
     source.parent.mkdir(parents=True)
-    header.write_text("// fake CameraFrame_ header\n", encoding="utf-8")
-    source.write_text("// fake CameraFrame_ source\n", encoding="utf-8")
+    header.write_text(
+        "#pragma once\n"
+        "\n"
+        "#include <cstdint>\n"
+        "#include <string>\n"
+        "#include <utility>\n"
+        "#include <vector>\n"
+        "\n"
+        "namespace unitree_camera { namespace msg { namespace dds_ {\n"
+        "class CameraFrame_ {\n"
+        "public:\n"
+        "  uint64_t timestamp_ns() const { return timestamp_ns_; }\n"
+        "  uint64_t& timestamp_ns() { return timestamp_ns_; }\n"
+        "  void timestamp_ns(uint64_t value) { timestamp_ns_ = value; }\n"
+        "  const std::string& camera_name() const { return camera_name_; }\n"
+        "  std::string& camera_name() { return camera_name_; }\n"
+        "  void camera_name(const std::string& value) { camera_name_ = value; }\n"
+        "  void camera_name(std::string&& value) { camera_name_ = std::move(value); }\n"
+        "  uint32_t width() const { return width_; }\n"
+        "  uint32_t& width() { return width_; }\n"
+        "  void width(uint32_t value) { width_ = value; }\n"
+        "  uint32_t height() const { return height_; }\n"
+        "  uint32_t& height() { return height_; }\n"
+        "  void height(uint32_t value) { height_ = value; }\n"
+        "  const std::string& encoding() const { return encoding_; }\n"
+        "  std::string& encoding() { return encoding_; }\n"
+        "  void encoding(const std::string& value) { encoding_ = value; }\n"
+        "  void encoding(std::string&& value) { encoding_ = std::move(value); }\n"
+        "  uint32_t step() const { return step_; }\n"
+        "  uint32_t& step() { return step_; }\n"
+        "  void step(uint32_t value) { step_ = value; }\n"
+        "  const std::vector<uint8_t>& data() const { return data_; }\n"
+        "  std::vector<uint8_t>& data() { return data_; }\n"
+        "  void data(const std::vector<uint8_t>& value) { data_ = value; }\n"
+        "  void data(std::vector<uint8_t>&& value) { data_ = std::move(value); }\n"
+        "private:\n"
+        "  uint64_t timestamp_ns_ = 0;\n"
+        "  std::string camera_name_;\n"
+        "  uint32_t width_ = 0;\n"
+        "  uint32_t height_ = 0;\n"
+        "  std::string encoding_;\n"
+        "  uint32_t step_ = 0;\n"
+        "  std::vector<uint8_t> data_;\n"
+        "};\n"
+        "}}}\n",
+        encoding="utf-8",
+    )
+    source.write_text(
+        '#include "unitree_camera/msg/dds/CameraFrame_.hpp"\n',
+        encoding="utf-8",
+    )
     return root
 
 
@@ -327,6 +376,47 @@ def _repo_build_toolchain_dir(tmp_path: Path, name: str) -> Path:
     return toolchain_dir
 
 
+def _repo_idlc_cxx() -> Path | None:
+    candidate = REPO_ROOT / "build" / "tools" / "cyclonedds-cxx-idlc-0.10.2" / "bin" / "idlc-cxx"
+    if candidate.exists():
+        return candidate
+    resolved = shutil.which("idlc-cxx")
+    return Path(resolved) if resolved else None
+
+
+def _repo_cyclonedds_cxx_include_dir() -> Path | None:
+    candidate = (
+        REPO_ROOT
+        / "build"
+        / "tools"
+        / "cyclonedds-cxx-idlc-0.10.2"
+        / "install"
+        / "include"
+        / "ddscxx"
+    )
+    if (candidate / "dds" / "topic" / "TopicTraits.hpp").exists():
+        return candidate
+    return None
+
+
+def _generate_repo_head_gaze_dds(tmp_path: Path) -> Path:
+    idlc = _repo_idlc_cxx()
+    if idlc is None:
+        pytest.skip("idlc-cxx is required for native full-bridge mapping tests")
+    generated_dir = _repo_build_probe_dir(tmp_path, "mapping-generated")
+    generated_dir.mkdir(parents=True)
+    for idl in [HEAD_STATE_IDL, GAZE_TARGET_IDL]:
+        result = subprocess.run(
+            [os.fspath(idlc), "-l", "cxx", "-o", os.fspath(generated_dir), os.fspath(idl)],
+            cwd=generated_dir,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+    return generated_dir
+
+
 def _write_executable(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     path.chmod(0o755)
@@ -555,6 +645,66 @@ def native_abi_build(tmp_path):
     shutil.rmtree(build_dir, ignore_errors=True)
 
 
+@pytest.fixture
+def native_full_bridge_mapping_build(tmp_path):
+    if shutil.which("cmake") is None:
+        pytest.skip("cmake is required for native full-bridge mapping target tests")
+    if (
+        shutil.which("c++") is None
+        and shutil.which("g++") is None
+        and shutil.which("clang++") is None
+    ):
+        pytest.skip("a C++ compiler is required for native full-bridge mapping target tests")
+    dds_include_dir = _repo_cyclonedds_cxx_include_dir()
+    if dds_include_dir is None:
+        pytest.skip("CycloneDDS C++ headers are required for generated Head/Gaze headers")
+
+    unitree_root = _make_minimal_unitree_sdk_root(tmp_path)
+    video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
+    generated_dir = _generate_repo_head_gaze_dds(tmp_path)
+    build_dir = REPO_ROOT / "build" / "test-dds-bridge" / f"{tmp_path.name}-mapping"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    configure = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            os.fspath(NATIVE_BRIDGE),
+            "-B",
+            os.fspath(build_dir),
+            f"-DUNITREE_SDK_ROOT={unitree_root}",
+            f"-DVIDEO_DDS_PUBLISHER_DIR={video_dir}",
+            "-DVISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=ON",
+            f"-DVISUAL_EVENTS_GENERATED_DDS_DIR={generated_dir}",
+            f"-DVISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR={dds_include_dir}",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert configure.returncode == 0, configure.stderr
+
+    build = subprocess.run(
+        [
+            "cmake",
+            "--build",
+            os.fspath(build_dir),
+            "--target",
+            "visual_events_dds_bridge_mapping_harness",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+
+    yield build_dir
+
+    shutil.rmtree(build_dir, ignore_errors=True)
+    shutil.rmtree(generated_dir, ignore_errors=True)
+
+
 def test_native_bridge_source_allowlist_has_only_camera_head_gaze_and_no_motion_tokens():
     text = _combined_native_source_text()
 
@@ -628,6 +778,75 @@ def test_native_bridge_cmake_declares_runtime_abi_core_and_test_harness_targets(
     ]
     missing = [item for item in required if item not in text]
     assert missing == []
+
+
+def test_native_bridge_declares_dds_type_mapping_core_and_full_bridge_harness():
+    text = _combined_native_source_text()
+
+    required = [
+        "bridge_dds_types.hpp",
+        "src/bridge_dds_types.cpp",
+        "visual_events_dds_bridge_dds_types",
+        "visual_events_dds_bridge_mapping_harness",
+        "src/mapping_harness_main.cpp",
+        "CameraFrameToAbi",
+        "HeadStateToAbi",
+        "GazeTargetFrameToDds",
+        "VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE",
+    ]
+    missing = [item for item in required if item not in text]
+    assert missing == []
+
+
+def test_native_dds_type_mapping_foundation_target_builds_without_generated_head_gaze(tmp_path):
+    if shutil.which("cmake") is None:
+        pytest.skip("cmake is required for native DDS mapping target tests")
+    if (
+        shutil.which("c++") is None
+        and shutil.which("g++") is None
+        and shutil.which("clang++") is None
+    ):
+        pytest.skip("a C++ compiler is required for native DDS mapping target tests")
+
+    unitree_root = _make_minimal_unitree_sdk_root(tmp_path)
+    video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
+    build_dir = REPO_ROOT / "build" / "test-dds-bridge" / f"{tmp_path.name}-mapping-foundation"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    configure = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            os.fspath(NATIVE_BRIDGE),
+            "-B",
+            os.fspath(build_dir),
+            f"-DUNITREE_SDK_ROOT={unitree_root}",
+            f"-DVIDEO_DDS_PUBLISHER_DIR={video_dir}",
+            "-DVISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=OFF",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert configure.returncode == 0, configure.stderr
+
+    build = subprocess.run(
+        [
+            "cmake",
+            "--build",
+            os.fspath(build_dir),
+            "--target",
+            "visual_events_dds_bridge_dds_types",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    try:
+        assert build.returncode == 0, build.stderr
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)
 
 
 def test_native_probe_source_references_generated_head_and_gaze_type_props():
@@ -736,7 +955,7 @@ def test_native_abi_harness_outputs_camera_head_and_accepts_python_gaze(
         frame_id=42,
         frame_timestamp_ms=1_710_000_000_000,
         publish_timestamp_ms=1_710_000_000_082,
-        valid=True,
+        valid=gaze_state == "tracking",
         state=gaze_state,
         target_track_id=7,
         target_u=640.0,
@@ -870,6 +1089,200 @@ def test_native_abi_harness_rejects_invalid_gaze_with_fatal_jsonl(
         frame = json.loads(line)
         assert "log" not in frame
         assert "data" not in frame
+
+
+def _canonical_gaze_target_jsonl(state: str = "tracking", valid: bool | None = None) -> str:
+    from visual_events_cli.dds.bridge_protocol import encode_gaze_target_line
+    from visual_events_cli.target_mapper import GazeTargetPayload
+
+    if valid is None:
+        valid = state == "tracking"
+
+    payload = GazeTargetPayload(
+        schema_version=1,
+        camera="front",
+        frame_id=42,
+        frame_timestamp_ms=1_710_000_000_000,
+        publish_timestamp_ms=1_710_000_000_082,
+        valid=valid,
+        state=state,
+        target_track_id=7,
+        target_u=640.0,
+        target_v=360.0,
+        target_norm_x=0.25,
+        target_norm_y=-0.5,
+        image_width=1280,
+        image_height=720,
+        confidence=0.91,
+        reason="nearest",
+        stale_after_ms=250,
+    )
+    return encode_gaze_target_line(payload)
+
+
+def test_native_mapping_harness_maps_camera_and_head_dds_to_jsonl_abi(
+    native_full_bridge_mapping_build,
+):
+    from visual_events_cli.dds.bridge_protocol import BridgeHeadStateFrame
+    from visual_events_cli.dds.bridge_protocol import decode_bridge_line
+    from visual_events_cli.dds.types import CameraJpegMessage
+
+    result = subprocess.run(
+        [os.fspath(native_full_bridge_mapping_build / "visual_events_dds_bridge_mapping_harness")],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    stdout_lines = result.stdout.splitlines()
+    assert len(stdout_lines) == 4
+    raw_frames = [json.loads(line) for line in stdout_lines]
+    assert [frame["type"] for frame in raw_frames] == [
+        "camera_jpeg",
+        "head_state",
+        "head_state",
+        "head_state",
+    ]
+    assert "data" not in raw_frames[0]
+    assert raw_frames[0]["dds_timestamp_ns"] == 123456789
+    assert raw_frames[0]["received_monotonic_ns"] == 987654321
+    assert raw_frames[0]["camera_name"] == "front"
+    assert raw_frames[0]["width"] == 1280
+    assert raw_frames[0]["height"] == 720
+    assert raw_frames[0]["encoding"] == "jpeg"
+    assert raw_frames[0]["step"] == 4096
+    assert raw_frames[0]["data_size_bytes"] == 4
+
+    camera = decode_bridge_line(stdout_lines[0], logical_camera_name="front")
+    assert isinstance(camera, CameraJpegMessage)
+    assert camera.camera == "front"
+    assert camera.data == b"\xff\xd8\xff\xd9"
+
+    heads = [decode_bridge_line(line, logical_camera_name="front") for line in stdout_lines[1:]]
+    assert all(isinstance(head, BridgeHeadStateFrame) for head in heads)
+    assert [head.state for head in heads] == ["stationary", "moving", "unknown"]
+    assert [head.valid for head in heads] == [True, True, False]
+    assert raw_frames[3]["yaw_rad"] == 0.0
+    assert raw_frames[3]["pitch_vel_rad_s"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("gaze_state", "valid"),
+    [
+        ("tracking", True),
+        ("lost", False),
+        ("stale", False),
+        ("disabled", False),
+    ],
+)
+def test_native_mapping_harness_constructs_generated_gaze_target_from_python_jsonl(
+    native_full_bridge_mapping_build,
+    gaze_state: str,
+    valid: bool,
+):
+    line = _canonical_gaze_target_jsonl(gaze_state, valid=valid)
+    result = subprocess.run(
+        [os.fspath(native_full_bridge_mapping_build / "visual_events_dds_bridge_mapping_harness")],
+        cwd=REPO_ROOT,
+        input=line,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    constructed = json.loads(result.stdout.splitlines()[-1])
+    assert constructed == {
+        "protocol_version": 1,
+        "type": "gaze_target_constructed",
+        "schema_version": 1,
+        "camera": "front",
+        "frame_id": 42,
+        "frame_timestamp_ms": 1_710_000_000_000,
+        "publish_timestamp_ms": 1_710_000_000_082,
+        "valid": valid,
+        "state": gaze_state,
+        "target_track_id": 7,
+        "target_u": 640.0,
+        "target_v": 360.0,
+        "target_norm_x": 0.25,
+        "target_norm_y": -0.5,
+        "image_width": 1280,
+        "image_height": 720,
+        "confidence": pytest.approx(0.91),
+        "reason": "nearest",
+        "stale_after_ms": 250,
+    }
+
+
+@pytest.mark.parametrize(
+    ("gaze_state", "valid"),
+    [
+        ("tracking", False),
+        ("lost", True),
+        ("stale", True),
+        ("disabled", True),
+    ],
+)
+def test_native_mapping_harness_rejects_gaze_target_valid_state_mismatch(
+    native_full_bridge_mapping_build,
+    gaze_state: str,
+    valid: bool,
+):
+    line = _canonical_gaze_target_jsonl(gaze_state, valid=valid)
+
+    result = subprocess.run(
+        [os.fspath(native_full_bridge_mapping_build / "visual_events_dds_bridge_mapping_harness")],
+        cwd=REPO_ROOT,
+        input=line,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    error = json.loads(result.stdout.splitlines()[-1])
+    assert error["type"] == "error"
+    assert error["code"] == "invalid_gaze_target"
+    assert error["fatal"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_fragment"),
+    [
+        ("image_width", 2**32, "image_width"),
+        ("target_u", 1e40, "target_u"),
+        ("state", "bogus", "state"),
+        ("schema_version", 2, "schema_version"),
+    ],
+)
+def test_native_mapping_harness_rejects_gaze_target_construction_invalid_inputs(
+    native_full_bridge_mapping_build,
+    field: str,
+    value: object,
+    error_fragment: str,
+):
+    payload = json.loads(_canonical_gaze_target_jsonl())
+    payload[field] = value
+    line = json.dumps(payload, separators=(",", ":")) + "\n"
+
+    result = subprocess.run(
+        [os.fspath(native_full_bridge_mapping_build / "visual_events_dds_bridge_mapping_harness")],
+        cwd=REPO_ROOT,
+        input=line,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    error = json.loads(result.stdout.splitlines()[-1])
+    assert error["type"] == "error"
+    assert error["code"] == "invalid_gaze_target"
+    assert error["fatal"] is True
+    assert error_fragment in error["message"]
 
 
 def test_build_tool_foundation_check_does_not_require_idl_generator(tmp_path, repo_report_path):

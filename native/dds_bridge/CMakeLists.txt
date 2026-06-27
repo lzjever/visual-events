@@ -14,6 +14,7 @@ set(VISUAL_EVENTS_HEAD_STATE_HEADER "" CACHE FILEPATH "Generated head_state_v1.h
 set(VISUAL_EVENTS_HEAD_STATE_SOURCE "" CACHE FILEPATH "Generated head_state_v1.cpp")
 set(VISUAL_EVENTS_GAZE_TARGET_HEADER "" CACHE FILEPATH "Generated gaze_target_v1.hpp")
 set(VISUAL_EVENTS_GAZE_TARGET_SOURCE "" CACHE FILEPATH "Generated gaze_target_v1.cpp")
+set(VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR "" CACHE PATH "CycloneDDS C++ include directory for generated headers")
 
 add_library(visual_events_dds_bridge_contract STATIC
     src/bridge_contract.cpp
@@ -108,6 +109,39 @@ if (VISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE)
     )
     find_package(unitree_sdk2 REQUIRED)
 
+    add_library(visual_events_dds_bridge_dds_types STATIC
+        src/bridge_dds_types.cpp
+    )
+    target_include_directories(visual_events_dds_bridge_dds_types PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${VIDEO_DDS_PUBLISHER_DIR}/include"
+    )
+    target_link_libraries(visual_events_dds_bridge_dds_types PUBLIC
+        visual_events_dds_bridge_abi
+    )
+    if (VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE)
+        target_include_directories(visual_events_dds_bridge_dds_types PUBLIC
+            "${VISUAL_EVENTS_GENERATED_DDS_DIR}"
+        )
+        target_compile_definitions(visual_events_dds_bridge_dds_types PUBLIC
+            VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=1
+        )
+        if (VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR)
+            target_include_directories(visual_events_dds_bridge_dds_types PUBLIC
+                "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}"
+                "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}/.."
+            )
+        endif()
+
+        add_executable(visual_events_dds_bridge_mapping_harness
+            src/mapping_harness_main.cpp
+        )
+        target_link_libraries(visual_events_dds_bridge_mapping_harness PRIVATE
+            visual_events_dds_bridge_dds_types
+        )
+        target_compile_options(visual_events_dds_bridge_mapping_harness PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
     add_executable(visual_events_dds_bridge_probe
         src/probe_main.cpp
         "${CAMERA_FRAME_SOURCE}"
@@ -124,6 +158,12 @@ if (VISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE)
         target_compile_definitions(visual_events_dds_bridge_probe PRIVATE
             VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=1
         )
+        if (VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR)
+            target_include_directories(visual_events_dds_bridge_probe PRIVATE
+                "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}"
+                "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}/.."
+            )
+        endif()
     endif()
     target_link_libraries(visual_events_dds_bridge_probe PRIVATE
         visual_events_dds_bridge_contract

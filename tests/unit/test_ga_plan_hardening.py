@@ -380,6 +380,27 @@ def test_ga_plan_pins_final_review_contracts_without_expanding_scope():
 
 def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     text = read_text(GA_PLAN)
+    current_step4_status = paragraph_containing(text, "当前 repo 已完成 Step 4 first slice/unit core")
+
+    assert_contains_all(
+        current_step4_status,
+        [
+            "Step 4 native generated DDS type/ABI mapping construction slice 已完成",
+            "`CameraFrame_ -> CameraJpegFrame`",
+            "`HeadStateV1_ -> HeadStateFrame`",
+            "`GazeTargetFrame -> GazeTargetV1_`",
+            "camera/head/gaze field mapping",
+            "head state derived stationary/moving/unknown",
+            "gaze valid/state consistency",
+            "finite/range checks",
+            "mapping harness 不启 DDS 网络、不调用 Unitree Channel",
+            "真实 DDS backend/factories/adapters",
+            "Unitree Channel reader/writer runtime",
+            "real DDS serialization over wire/QoS",
+            "PC E2E tools",
+            "仍未完成",
+        ],
+    )
 
     assert_contains_all(
         text,
@@ -510,6 +531,17 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "ABI harness 复用同一 core 产出 fake camera/head",
             "消费 Python canonical `gaze_target`",
             "parser 严格 canonical fields + state 闭集",
+            "Step 4 native generated DDS type/ABI mapping construction slice 已完成",
+            "`CameraFrame_ -> CameraJpegFrame`",
+            "foundation camera mapping 可无 generated Head/Gaze",
+            "full-bridge mapping harness 编译 generated Head/Gaze",
+            "`HeadStateV1_ -> HeadStateFrame`",
+            "`GazeTargetFrame -> GazeTargetV1_`",
+            "camera/head/gaze field mapping",
+            "head state derived stationary/moving/unknown",
+            "gaze valid/state consistency",
+            "finite/range checks",
+            "mapping harness 不启 DDS 网络、不调用 Unitree Channel",
             "real serialization/QoS",
             "真实 DDS runtime/PC E2E/RK/真机仍未完成",
             "`service_client`：WebSocket wire/pack-unpack、连接复用/关闭、timeout、invalid response、frame_id mismatch、retryable/non-retryable error handling 的单元核心",
@@ -563,12 +595,14 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "fake camera/head",
             "Python canonical `gaze_target`",
             "canonical fields + state 闭集",
+            "native generated DDS type/ABI mapping construction slice",
+            "验证 camera/head/gaze field mapping、head state derived stationary/moving/unknown、gaze valid/state consistency + finite/range checks",
             "`tools/build_dds_bridge.py` foundation gate 可在无 IDL generator 时通过并报告 `foundation_ready=true`",
             "`tools/prepare_dds_codegen_toolchain.py --prepare` 可在 ignored `build/tools/cyclonedds-cxx-idlc-0.10.2/` 下准备 pinned idlc wrapper 并复用 Head/Gaze codegen oracle",
             "`--probe-codegen` 和 `tools/build_dds_bridge.py --check-full-bridge` 会实际运行 C++ idlc probe",
             "默认验证 `head_state_v1.idl` 和 `gaze_target_v1.idl` 都生成 expected `.hpp/.cpp`",
             "拒绝版本不是 0.10.2、`cannot load generator cxx`、任一 IDL 只生成 `.hpp` 或缺 `.cpp` 的假阳性",
-            "full bridge runtime、real DDS factories/adapters、real serialization/QoS tests / construction tests、PC E2E tools、release/runtime 真跑、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
+            "真实 DDS backend/factories/adapters、Unitree Channel reader/writer runtime、real DDS serialization over wire/QoS behavior、PC E2E tools、release/runtime 真跑、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
             "CLI 当前 PC gate 必须有 unit、integration、PC local E2E 和 fault matrix",
             "真机 smoke/closed-loop 是 deferred hardware/field gate",
         ],
