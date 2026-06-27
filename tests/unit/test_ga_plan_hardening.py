@@ -660,6 +660,15 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "不启动 DDS participant",
             "不读取 val-data",
             "不做 runner/report",
+            "Step 5 CLI runtime + mock visual_state server integration slice 已完成",
+            "`tests/integration/test_cli_bridge_runtime_mock_server.py`",
+            "真实 `bridge_runtime_factories()`/`run_runtime`",
+            "fake JSONL bridge child",
+            "mock server subprocess",
+            "event Botified stdout allowlist",
+            "tracking/lost/stale gaze",
+            "不使用 DDS participant、`val-data` 或 real server",
+            "不能替代 full E2E 或正式 CLI + real server + `val-data` GA gate",
             "剩余是正式 full CLI+real server 编排的完整 PC local E2E GA gate",
             "全量 `val-data` scene matrix",
             "manifest/oracle",
@@ -819,7 +828,7 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
     assert_contains_all(
         remaining_gap,
         [
-            "native PC DDS over-wire test participants、Python native participant wrappers、Step 5 manifest reader/report skeleton slice、mock visual_state server slice 和 run_cli_local_e2e partial smoke runner slice 已完成",
+            "native PC DDS over-wire test participants、Python native participant wrappers、Step 5 manifest reader/report skeleton slice、mock visual_state server slice、CLI runtime + mock visual_state server integration slice 和 run_cli_local_e2e partial smoke runner slice 已完成",
             "完整 PC 本地 DDS E2E GA gate 仍未完成",
             "正式 full CLI+real server 编排覆盖 stdout/Botified",
             "全量 `val-data` scene matrix",
@@ -831,7 +840,7 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
             "`/camera/image/jpeg` -> bridge/CLI -> server -> `/visual_events/gaze_target` over wire",
             "manifest skeleton 只做数据集身份和报告骨架",
             "partial smoke runner 只证明 real server + CLI bridge runtime + DDS participant plumbing",
-            "mock visual_state server 只覆盖 CLI deterministic/failure-path",
+            "mock visual_state server 和 CLI runtime + mock server integration 只覆盖 CLI deterministic/failure-path",
             "native runtime loop core 和 full-bridge wiring 已完成",
             "不能替代这个端到端 gate",
             "DDS discovery/real serialization over wire/QoS behavior 的完整测试矩阵",
@@ -926,6 +935,14 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "不读取 val-data",
             "不做 runner/report",
             "不能替代 full E2E 或正式 CLI + real server + `val-data` GA gate",
+            "Step 5 CLI runtime + mock visual_state server integration slice 已完成",
+            "`tests/integration/test_cli_bridge_runtime_mock_server.py`",
+            "真实 `bridge_runtime_factories()`/`run_runtime`",
+            "fake JSONL bridge child",
+            "mock server subprocess",
+            "event Botified stdout allowlist",
+            "tracking/lost/stale gaze",
+            "不使用 DDS participant、`val-data` 或 real server",
             "Step 5 run_cli_local_e2e partial smoke runner slice 已完成",
             "`tools/run_cli_local_e2e.py`",
             "复用 manifest skeleton",
@@ -982,7 +999,23 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "Step 5 mock visual_state server slice 已完成",
             "`tools/cli_local_e2e_manifest.py`",
             "本机 ignored `val-data` 当前可识别 7 scene / 576 frames",
-            "剩余是正式 full CLI+real server 编排的完整 PC local E2E GA gate、全量 `val-data` scene matrix、manifest/oracle、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff 仍未完成",
+        ],
+    )
+    mock_runtime_integration = paragraph_containing(
+        text,
+        "Step 5 CLI runtime + mock visual_state server integration slice 已完成",
+    )
+    assert_contains_all(
+        mock_runtime_integration,
+        [
+            "`tests/integration/test_cli_bridge_runtime_mock_server.py`",
+            "真实 `bridge_runtime_factories()`/`run_runtime`",
+            "fake JSONL bridge child",
+            "mock server subprocess",
+            "event Botified stdout allowlist",
+            "tracking/lost/stale gaze",
+            "不使用 DDS participant、`val-data` 或 real server",
+            "不能替代 full E2E 或正式 CLI + real server + `val-data` GA gate",
         ],
     )
 
