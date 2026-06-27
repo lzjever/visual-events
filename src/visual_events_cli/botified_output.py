@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections import deque
-from typing import Any
+from typing import Any, TextIO
 
 
 BOTIFIED_ALLOWED_EVENTS = (
@@ -84,6 +85,52 @@ class BotifiedEventMapper:
         while len(self._seen_order) > self._max_seen_event_ids:
             expired_event_id = self._seen_order.popleft()
             self._seen_event_ids.discard(expired_event_id)
+
+
+class BotifiedPipeClosed(Exception):
+    """Raised when Botified stdout closes while frames are being written."""
+
+
+class BotifiedStdoutWriter:
+    def __init__(
+        self,
+        *,
+        stream: TextIO | None = None,
+        max_queue_size: int = 32,
+    ) -> None:
+        self._stream = stream or sys.stdout
+        self._max_queue_size = max(0, int(max_queue_size))
+        self._queue: deque[str] = deque()
+        self._queued_frames: set[str] = set()
+        self.dropped_count = 0
+
+    def enqueue(self, frame: str) -> bool:
+        if frame in self._queued_frames:
+            self.dropped_count += 1
+            return False
+
+        if self._max_queue_size == 0:
+            self.dropped_count += 1
+            return False
+
+        while len(self._queue) >= self._max_queue_size:
+            dropped = self._queue.popleft()
+            self._queued_frames.discard(dropped)
+            self.dropped_count += 1
+
+        self._queue.append(frame)
+        self._queued_frames.add(frame)
+        return True
+
+    def drain_available(self) -> None:
+        try:
+            while self._queue:
+                frame = self._queue.popleft()
+                self._queued_frames.discard(frame)
+                self._stream.write(frame + "\n")
+                self._stream.flush()
+        except BrokenPipeError as exc:
+            raise BotifiedPipeClosed("botified stdout closed") from exc
 
 
 def _format_request(event: dict[str, Any]) -> str:

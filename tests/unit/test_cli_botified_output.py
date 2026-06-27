@@ -197,3 +197,55 @@ def test_invalid_event_id_is_filtered_not_repaired(event_id):
 
     assert module.format_botified_frame(event) is None
     assert module.BotifiedEventMapper().frames_from_visual_state(visual_state) == []
+
+
+class SlowTextStream:
+    def __init__(self):
+        self.lines: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.lines.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+
+class BrokenTextStream:
+    def write(self, text: str) -> int:
+        raise BrokenPipeError("botified stdout closed")
+
+    def flush(self) -> None:
+        return None
+
+
+def test_stdout_writer_bounded_queue_drops_or_coalesces_duplicates_without_blocking():
+    module = import_botified_output()
+    stream = SlowTextStream()
+    writer = module.BotifiedStdoutWriter(stream=stream, max_queue_size=2)
+
+    duplicate = module.format_botified_frame(semantic_event(event_id="front:evt_000001"))
+    newer = module.format_botified_frame(semantic_event(event_id="front:evt_000002"))
+    newest = module.format_botified_frame(semantic_event(event_id="front:evt_000003"))
+    assert duplicate is not None and newer is not None and newest is not None
+
+    assert writer.enqueue(duplicate) is True
+    assert writer.enqueue(duplicate) is False
+    assert writer.enqueue(newer) is True
+    assert writer.enqueue(newest) is True
+
+    writer.drain_available()
+
+    assert stream.lines == [newer + "\n", newest + "\n"]
+    assert writer.dropped_count == 2
+
+
+def test_stdout_writer_reports_broken_pipe_as_specific_exception():
+    module = import_botified_output()
+    writer = module.BotifiedStdoutWriter(stream=BrokenTextStream(), max_queue_size=2)
+    frame = module.format_botified_frame(semantic_event(event_id="front:evt_000001"))
+    assert frame is not None
+    writer.enqueue(frame)
+
+    with pytest.raises(module.BotifiedPipeClosed):
+        writer.drain_available()
