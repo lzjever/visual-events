@@ -245,7 +245,11 @@ def test_protocol_pins_cli_frame_id_stale_watchdog_and_botified_allowlist():
             "`attention_target_changed` 只保留在 `visual_state.semantic_events`",
             "stdout 写入不得阻塞 gaze stale watchdog",
             "bounded queue/drop/coalescing",
-            "BrokenPipe fail behavior",
+            "固定 BrokenPipe 行为",
+            "受控非 0 退出",
+            "不实现 Botified 业务 rate limiter",
+            "由 server semantic event engine 的 rising-edge、cooldown、dedupe 规则产生",
+            "由 PC/现场 report gate 验收",
         ],
     )
 

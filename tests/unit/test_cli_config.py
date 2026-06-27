@@ -42,14 +42,25 @@ def assert_default_config(config: Any) -> None:
     assert config.head_state.required is True
     assert config.head_state.topic == "/robot/head_state"
     assert config.head_state.stale_ms == 250
+    assert config.head_state.stationary_yaw_vel_rad_s == 0.03
+    assert config.head_state.stationary_pitch_vel_rad_s == 0.03
+    assert config.head_state.report_segments == ("stationary", "moving", "unknown")
     assert config.service.url == "ws://127.0.0.1:8765/v1/stream"
     assert config.service.response_timeout_ms == 1000
     assert config.service.reconnect_min_ms == 200
     assert config.service.reconnect_max_ms == 3000
+    assert config.gaze_target.enabled is True
     assert config.gaze_target.topic == "/visual_events/gaze_target"
     assert config.gaze_target.stale_ms == 250
+    assert config.gaze_target.publish_invalid_on_loss is True
+    assert config.botified.enabled is True
+    assert config.botified.stdout is True
+    assert config.botified.event_ttl_secs == 8
     assert set(config.botified.allowed_events) == EXPECTED_BOTIFIED_EVENTS
     assert len(config.botified.allowed_events) == len(EXPECTED_BOTIFIED_EVENTS)
+    assert config.botified.stdout_queue_max == 32
+    assert config.botified.stdout_drop_policy == "drop_oldest_duplicate_event"
+    assert config.botified.broken_pipe == "publish_stale_then_exit_nonzero"
     assert config.logging.stderr_level == "info"
 
 
@@ -79,6 +90,9 @@ enabled = false
 required = false
 topic = "/robot/custom_head_state"
 stale_ms = 500
+stationary_yaw_vel_rad_s = 0.04
+stationary_pitch_vel_rad_s = 0.05
+report_segments = ["moving", "unknown"]
 
 [service]
 url = "ws://10.0.0.1:8765/v1/stream"
@@ -87,11 +101,19 @@ reconnect_min_ms = 100
 reconnect_max_ms = 2000
 
 [gaze_target]
+enabled = false
 topic = "/visual_events/custom_gaze"
 stale_ms = 400
+publish_invalid_on_loss = false
 
 [botified]
+enabled = false
+stdout = false
+event_ttl_secs = 9
 allowed_events = ["person_appeared", "person_waving"]
+stdout_queue_max = 7
+stdout_drop_policy = "drop_oldest_duplicate_event"
+broken_pipe = "publish_stale_then_exit_nonzero"
 
 [logging]
 stderr_level = "debug"
@@ -111,16 +133,27 @@ jsonl_path = "{log_path}"
     assert config.head_state.required is False
     assert config.head_state.topic == "/robot/custom_head_state"
     assert config.head_state.stale_ms == 500
+    assert config.head_state.stationary_yaw_vel_rad_s == 0.04
+    assert config.head_state.stationary_pitch_vel_rad_s == 0.05
+    assert config.head_state.report_segments == ("moving", "unknown")
     assert config.service.url == "ws://10.0.0.1:8765/v1/stream"
     assert config.service.response_timeout_ms == 1500
     assert config.service.reconnect_min_ms == 100
     assert config.service.reconnect_max_ms == 2000
+    assert config.gaze_target.enabled is False
     assert config.gaze_target.topic == "/visual_events/custom_gaze"
     assert config.gaze_target.stale_ms == 400
+    assert config.gaze_target.publish_invalid_on_loss is False
+    assert config.botified.enabled is False
+    assert config.botified.stdout is False
+    assert config.botified.event_ttl_secs == 9
     assert config.botified.allowed_events == (
         "person_appeared",
         "person_waving",
     )
+    assert config.botified.stdout_queue_max == 7
+    assert config.botified.stdout_drop_policy == "drop_oldest_duplicate_event"
+    assert config.botified.broken_pipe == "publish_stale_then_exit_nonzero"
     assert config.logging.stderr_level == "debug"
     assert config.logging.jsonl_path == log_path
 
@@ -227,6 +260,28 @@ allowed_events = ["person_appeared", "attention_target_changed"]
     )
 
     with pytest.raises(config_error(module), match="allowed_events"):
+        module.load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ("[head_state]\nstationary_yaw_vel_rad_s = -0.01\n", "stationary_yaw"),
+        ("[head_state]\nstationary_pitch_vel_rad_s = -0.01\n", "stationary_pitch"),
+        ("[head_state]\nreport_segments = []\n", "report_segments"),
+        ("[head_state]\nreport_segments = [\"stationary\", \"bad\"]\n", "report_segments"),
+        ("[botified]\nevent_ttl_secs = 0\n", "event_ttl_secs"),
+        ("[botified]\nstdout_queue_max = 0\n", "stdout_queue_max"),
+        ("[botified]\nstdout_drop_policy = \"drop_newest\"\n", "stdout_drop_policy"),
+        ("[botified]\nbroken_pipe = \"fail_fast\"\n", "broken_pipe"),
+    ],
+)
+def test_load_config_rejects_invalid_ga_config_fields(tmp_path, body, expected):
+    module = import_config_module()
+    config_path = tmp_path / "cli.toml"
+    config_path.write_text(body, encoding="utf-8")
+
+    with pytest.raises(config_error(module), match=expected):
         module.load_config(config_path)
 
 

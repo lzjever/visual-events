@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -40,6 +41,9 @@ class HeadStateConfig:
     required: bool = True
     topic: str = "/robot/head_state"
     stale_ms: int = 250
+    stationary_yaw_vel_rad_s: float = 0.03
+    stationary_pitch_vel_rad_s: float = 0.03
+    report_segments: tuple[str, ...] = ("stationary", "moving", "unknown")
 
 
 @dataclass(frozen=True)
@@ -52,13 +56,21 @@ class ServiceConfig:
 
 @dataclass(frozen=True)
 class GazeTargetConfig:
+    enabled: bool = True
     topic: str = "/visual_events/gaze_target"
     stale_ms: int = 250
+    publish_invalid_on_loss: bool = True
 
 
 @dataclass(frozen=True)
 class BotifiedConfig:
+    enabled: bool = True
+    stdout: bool = True
+    event_ttl_secs: int = 8
     allowed_events: tuple[str, ...] = ALLOWED_BOTIFIED_EVENTS
+    stdout_queue_max: int = 32
+    stdout_drop_policy: str = "drop_oldest_duplicate_event"
+    broken_pipe: str = "publish_stale_then_exit_nonzero"
 
 
 @dataclass(frozen=True)
@@ -259,12 +271,42 @@ def _parse_head_state(
     data: dict[str, Any],
     defaults: HeadStateConfig,
 ) -> HeadStateConfig:
-    _reject_unknown_keys(data, "head_state", {"enabled", "required", "topic", "stale_ms"})
+    _reject_unknown_keys(
+        data,
+        "head_state",
+        {
+            "enabled",
+            "required",
+            "topic",
+            "stale_ms",
+            "stationary_yaw_vel_rad_s",
+            "stationary_pitch_vel_rad_s",
+            "report_segments",
+        },
+    )
     return HeadStateConfig(
         enabled=_as_bool(data.get("enabled", defaults.enabled), "head_state.enabled"),
         required=_as_bool(data.get("required", defaults.required), "head_state.required"),
         topic=_as_str(data.get("topic", defaults.topic), "head_state.topic"),
         stale_ms=_as_int(data.get("stale_ms", defaults.stale_ms), "head_state.stale_ms"),
+        stationary_yaw_vel_rad_s=_as_float(
+            data.get(
+                "stationary_yaw_vel_rad_s",
+                defaults.stationary_yaw_vel_rad_s,
+            ),
+            "head_state.stationary_yaw_vel_rad_s",
+        ),
+        stationary_pitch_vel_rad_s=_as_float(
+            data.get(
+                "stationary_pitch_vel_rad_s",
+                defaults.stationary_pitch_vel_rad_s,
+            ),
+            "head_state.stationary_pitch_vel_rad_s",
+        ),
+        report_segments=_as_str_tuple(
+            data.get("report_segments", defaults.report_segments),
+            "head_state.report_segments",
+        ),
     )
 
 
@@ -300,22 +342,64 @@ def _parse_gaze_target(
     data: dict[str, Any],
     defaults: GazeTargetConfig,
 ) -> GazeTargetConfig:
-    _reject_unknown_keys(data, "gaze_target", {"topic", "stale_ms"})
+    _reject_unknown_keys(
+        data,
+        "gaze_target",
+        {"enabled", "topic", "stale_ms", "publish_invalid_on_loss"},
+    )
     return GazeTargetConfig(
+        enabled=_as_bool(data.get("enabled", defaults.enabled), "gaze_target.enabled"),
         topic=_as_str(data.get("topic", defaults.topic), "gaze_target.topic"),
         stale_ms=_as_int(data.get("stale_ms", defaults.stale_ms), "gaze_target.stale_ms"),
+        publish_invalid_on_loss=_as_bool(
+            data.get(
+                "publish_invalid_on_loss",
+                defaults.publish_invalid_on_loss,
+            ),
+            "gaze_target.publish_invalid_on_loss",
+        ),
     )
 
 
 def _parse_botified(data: dict[str, Any], defaults: BotifiedConfig) -> BotifiedConfig:
-    _reject_unknown_keys(data, "botified", {"allowed_events"})
+    _reject_unknown_keys(
+        data,
+        "botified",
+        {
+            "enabled",
+            "stdout",
+            "event_ttl_secs",
+            "allowed_events",
+            "stdout_queue_max",
+            "stdout_drop_policy",
+            "broken_pipe",
+        },
+    )
     allowed_events = data.get("allowed_events", defaults.allowed_events)
     if isinstance(allowed_events, str) or not isinstance(allowed_events, (list, tuple)):
         raise ConfigError("botified.allowed_events must be a list")
     return BotifiedConfig(
+        enabled=_as_bool(data.get("enabled", defaults.enabled), "botified.enabled"),
+        stdout=_as_bool(data.get("stdout", defaults.stdout), "botified.stdout"),
+        event_ttl_secs=_as_int(
+            data.get("event_ttl_secs", defaults.event_ttl_secs),
+            "botified.event_ttl_secs",
+        ),
         allowed_events=tuple(
             _as_str(event, "botified.allowed_events") for event in allowed_events
-        )
+        ),
+        stdout_queue_max=_as_int(
+            data.get("stdout_queue_max", defaults.stdout_queue_max),
+            "botified.stdout_queue_max",
+        ),
+        stdout_drop_policy=_as_str(
+            data.get("stdout_drop_policy", defaults.stdout_drop_policy),
+            "botified.stdout_drop_policy",
+        ),
+        broken_pipe=_as_str(
+            data.get("broken_pipe", defaults.broken_pipe),
+            "botified.broken_pipe",
+        ),
     )
 
 
@@ -351,12 +435,18 @@ def _as_bool(value: Any, name: str) -> bool:
 
 
 def _as_int(value: Any, name: str) -> int:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigError(f"{name} must be an integer")
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError(f"{name} must be an integer") from exc
+    return value
+
+
+def _as_float(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{name} must be a number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ConfigError(f"{name} must be finite")
+    return result
 
 
 def _as_str(value: Any, name: str) -> str:
@@ -379,12 +469,27 @@ def _as_optional_path(value: Any, name: str) -> Path | None:
     return Path(value)
 
 
+def _as_str_tuple(value: Any, name: str) -> tuple[str, ...]:
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise ConfigError(f"{name} must be a list")
+    return tuple(_as_str(item, name) for item in value)
+
+
 def _validate_config(config: CliConfig) -> None:
     _validate_nonnegative(config.dds.domain, "dds.domain")
     _validate_positive(config.camera.hz, "camera.hz")
     _validate_topic(config.camera.image_topic, "camera.image_topic")
     _validate_topic(config.head_state.topic, "head_state.topic")
     _validate_positive(config.head_state.stale_ms, "head_state.stale_ms")
+    _validate_nonnegative(
+        config.head_state.stationary_yaw_vel_rad_s,
+        "head_state.stationary_yaw_vel_rad_s",
+    )
+    _validate_nonnegative(
+        config.head_state.stationary_pitch_vel_rad_s,
+        "head_state.stationary_pitch_vel_rad_s",
+    )
+    _validate_report_segments(config.head_state.report_segments)
     _validate_positive(
         config.service.response_timeout_ms,
         "service.response_timeout_ms",
@@ -398,7 +503,17 @@ def _validate_config(config: CliConfig) -> None:
         )
     _validate_topic(config.gaze_target.topic, "gaze_target.topic")
     _validate_positive(config.gaze_target.stale_ms, "gaze_target.stale_ms")
+    _validate_positive(config.botified.event_ttl_secs, "botified.event_ttl_secs")
+    _validate_positive(config.botified.stdout_queue_max, "botified.stdout_queue_max")
     _validate_allowed_events(config.botified.allowed_events)
+    if config.botified.stdout_drop_policy != "drop_oldest_duplicate_event":
+        raise ConfigError(
+            "botified.stdout_drop_policy must be drop_oldest_duplicate_event"
+        )
+    if config.botified.broken_pipe != "publish_stale_then_exit_nonzero":
+        raise ConfigError(
+            "botified.broken_pipe must be publish_stale_then_exit_nonzero"
+        )
 
     level = config.logging.stderr_level.lower()
     if level not in _LOG_LEVELS:
@@ -417,9 +532,19 @@ def _validate_positive(value: int, name: str) -> None:
         raise ConfigError(f"{name} must be positive")
 
 
-def _validate_nonnegative(value: int, name: str) -> None:
+def _validate_nonnegative(value: int | float, name: str) -> None:
     if value < 0:
         raise ConfigError(f"{name} must be non-negative")
+
+
+def _validate_report_segments(segments: tuple[str, ...]) -> None:
+    if not segments:
+        raise ConfigError("head_state.report_segments must be non-empty")
+    allowed = {"stationary", "moving", "unknown"}
+    unknown = sorted(set(segments) - allowed)
+    if unknown:
+        joined = ", ".join(unknown)
+        raise ConfigError(f"head_state.report_segments contains unsupported segments: {joined}")
 
 
 def _validate_allowed_events(events: tuple[str, ...]) -> None:

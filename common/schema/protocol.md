@@ -233,7 +233,10 @@ CLI 只负责：
 
 - 按 `event_id` 做 Botified 输出幂等保护。
 - 按 Botified stdout allowlist 把事件事实转换为 Botified request frame。
-- 不重新实现事件规则，不根据 attention 高频状态生成 Botified 事件。
+- 做 stdout writer 背压处理。
+- 不重新实现事件规则，不根据 attention 高频状态生成 Botified 事件，不实现 Botified 业务 rate limiter。
+
+Botified 每 track/event/min 和全局事件/min 上限由 server semantic event engine 的 rising-edge、cooldown、dedupe 规则产生，并由 PC/现场 report gate 验收；CLI writer 只做 `event_id` 幂等、allowlist 和背压。
 
 Botified stdout allowlist：
 
@@ -295,4 +298,4 @@ CLI stdout 默认只输出 Botified allowlist frame：
 
 日志、调试状态、性能指标走 stderr 或文件。`--debug-json-stdout` 只能用于手工调试，不能用于 Botified task。
 
-stdout 写入不得阻塞 gaze stale watchdog。CLI 必须使用 bounded queue/drop/coalescing，或定义并测试 BrokenPipe fail behavior；stdout 慢、pipe close 或 Botified 未读取时，CLI 不能无界排队，也不能延迟 `valid=false,state=stale` gaze target。
+stdout 写入不得阻塞 gaze stale watchdog。CLI 必须使用 bounded queue/drop/coalescing，并固定 BrokenPipe 行为：尽力发布一次 `valid=false,state=stale` 后受控非 0 退出；stdout 慢、pipe close 或 Botified 未读取时，CLI 不能无界排队，也不能延迟 `valid=false,state=stale` gaze target。
