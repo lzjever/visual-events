@@ -77,6 +77,7 @@ Required rules:
 - Bridge stdout emits `camera_jpeg`, `head_state`, `status`, and `error` messages for the Python CLI.
 - Bridge stdin accepts `gaze_target` messages from the Python CLI.
 - Message timestamps include monotonic timestamps/ns for freshness decisions. Wall-clock timestamps may be carried only when the DDS contract requires them.
+- `received_monotonic_ns` must be sampled from the same OS monotonic clock domain as Python `time.monotonic_ns()` / `CLOCK_MONOTONIC`. The Python client uses this assumption to convert bridge receive time into its wall-clock freshness domain. If a bridge cannot guarantee the same OS monotonic clock domain, it must expose a tested conversion or fail compatibility/probe; do not silently mix clock domains.
 - Camera/head inputs use latest-only semantics with bounded queue/backpressure. Old samples may be dropped; unbounded buffering is forbidden.
 - Logs go to stderr only. stdout is reserved for protocol frames.
 - Fatal DDS init/runtime errors exit nonzero and emit a final `error` message when possible.
@@ -122,7 +123,7 @@ Minimum `gaze_target` stdin fields align directly to `GazeTargetPayload` / `Gaze
 
 The bridge publishes `gaze_target` to DDS without renaming these canonical fields. `received_monotonic_ns` is only for inbound `camera_jpeg` and `head_state`; outbound gaze samples do not add a bridge-specific monotonic timestamp field.
 
-Minimum `head_state` stdout fields are `protocol_version`, `type`, `dds_timestamp_ns`, `received_monotonic_ns`, `valid`, `state`, and the head angle/velocity fields needed by the existing CLI head-motion mapper. Minimum `status` fields are `protocol_version`, `type`, `code`, and `message`. Minimum `error` fields are `protocol_version`, `type`, `code`, `message`, and `fatal`.
+Minimum `head_state` stdout fields are `protocol_version`, `type`, `dds_timestamp_ns`, `received_monotonic_ns`, `valid`, `state`, and the head angle/velocity fields needed by the existing CLI head-motion mapper. For head freshness, `received_monotonic_ns` is authoritative and must follow the same OS monotonic clock domain rule above; `dds_timestamp_ns` is still required for source observability but must not be used to mix incompatible clocks. Minimum `status` fields are `protocol_version`, `type`, `code`, and `message`. Minimum `error` fields are `protocol_version`, `type`, `code`, `message`, and `fatal`.
 
 ## Tests Required Before PC E2E
 
