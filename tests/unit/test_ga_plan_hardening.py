@@ -206,6 +206,27 @@ def test_ga_plan_pins_head_state_latency_botified_and_runtime_hard_gates():
     assert "required_for_ga" not in text
 
 
+def test_ga_plan_documents_current_runtime_smoke_without_stale_local_failure():
+    text = read_text(GA_PLAN)
+
+    assert_contains_all(
+        text,
+        [
+            "`tools/run_runtime_smoke.py`",
+            "`uv sync --frozen --no-dev --no-editable --extra inference --reinstall-package visual-events-server`",
+            "repo-local `runtime/cache/uv`",
+            "repo-local `runtime/venv`",
+            "server + CLI runtime provenance",
+            "CLI import check",
+            "server `/healthz` identity",
+            "`runtime_hash=null`",
+            "`runtime_provenance_not_run:sync_failed`",
+        ],
+    )
+    assert "runtime/venv/bin/visual-events-cli` 缺失失败" not in text
+    assert "当前本机真实 preflight 用 `runtime/venv/bin/...`" not in text
+
+
 def test_ga_plan_freezes_head_state_contract_and_dds_stack_decision_record():
     text = read_text(GA_PLAN)
 
@@ -1013,24 +1034,12 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "Step 5 Python native participant wrappers slice 已完成",
             "Step 5 manifest reader/report skeleton slice 已完成",
             "`pc_local_e2e_status=not_run`",
-            "Step 5 run_cli_local_e2e partial smoke runner slice 已完成",
-            "`tools/run_cli_local_e2e.py`",
-            'additive `report["botified_stdout"]`',
-            "runner 默认 required head-state segments 为 `stationary,moving,unknown`",
-            "`--head-state` 单段兼容 shortcut",
-            "head-state report 写 nested `head_state.required`",
-            "`head_state_segments`",
-            "mapped_state/mapped_valid/dds_valid",
-            "CLI stderr 保留为 diagnostics，不计入 stdout pollution",
-            "forbidden event（例如 `attention_target_changed`）",
-            "truncated/incomplete untrustworthy collection",
-            "`pc_local_e2e_status=partial_smoke_pass`",
-            "`slice_pass=true`",
+            "Step 5 partial smoke runner 状态详见 Step 5 canonical 状态段",
+            "当前只声明 partial smoke",
+            "不是 full PC gate",
+            "`overall_pass=false`",
             "`ga_gate_pass=false`",
-            "`frame_count=3`",
-            "三段 gaze subscriber 各收到 1 条 `state=lost`、payload `valid=false` sample",
-            "runner 仍不使用 val-data oracle 作为 full matrix",
-            "不证明 full PC gate、full event oracle、Botified 端到端业务、latency、soak、fault matrix、release report、RK/board 或 real robot",
+            "未覆盖项",
             "Step 5 mock visual_state server slice 已完成",
             "`tools/cli_local_e2e_manifest.py`",
             "本机 ignored `val-data` 当前可识别 7 scene / 576 frames",
@@ -1113,36 +1122,36 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
         for line in text.splitlines()
         if "Step 5 run_cli_local_e2e partial smoke runner slice 已完成" in line
     ]
-    assert len(repeated_partial_smoke_descriptions) == 3
-    for line in repeated_partial_smoke_descriptions:
-        assert_contains_all(
-            line,
-            [
-                "Runtime provenance hard gate 已完成",
-                "`runtime/venv/bin/visual-events-server`",
-                "`runtime/venv/bin/visual-events-cli`",
-                "同一个 installed `visual-events-server` dist-info",
-                "METADATA Name/Version 匹配 pyproject",
-                "entry_points.txt 含两个 console_scripts",
-                "RECORD 中两个 script row sha256 digest 匹配",
-                "editable direct_url、multiple matching dist-info/metadata invalid/missing/mismatch 会 fail",
-                "nested `runtime_provenance`",
-                "`server_bin_is_runtime_venv`",
-                "`cli_bin_is_runtime_venv`",
-                "`wheel_name`",
-                "`wheel_version`",
-                "`runtime_hash`",
-                "`config_hash`",
-                "`server_exit_code`",
-                "`cli_exit_code`",
-                "canonical runtime evidence",
-                "不 hash 整个 venv",
-                "server/CLI unexpected exit code 会 fail partial slice",
-                "当前本机真实 preflight 用 `runtime/venv/bin/...`",
-                "`runtime/venv/bin/visual-events-cli` 缺失失败",
-                "不是 runtime smoke pass",
-            ],
-        )
+    assert len(repeated_partial_smoke_descriptions) == 1
+    assert_contains_all(
+        repeated_partial_smoke_descriptions[0],
+        [
+            "Runtime provenance hard gate 已完成",
+            "`runtime/venv/bin/visual-events-server`",
+            "`runtime/venv/bin/visual-events-cli`",
+            "同一个 installed `visual-events-server` dist-info",
+            "METADATA Name/Version 匹配 pyproject",
+            "entry_points.txt 含两个 console_scripts",
+            "RECORD 中两个 script row sha256 digest/size 匹配",
+            "absolute RECORD script path、重复 script row",
+            "runtime/venv realpath 必须仍在 repo 内",
+            "editable direct_url、multiple matching dist-info/metadata invalid/missing/mismatch 会 fail",
+            "runtime server/CLI 使用 scrubbed Python env",
+            "nested `runtime_provenance`",
+            "`server_bin_is_runtime_venv`",
+            "`cli_bin_is_runtime_venv`",
+            "`wheel_name`",
+            "`wheel_version`",
+            "`runtime_hash`",
+            "`config_hash`",
+            "`server_exit_code`",
+            "`cli_exit_code`",
+            "canonical runtime evidence",
+            "不 hash 整个 venv",
+            "server/CLI unexpected exit code 会 fail partial slice",
+        ],
+    )
+    assert "详见 Step 5 canonical 状态段" in text
     assert "`pc_local_e2e_status=not_run`" not in partial_smoke_runner
 
     assert "本机真实三段 partial smoke 已通过" not in text

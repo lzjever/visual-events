@@ -101,6 +101,7 @@ class FakeRunner:
         self.events: list[tuple[str, str]] = []
         self.started: dict[str, FakeProcess] = {}
         self.commands: dict[str, list[str]] = {}
+        self.envs: dict[str, dict[str, str]] = {}
         self.health_urls: list[str] = []
         self._next_pid = 1001
 
@@ -130,7 +131,7 @@ class FakeRunner:
         env: dict[str, str],
         name: str,
     ) -> FakeProcess:
-        del cwd, env
+        del cwd
         result = self._lookup_result(self.process_results, name) or FakeResult(0)
         process = FakeProcess(
             name,
@@ -146,6 +147,7 @@ class FakeRunner:
         self._next_pid += 1
         self.started[name] = process
         self.commands[name] = command
+        self.envs[name] = env
         self.events.append(("start", name))
         return process
 
@@ -158,8 +160,9 @@ class FakeRunner:
         name: str,
         timeout_s: float | None = None,
     ) -> FakeResult:
-        del cwd, env, timeout_s
+        del cwd, timeout_s
         self.commands[name] = command
+        self.envs[name] = env
         self.events.append(("run_sync", name))
         return self._lookup_result(self.sync_results, name) or FakeResult(0)
 
@@ -710,6 +713,41 @@ def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Pat
         "--head-state-topic",
         "/robot/head_state",
     ]
+
+
+def test_runtime_server_and_cli_do_not_inherit_ambient_python_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", "/sentinel-home")
+    monkeypatch.setenv("PYTHONPATH", "/ambient/source")
+    monkeypatch.setenv("PYTHONHOME", "/ambient/python")
+    monkeypatch.setenv("PYTHONUSERBASE", "/ambient/userbase")
+    monkeypatch.setenv("VIRTUAL_ENV", "/ambient/venv")
+    monkeypatch.setenv("VIRTUAL_ENV_PROMPT", "(ambient)")
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", "/ambient/python")
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(base_argv(paths, "--head-state", "stationary"), runner=runner)
+
+    assert rc == 0
+    for name in ("server", "cli"):
+        env = runner.envs[name]
+        assert env["HOME"] == "/sentinel-home"
+        assert env["PYTHONNOUSERSITE"] == "1"
+        assert env["PYTHONSAFEPATH"] == "1"
+        for key in (
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "PYTHONUSERBASE",
+            "VIRTUAL_ENV",
+            "VIRTUAL_ENV_PROMPT",
+            "__PYVENV_LAUNCHER__",
+        ):
+            assert key not in env
+    assert runner.envs["image_publisher:stationary"]["PYTHONPATH"] == "/ambient/source"
 
 
 def test_default_head_state_segments_run_all_states_and_report_ga_fields(tmp_path: Path) -> None:

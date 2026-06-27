@@ -11,7 +11,12 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
+
+try:
+    from tools import runtime_provenance
+except ModuleNotFoundError:
+    import runtime_provenance  # type: ignore[no-redef]
 
 
 DEFAULT_OUT_DIR = Path("artifacts/runtime-smoke")
@@ -219,17 +224,21 @@ def _run_smoke(config: SmokeConfig, runner: RuntimeSmokeRunner) -> int:
     started_s = time.perf_counter()
     sync_command = _sync_command()
     server_command = _server_command(config)
+    cli_check_command = _cli_import_check_command(config)
     sync_env = _runtime_env(config.repo_root)
-    server_env = os.environ.copy()
+    runtime_env = runtime_provenance.runtime_execution_env()
     failure_reasons: list[str] = []
     server_process: ProcessLike | None = None
     sync_result: CommandResult | None = None
+    cli_check_result: CommandResult | None = None
     health_result: HealthCheckResult | None = None
+    runtime_report: dict[str, Any] | None = None
 
     try:
         sync_result = runner.run_sync(sync_command, cwd=config.repo_root, env=sync_env)
         if sync_result.returncode != 0:
             failure_reasons.append("sync_failed")
+            runtime_report = _runtime_provenance_not_run(config, reason="sync_failed")
             return _finish(
                 config,
                 passed=False,
@@ -237,7 +246,53 @@ def _run_smoke(config: SmokeConfig, runner: RuntimeSmokeRunner) -> int:
                 started_s=started_s,
                 sync_command=sync_command,
                 server_command=server_command,
+                cli_check_command=cli_check_command,
                 sync_result=sync_result,
+                cli_check_result=cli_check_result,
+                runtime_report=runtime_report,
+                server_process=server_process,
+                health_result=health_result,
+                failure_reasons=failure_reasons,
+            )
+
+        runtime_report = _collect_runtime_provenance(config)
+        if runtime_report["failure_reasons"]:
+            reasons = ",".join(str(reason) for reason in runtime_report["failure_reasons"])
+            failure_reasons.append(f"runtime_provenance_failed:{reasons}")
+            return _finish(
+                config,
+                passed=False,
+                started_at=started_at,
+                started_s=started_s,
+                sync_command=sync_command,
+                server_command=server_command,
+                cli_check_command=cli_check_command,
+                sync_result=sync_result,
+                cli_check_result=cli_check_result,
+                runtime_report=runtime_report,
+                server_process=server_process,
+                health_result=health_result,
+                failure_reasons=failure_reasons,
+            )
+
+        cli_check_result = runner.run_sync(
+            cli_check_command,
+            cwd=config.repo_root,
+            env=runtime_env,
+        )
+        if cli_check_result.returncode != 0:
+            failure_reasons.append("cli_import_check_failed")
+            return _finish(
+                config,
+                passed=False,
+                started_at=started_at,
+                started_s=started_s,
+                sync_command=sync_command,
+                server_command=server_command,
+                cli_check_command=cli_check_command,
+                sync_result=sync_result,
+                cli_check_result=cli_check_result,
+                runtime_report=runtime_report,
                 server_process=server_process,
                 health_result=health_result,
                 failure_reasons=failure_reasons,
@@ -246,7 +301,7 @@ def _run_smoke(config: SmokeConfig, runner: RuntimeSmokeRunner) -> int:
         server_process = runner.start_server(
             server_command,
             cwd=config.repo_root,
-            env=server_env,
+            env=runtime_env,
         )
         health_result = runner.wait_healthz(
             config.healthz_url,
@@ -269,7 +324,10 @@ def _run_smoke(config: SmokeConfig, runner: RuntimeSmokeRunner) -> int:
         started_s=started_s,
         sync_command=sync_command,
         server_command=server_command,
+        cli_check_command=cli_check_command,
         sync_result=sync_result,
+        cli_check_result=cli_check_result,
+        runtime_report=runtime_report,
         server_process=server_process,
         health_result=health_result,
         failure_reasons=failure_reasons,
@@ -321,7 +379,7 @@ def _sync_command() -> list[str]:
 
 def _server_command(config: SmokeConfig) -> list[str]:
     return [
-        str(config.repo_root / "runtime" / "venv" / "bin" / "visual-events-server"),
+        str(_runtime_server_bin(config)),
         "--config",
         str(config.config_path),
         "--host",
@@ -329,6 +387,49 @@ def _server_command(config: SmokeConfig) -> list[str]:
         "--port",
         str(config.port),
     ]
+
+
+def _cli_import_check_command(config: SmokeConfig) -> list[str]:
+    return [
+        str(config.repo_root / "runtime" / "venv" / "bin" / "python"),
+        "-c",
+        "import visual_events_server.app; import visual_events_cli.main",
+    ]
+
+
+def _runtime_server_bin(config: SmokeConfig) -> Path:
+    return config.repo_root / "runtime" / "venv" / "bin" / "visual-events-server"
+
+
+def _runtime_cli_bin(config: SmokeConfig) -> Path:
+    return config.repo_root / "runtime" / "venv" / "bin" / "visual-events-cli"
+
+
+def _collect_runtime_provenance(config: SmokeConfig) -> dict[str, Any]:
+    try:
+        return runtime_provenance.collect_runtime_provenance(
+            repo_root=config.repo_root,
+            server_bin=_runtime_server_bin(config),
+            cli_bin=_runtime_cli_bin(config),
+            server_config=config.config_path,
+        )
+    except Exception:
+        return runtime_provenance.runtime_provenance_report_for_failure(
+            repo_root=config.repo_root,
+            server_bin=_runtime_server_bin(config),
+            cli_bin=_runtime_cli_bin(config),
+            server_config=config.config_path,
+        )
+
+
+def _runtime_provenance_not_run(config: SmokeConfig, *, reason: str) -> dict[str, Any]:
+    return runtime_provenance.runtime_provenance_not_run_report(
+        repo_root=config.repo_root,
+        server_bin=_runtime_server_bin(config),
+        cli_bin=_runtime_cli_bin(config),
+        server_config=config.config_path,
+        reason=reason,
+    )
 
 
 def _runtime_env(repo_root: Path) -> dict[str, str]:
@@ -346,7 +447,10 @@ def _finish(
     started_s: float,
     sync_command: list[str],
     server_command: list[str],
+    cli_check_command: list[str],
     sync_result: CommandResult | None,
+    cli_check_result: CommandResult | None,
+    runtime_report: dict[str, Any] | None,
     server_process: ProcessLike | None,
     health_result: HealthCheckResult | None,
     failure_reasons: list[str],
@@ -358,7 +462,10 @@ def _finish(
         elapsed_s=max(0.0, time.perf_counter() - started_s),
         sync_command=sync_command,
         server_command=server_command,
+        cli_check_command=cli_check_command,
         sync_result=sync_result,
+        cli_check_result=cli_check_result,
+        runtime_report=runtime_report,
         server_process=server_process,
         health_result=health_result,
         failure_reasons=failure_reasons,
@@ -375,12 +482,21 @@ def _build_report(
     elapsed_s: float,
     sync_command: list[str],
     server_command: list[str],
+    cli_check_command: list[str],
     sync_result: CommandResult | None,
+    cli_check_result: CommandResult | None,
+    runtime_report: dict[str, Any] | None,
     server_process: ProcessLike | None,
     health_result: HealthCheckResult | None,
     failure_reasons: list[str],
 ) -> dict[str, object]:
-    return {
+    if runtime_report is None:
+        runtime_report = _runtime_provenance_not_run(
+            config,
+            reason="runtime_report_missing",
+        )
+    server_returncode = None if server_process is None else server_process.poll()
+    report = {
         "passed": passed,
         "failure_reasons": failure_reasons,
         "repo_root": str(config.repo_root),
@@ -393,11 +509,13 @@ def _build_report(
             "UV_PROJECT_ENVIRONMENT": str(config.repo_root / "runtime" / "venv"),
         },
         "sync_returncode": None if sync_result is None else sync_result.returncode,
+        "cli_check_command": cli_check_command,
+        "cli_check_returncode": None
+        if cli_check_result is None
+        else cli_check_result.returncode,
         "server_command": server_command,
         "server_pid": None if server_process is None else server_process.pid,
-        "server_returncode": None
-        if server_process is None
-        else server_process.poll(),
+        "server_returncode": server_returncode,
         "healthz_pid": None if health_result is None else health_result.healthz_pid,
         "healthz_identity_verified": False
         if health_result is None
@@ -406,6 +524,14 @@ def _build_report(
         "finished_at": _utc_now(),
         "elapsed_s": float(elapsed_s),
     }
+    report.update(
+        runtime_provenance.runtime_provenance_flat_aliases(
+            runtime_report,
+            server_exit_code=server_returncode,
+            cli_exit_code=None,
+        )
+    )
+    return report
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
