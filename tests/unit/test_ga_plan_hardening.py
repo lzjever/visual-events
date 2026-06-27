@@ -975,7 +975,7 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "不能声明 full PC gate pass",
             "fake-runner 单测覆盖 command construction、preflight、cleanup、gaze JSON summary、failure report",
             "Botified stdout collector/report hardening",
-            "本机真实三段 partial smoke 已通过",
+            "既有本机三段 partial smoke 证据",
             "`pc_local_e2e_status=partial_smoke_pass`",
             "`slice_pass=true`",
             "数据 manifest generated 7 scene / 576 frames",
@@ -1108,8 +1108,44 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "不证明 full PC gate、full event oracle、Botified 端到端业务、latency、soak、fault matrix、release report、RK/board 或 real robot",
         ],
     )
+    repeated_partial_smoke_descriptions = [
+        line
+        for line in text.splitlines()
+        if "Step 5 run_cli_local_e2e partial smoke runner slice 已完成" in line
+    ]
+    assert len(repeated_partial_smoke_descriptions) == 3
+    for line in repeated_partial_smoke_descriptions:
+        assert_contains_all(
+            line,
+            [
+                "Runtime provenance hard gate 已完成",
+                "`runtime/venv/bin/visual-events-server`",
+                "`runtime/venv/bin/visual-events-cli`",
+                "同一个 installed `visual-events-server` dist-info",
+                "METADATA Name/Version 匹配 pyproject",
+                "entry_points.txt 含两个 console_scripts",
+                "RECORD 中两个 script row sha256 digest 匹配",
+                "editable direct_url、multiple matching dist-info/metadata invalid/missing/mismatch 会 fail",
+                "nested `runtime_provenance`",
+                "`server_bin_is_runtime_venv`",
+                "`cli_bin_is_runtime_venv`",
+                "`wheel_name`",
+                "`wheel_version`",
+                "`runtime_hash`",
+                "`config_hash`",
+                "`server_exit_code`",
+                "`cli_exit_code`",
+                "canonical runtime evidence",
+                "不 hash 整个 venv",
+                "server/CLI unexpected exit code 会 fail partial slice",
+                "当前本机真实 preflight 用 `runtime/venv/bin/...`",
+                "`runtime/venv/bin/visual-events-cli` 缺失失败",
+                "不是 runtime smoke pass",
+            ],
+        )
     assert "`pc_local_e2e_status=not_run`" not in partial_smoke_runner
 
+    assert "本机真实三段 partial smoke 已通过" not in text
     assert "完整 PC local E2E GA gate 已完成" not in text
     assert "`ga_gate_pass=true`" not in text
     assert "`overall_pass=true`" not in text
