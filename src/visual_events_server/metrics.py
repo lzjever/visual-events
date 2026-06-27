@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
@@ -31,6 +32,7 @@ class JsonlMetricsSink:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._resource_sampler = resource_sampler or collect_resource_snapshot
+        self.write_error_count = 0
 
     def write_frame_metrics(
         self,
@@ -60,7 +62,15 @@ class JsonlMetricsSink:
                     json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                     + "\n"
                 )
-        except OSError:
+        except OSError as exc:
+            self.write_error_count += 1
+            print(
+                "metrics write failure "
+                f"path={self.path} "
+                f"error={type(exc).__name__}: {exc} "
+                f"count={self.write_error_count}",
+                file=sys.stderr,
+            )
             return
 
 

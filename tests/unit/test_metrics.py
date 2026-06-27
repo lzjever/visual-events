@@ -61,7 +61,9 @@ def test_jsonl_metrics_sink_writes_frame_identity_phases_and_resources(tmp_path)
     }
 
 
-def test_jsonl_metrics_sink_ignores_write_errors_after_startup(tmp_path, monkeypatch):
+def test_jsonl_metrics_sink_counts_and_reports_write_errors(
+    tmp_path, monkeypatch, capsys
+):
     metrics_path = tmp_path / "metrics.jsonl"
     sink = JsonlMetricsSink(metrics_path, resource_sampler=lambda: {})
     original_open = Path.open
@@ -74,6 +76,14 @@ def test_jsonl_metrics_sink_ignores_write_errors_after_startup(tmp_path, monkeyp
     monkeypatch.setattr(Path, "open", fail_metrics_open)
 
     sink.write_frame_metrics(frame_message(), {"total": 1.0})
+    sink.write_frame_metrics(frame_message(), {"total": 2.0})
+
+    assert sink.write_error_count == 2
+    stderr = capsys.readouterr().err
+    assert "metrics write failure" in stderr
+    assert str(metrics_path) in stderr
+    assert "count=1" in stderr
+    assert "count=2" in stderr
 
 
 def test_resource_snapshot_reports_unavailable_without_proc_or_torch(tmp_path):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
@@ -44,11 +45,13 @@ class BackendVisualFrameProcessor:
         self.event_config = event_config or EventConfig()
         self.metrics_sink = metrics_sink
         self._clock = clock or time.perf_counter
+        self._backend_lock = asyncio.Lock()
         self._legacy_session: BackendVisualStreamSession | None = None
 
     def create_session(self) -> "BackendVisualStreamSession":
         return BackendVisualStreamSession(
             self.backend,
+            backend_lock=self._backend_lock,
             tracker=ByteTrackStyleTracker(config=self.tracking_config),
             attention_selector=AttentionSelector(config=self.attention_config),
             event_engine=EventEngine(config=self.event_config),
@@ -67,6 +70,7 @@ class BackendVisualStreamSession:
         self,
         backend: InferBackend,
         *,
+        backend_lock: asyncio.Lock,
         tracker: ByteTrackStyleTracker,
         attention_selector: AttentionSelector,
         event_engine: EventEngine,
@@ -74,6 +78,7 @@ class BackendVisualStreamSession:
         clock: Callable[[], float] | None = None,
     ) -> None:
         self.backend = backend
+        self._backend_lock = backend_lock
         self.tracker = tracker
         self.attention_selector = attention_selector
         self.event_engine = event_engine
@@ -88,9 +93,11 @@ class BackendVisualStreamSession:
         if self._should_reset_for_regression(frame):
             self.reset()
         try:
-            infer_start = self._clock()
-            detections = await self.backend.infer(frame)
-            infer_elapsed_ms = _elapsed_ms(infer_start, self._clock)
+            async with self._backend_lock:
+                infer_start = self._clock()
+                detections = await self.backend.infer(frame)
+                infer_elapsed_ms = _elapsed_ms(infer_start, self._clock)
+                backend_phase_latencies = _consume_backend_phase_metrics(self.backend)
         except Exception as exc:
             raise ProtocolError(
                 "backend_unavailable",
@@ -99,7 +106,6 @@ class BackendVisualStreamSession:
                 retryable=True,
             ) from exc
 
-        backend_phase_latencies = _consume_backend_phase_metrics(self.backend)
         if backend_phase_latencies:
             phase_latencies_ms.update(backend_phase_latencies)
         else:
