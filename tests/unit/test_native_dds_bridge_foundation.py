@@ -148,6 +148,7 @@ def _make_minimal_unitree_sdk_root(tmp_path: Path) -> Path:
         "public:\n"
         "  explicit ChannelPublisher(const std::string& channel_name) : channel_name_(channel_name) {}\n"
         "  void InitChannel() { channel_ = ChannelFactory::Instance()->CreateSendChannel<MSG>(channel_name_); }\n"
+        "  bool Write(const MSG& msg, int64_t timeout = 0) { return channel_ && channel_->Write(msg, timeout); }\n"
         "  void CloseChannel() { channel_.reset(); }\n"
         "private:\n"
         "  std::string channel_name_;\n"
@@ -224,8 +225,26 @@ def _make_minimal_generated_head_gaze_dir(tmp_path: Path) -> Path:
     root.mkdir()
     (root / "head_state_v1.hpp").write_text(
         "#pragma once\n"
+        "#include <cstdint>\n"
         "namespace visual_events { namespace msg { namespace dds_ {\n"
-        "class HeadStateV1_ {};\n"
+        "class HeadStateV1_ {\n"
+        "public:\n"
+        "  uint32_t schema_version() const { return schema_version_; }\n"
+        "  bool valid() const { return valid_; }\n"
+        "  int64_t timestamp_ms() const { return timestamp_ms_; }\n"
+        "  double yaw_rad() const { return yaw_rad_; }\n"
+        "  double pitch_rad() const { return pitch_rad_; }\n"
+        "  double yaw_vel_rad_s() const { return yaw_vel_rad_s_; }\n"
+        "  double pitch_vel_rad_s() const { return pitch_vel_rad_s_; }\n"
+        "private:\n"
+        "  uint32_t schema_version_ = 1;\n"
+        "  bool valid_ = true;\n"
+        "  int64_t timestamp_ms_ = 0;\n"
+        "  double yaw_rad_ = 0.0;\n"
+        "  double pitch_rad_ = 0.0;\n"
+        "  double yaw_vel_rad_s_ = 0.0;\n"
+        "  double pitch_vel_rad_s_ = 0.0;\n"
+        "};\n"
         "}}}\n",
         encoding="utf-8",
     )
@@ -235,8 +254,43 @@ def _make_minimal_generated_head_gaze_dir(tmp_path: Path) -> Path:
     )
     (root / "gaze_target_v1.hpp").write_text(
         "#pragma once\n"
+        "#include <cstdint>\n"
+        "#include <string>\n"
         "namespace visual_events { namespace msg { namespace dds_ {\n"
-        "class GazeTargetV1_ {};\n"
+        "class GazeTargetV1_ {\n"
+        "public:\n"
+        "  GazeTargetV1_() = default;\n"
+        "  GazeTargetV1_(uint32_t schema_version, const std::string& camera, int64_t frame_id,\n"
+        "      int64_t frame_timestamp_ms, int64_t publish_timestamp_ms, bool valid,\n"
+        "      const std::string& state, int64_t target_track_id, float target_u,\n"
+        "      float target_v, float target_norm_x, float target_norm_y, uint32_t image_width,\n"
+        "      uint32_t image_height, float confidence, const std::string& reason,\n"
+        "      uint32_t stale_after_ms)\n"
+        "      : schema_version_(schema_version), camera_(camera), frame_id_(frame_id),\n"
+        "        frame_timestamp_ms_(frame_timestamp_ms), publish_timestamp_ms_(publish_timestamp_ms),\n"
+        "        valid_(valid), state_(state), target_track_id_(target_track_id), target_u_(target_u),\n"
+        "        target_v_(target_v), target_norm_x_(target_norm_x), target_norm_y_(target_norm_y),\n"
+        "        image_width_(image_width), image_height_(image_height), confidence_(confidence),\n"
+        "        reason_(reason), stale_after_ms_(stale_after_ms) {}\n"
+        "private:\n"
+        "  uint32_t schema_version_ = 1;\n"
+        "  std::string camera_;\n"
+        "  int64_t frame_id_ = 0;\n"
+        "  int64_t frame_timestamp_ms_ = 0;\n"
+        "  int64_t publish_timestamp_ms_ = 0;\n"
+        "  bool valid_ = false;\n"
+        "  std::string state_;\n"
+        "  int64_t target_track_id_ = -1;\n"
+        "  float target_u_ = 0.0F;\n"
+        "  float target_v_ = 0.0F;\n"
+        "  float target_norm_x_ = 0.0F;\n"
+        "  float target_norm_y_ = 0.0F;\n"
+        "  uint32_t image_width_ = 0;\n"
+        "  uint32_t image_height_ = 0;\n"
+        "  float confidence_ = 0.0F;\n"
+        "  std::string reason_;\n"
+        "  uint32_t stale_after_ms_ = 0;\n"
+        "};\n"
         "}}}\n",
         encoding="utf-8",
     )
@@ -763,6 +817,55 @@ def native_abi_build(tmp_path):
 
 
 @pytest.fixture
+def native_runtime_loop_fake_build(tmp_path):
+    if shutil.which("cmake") is None:
+        pytest.skip("cmake is required for native runtime loop fake target tests")
+    if (
+        shutil.which("c++") is None
+        and shutil.which("g++") is None
+        and shutil.which("clang++") is None
+    ):
+        pytest.skip("a C++ compiler is required for native runtime loop fake target tests")
+
+    build_dir = REPO_ROOT / "build" / "test-dds-bridge" / f"{tmp_path.name}-runtime-loop"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    configure = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            os.fspath(NATIVE_BRIDGE),
+            "-B",
+            os.fspath(build_dir),
+            "-DVISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE=OFF",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert configure.returncode == 0, configure.stderr
+
+    build = subprocess.run(
+        [
+            "cmake",
+            "--build",
+            os.fspath(build_dir),
+            "--target",
+            "visual_events_dds_bridge_runtime_loop_harness",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+
+    yield build_dir
+
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+
+@pytest.fixture
 def native_full_bridge_mapping_build(tmp_path):
     if shutil.which("cmake") is None:
         pytest.skip("cmake is required for native full-bridge mapping target tests")
@@ -863,6 +966,7 @@ def native_full_bridge_construction_build(tmp_path):
             "--build",
             os.fspath(build_dir),
             "--target",
+            "visual_events_dds_bridge",
             "visual_events_dds_bridge_construction_harness",
         ],
         cwd=REPO_ROOT,
@@ -943,10 +1047,30 @@ def test_native_bridge_cmake_declares_runtime_abi_core_and_test_harness_targets(
         "VISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE",
         "visual_events_dds_bridge_abi",
         "src/bridge_abi.cpp",
+        "visual_events_dds_bridge_runtime_loop",
+        "src/runtime_loop.cpp",
         "visual_events_dds_bridge",
         "src/runtime_main.cpp",
         "visual_events_dds_bridge_abi_harness",
         "src/abi_harness_main.cpp",
+        "visual_events_dds_bridge_runtime_loop_harness",
+        "src/runtime_loop_harness_main.cpp",
+    ]
+    missing = [item for item in required if item not in text]
+    assert missing == []
+
+
+def test_native_bridge_cmake_wires_full_runtime_only_under_full_bridge_macro():
+    text = (NATIVE_BRIDGE / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    required = [
+        "if (VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE)",
+        "target_sources(visual_events_dds_bridge PRIVATE",
+        "src/unitree_channel_runtime.cpp",
+        "${CAMERA_FRAME_SOURCE}",
+        "${VISUAL_EVENTS_GENERATED_DDS_SOURCES}",
+        "visual_events_dds_bridge_runtime_loop",
+        "visual_events_dds_bridge_dds_types",
     ]
     missing = [item for item in required if item not in text]
     assert missing == []
@@ -982,6 +1106,9 @@ def test_native_bridge_declares_unitree_channel_construction_harness_without_dir
         "unitree::robot::ChannelSubscriber<unitree_camera::msg::dds_::CameraFrame_>",
         "unitree::robot::ChannelSubscriber<visual_events::msg::dds_::HeadStateV1_>",
         "unitree::robot::ChannelPublisher<visual_events::msg::dds_::GazeTargetV1_>",
+        "CreateUnitreeRuntimeBackend",
+        "PublishGaze",
+        "Write(",
     ]
     missing = [item for item in required if item not in text]
     assert missing == []
@@ -1044,7 +1171,6 @@ def test_native_construction_runtime_closes_channels_before_releasing_factory():
     assert "CloseChannel" in text
     assert "ChannelFactory::Instance()->Release" in text
     assert text.rfind("CloseChannel") < text.rfind("ChannelFactory::Instance()->Release")
-    assert "Write(" not in text
     assert "std::cout" not in text
 
 
@@ -1187,6 +1313,26 @@ def test_native_runtime_probe_and_no_args_fail_fast_as_jsonl(native_abi_build):
     assert error.fatal is True
     assert error.code == "dds_runtime_not_implemented"
     assert runtime.stderr
+
+
+def test_native_full_bridge_runtime_binary_accepts_stdin_eof_without_not_implemented(
+    native_full_bridge_construction_build,
+):
+    binary = native_full_bridge_construction_build / "visual_events_dds_bridge"
+    result = subprocess.run(
+        [os.fspath(binary)],
+        cwd=REPO_ROOT,
+        input="",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for line in result.stdout.splitlines():
+        json.loads(line)
+    assert "dds_runtime_not_implemented" not in result.stdout
 
 
 def test_native_construction_harness_print_options_defaults_and_env_contract(
@@ -1475,6 +1621,162 @@ def _canonical_gaze_target_jsonl(state: str = "tracking", valid: bool | None = N
     return encode_gaze_target_line(payload)
 
 
+def test_native_runtime_loop_fake_harness_emits_samples_and_publishes_gaze(
+    native_runtime_loop_fake_build,
+):
+    from visual_events_cli.dds.bridge_protocol import BridgeHeadStateFrame
+    from visual_events_cli.dds.bridge_protocol import decode_bridge_line
+    from visual_events_cli.dds.types import CameraJpegMessage
+
+    result = subprocess.run(
+        [
+            os.fspath(
+                native_runtime_loop_fake_build / "visual_events_dds_bridge_runtime_loop_harness"
+            )
+        ],
+        cwd=REPO_ROOT,
+        input=_canonical_gaze_target_jsonl(),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "published_gaze_target=1" in result.stderr
+    stdout_lines = result.stdout.splitlines()
+    assert len(stdout_lines) == 2
+    raw_frames = [json.loads(line) for line in stdout_lines]
+    assert [frame["type"] for frame in raw_frames] == ["camera_jpeg", "head_state"]
+    assert all(line.startswith("{") and line.endswith("}") for line in stdout_lines)
+    assert all("log" not in frame for frame in raw_frames)
+
+    camera = decode_bridge_line(stdout_lines[0], logical_camera_name="front")
+    head = decode_bridge_line(stdout_lines[1], logical_camera_name="front")
+    assert isinstance(camera, CameraJpegMessage)
+    assert camera.camera == "front"
+    assert camera.data == b"\xff\xd8\xff\xd9"
+    assert isinstance(head, BridgeHeadStateFrame)
+    assert head.valid is True
+
+
+def test_native_runtime_loop_fake_harness_async_fatal_exits_without_stdin_eof(
+    native_runtime_loop_fake_build,
+):
+    from visual_events_cli.dds.bridge_protocol import BridgeErrorFrame
+    from visual_events_cli.dds.bridge_protocol import decode_bridge_line
+
+    env = os.environ.copy()
+    env["VISUAL_EVENTS_RUNTIME_LOOP_HARNESS_ASYNC_FATAL_MS"] = "50"
+    proc = subprocess.Popen(
+        [
+            os.fspath(
+                native_runtime_loop_fake_build / "visual_events_dds_bridge_runtime_loop_harness"
+            )
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate(timeout=2)
+        pytest.fail(
+            "runtime loop did not exit after async backend fatal while stdin stayed open; "
+            f"stdout={stdout!r} stderr={stderr!r}"
+        )
+
+    stdout, stderr = proc.communicate(timeout=2)
+    assert proc.returncode != 0
+    stdout_lines = stdout.splitlines()
+    assert stdout_lines
+    decoded_lines = [json.loads(line) for line in stdout_lines]
+    assert all(line.startswith("{") and line.endswith("}") for line in stdout_lines)
+    assert all("log" not in frame for frame in decoded_lines)
+    error = decode_bridge_line(stdout_lines[-1], logical_camera_name="front")
+    assert isinstance(error, BridgeErrorFrame)
+    assert error.fatal is True
+    assert error.code == "async_backend_fatal"
+    assert "async_backend_fatal" in stderr
+    assert "closed=true" in stderr
+
+
+def test_native_runtime_loop_fake_harness_late_fatal_during_eof_shutdown_is_jsonl(
+    native_runtime_loop_fake_build,
+):
+    from visual_events_cli.dds.bridge_protocol import BridgeErrorFrame
+    from visual_events_cli.dds.bridge_protocol import decode_bridge_line
+
+    env = os.environ.copy()
+    env["VISUAL_EVENTS_RUNTIME_LOOP_HARNESS_ASYNC_FATAL_MS"] = "50"
+    result = subprocess.run(
+        [
+            os.fspath(
+                native_runtime_loop_fake_build / "visual_events_dds_bridge_runtime_loop_harness"
+            )
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        input="",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    stdout_lines = result.stdout.splitlines()
+    assert stdout_lines
+    decoded_lines = [json.loads(line) for line in stdout_lines]
+    assert all(line.startswith("{") and line.endswith("}") for line in stdout_lines)
+    assert all("log" not in frame for frame in decoded_lines)
+    error = decode_bridge_line(stdout_lines[-1], logical_camera_name="front")
+    assert isinstance(error, BridgeErrorFrame)
+    assert error.fatal is True
+    assert error.code == "async_backend_fatal"
+    assert "async_backend_fatal" in result.stderr
+    assert "closed=true" in result.stderr
+
+
+def test_native_runtime_loop_fake_harness_invalid_gaze_is_fatal_jsonl(
+    native_runtime_loop_fake_build,
+):
+    from visual_events_cli.dds.bridge_protocol import BridgeErrorFrame
+    from visual_events_cli.dds.bridge_protocol import decode_bridge_line
+
+    result = subprocess.run(
+        [
+            os.fspath(
+                native_runtime_loop_fake_build / "visual_events_dds_bridge_runtime_loop_harness"
+            )
+        ],
+        cwd=REPO_ROOT,
+        input='{"protocol_version":1,"type":"gaze_target","camera":"front"}\n',
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    stdout_lines = result.stdout.splitlines()
+    assert stdout_lines
+    decoded_lines = [json.loads(line) for line in stdout_lines]
+    assert all(line.startswith("{") and line.endswith("}") for line in stdout_lines)
+    assert all("log" not in frame for frame in decoded_lines)
+    error = decode_bridge_line(stdout_lines[-1], logical_camera_name="front")
+    assert isinstance(error, BridgeErrorFrame)
+    assert error.fatal is True
+    assert error.code == "invalid_gaze_target"
+    assert result.stderr
+
+
 def test_native_mapping_harness_maps_camera_and_head_dds_to_jsonl_abi(
     native_full_bridge_mapping_build,
 ):
@@ -1696,9 +1998,14 @@ def test_build_tool_full_bridge_configure_passes_generated_inputs_to_cmake(
     video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
     build_dir = REPO_ROOT / "build" / "test-dds-bridge" / f"{tmp_path.name}-full-configure"
     shutil.rmtree(build_dir, ignore_errors=True)
-    generated_dir = REPO_ROOT / "build" / "test-dds-codegen" / f"{tmp_path.name}-generated"
-    shutil.rmtree(generated_dir, ignore_errors=True)
+    toolchain_dir = REPO_ROOT / "build" / "tools" / f"{tmp_path.name}-cyclonedds-cxx-idlc"
+    shutil.rmtree(toolchain_dir, ignore_errors=True)
+    generated_dir = toolchain_dir / "codegen_probe"
+    dds_include_dir = toolchain_dir / "install" / "include" / "ddscxx"
+    topic_traits = dds_include_dir / "dds" / "topic" / "TopicTraits.hpp"
     generated_dir.mkdir(parents=True)
+    topic_traits.parent.mkdir(parents=True)
+    topic_traits.write_text("// fake CycloneDDS C++ header\n", encoding="utf-8")
     for name in [
         "head_state_v1.hpp",
         "head_state_v1.cpp",
@@ -1725,7 +2032,7 @@ def test_build_tool_full_bridge_configure_passes_generated_inputs_to_cmake(
         )
     finally:
         shutil.rmtree(build_dir, ignore_errors=True)
-        shutil.rmtree(generated_dir, ignore_errors=True)
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
 
     configure = commands[0]
     assert f"-DVISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=ON" in configure
@@ -1734,7 +2041,55 @@ def test_build_tool_full_bridge_configure_passes_generated_inputs_to_cmake(
     assert f"-DVISUAL_EVENTS_HEAD_STATE_SOURCE={generated_dir / 'head_state_v1.cpp'}" in configure
     assert f"-DVISUAL_EVENTS_GAZE_TARGET_HEADER={generated_dir / 'gaze_target_v1.hpp'}" in configure
     assert f"-DVISUAL_EVENTS_GAZE_TARGET_SOURCE={generated_dir / 'gaze_target_v1.cpp'}" in configure
+    assert f"-DVISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR={dds_include_dir}" in configure
     assert report["full_bridge_generated_dir"] == os.fspath(generated_dir)
+    assert report["full_bridge_cyclonedds_include_dir"] == os.fspath(dds_include_dir)
+
+
+def test_build_tool_full_bridge_configure_fails_before_cmake_without_cyclonedds_include(
+    tmp_path,
+    monkeypatch,
+):
+    import tools.build_dds_bridge as build_dds_bridge
+
+    unitree_root = _make_minimal_unitree_sdk_root(tmp_path)
+    video_dir = _make_minimal_video_dds_publisher_dir(tmp_path)
+    build_dir = REPO_ROOT / "build" / "test-dds-bridge" / f"{tmp_path.name}-full-no-dds-cxx"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    toolchain_dir = REPO_ROOT / "build" / "tools" / f"{tmp_path.name}-cyclonedds-cxx-idlc"
+    shutil.rmtree(toolchain_dir, ignore_errors=True)
+    generated_dir = toolchain_dir / "codegen_probe"
+    generated_dir.mkdir(parents=True)
+    for name in [
+        "head_state_v1.hpp",
+        "head_state_v1.cpp",
+        "gaze_target_v1.hpp",
+        "gaze_target_v1.cpp",
+    ]:
+        (generated_dir / name).write_text("// fake generated file\n", encoding="utf-8")
+
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(build_dds_bridge, "_run", fake_run)
+
+    try:
+        with pytest.raises(build_dds_bridge.CheckError, match="CycloneDDS C\\+\\+ include dir"):
+            build_dds_bridge.configure_and_build(
+                unitree_sdk_root=unitree_root,
+                video_dds_publisher_dir=video_dir,
+                build_dir=build_dir,
+                target="visual_events_dds_bridge_probe",
+                full_bridge_generated_dir=generated_dir,
+            )
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
+
+    assert commands == []
 
 
 def test_build_tool_rejects_report_paths_outside_repo_artifacts_without_writing(tmp_path):

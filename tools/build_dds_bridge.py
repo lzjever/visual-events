@@ -30,6 +30,7 @@ FULL_BRIDGE_GENERATED_FILES = {
     "gaze_target_header": "gaze_target_v1.hpp",
     "gaze_target_source": "gaze_target_v1.cpp",
 }
+CYCLONEDDS_CXX_TOPIC_TRAITS = Path("dds") / "topic" / "TopicTraits.hpp"
 
 
 class CheckError(RuntimeError):
@@ -174,6 +175,36 @@ def validate_full_bridge_generated_type_support(generated_dir: Path) -> dict[str
     }
 
 
+def resolve_full_bridge_cyclonedds_include_dir(generated_dir: Path) -> Path:
+    resolved = _resolve_path(generated_dir)
+    build_tools_root = (REPO_ROOT / "build" / "tools").resolve()
+    try:
+        resolved.relative_to(build_tools_root)
+    except ValueError as exc:
+        raise CheckError(
+            "full-bridge CycloneDDS C++ include dir could not be inferred from generated dir "
+            f"outside repo build/tools/: {resolved}"
+        ) from exc
+
+    candidates = []
+    for parent in [resolved, *resolved.parents]:
+        try:
+            parent.relative_to(build_tools_root)
+        except ValueError:
+            break
+        candidates.append(parent / "install" / "include" / "ddscxx")
+
+    for candidate in candidates:
+        if (candidate / CYCLONEDDS_CXX_TOPIC_TRAITS).is_file():
+            return candidate
+
+    formatted = ", ".join(os.fspath(candidate) for candidate in candidates)
+    raise CheckError(
+        "full-bridge CycloneDDS C++ include dir is required before CMake configure; "
+        f"expected {CYCLONEDDS_CXX_TOPIC_TRAITS} under repo-local candidate(s): {formatted}"
+    )
+
+
 def configure_and_build(
     *,
     unitree_sdk_root: Path,
@@ -187,6 +218,10 @@ def configure_and_build(
     generated_args: list[str] = []
     if full_bridge_generated_dir is not None:
         full_bridge_report = validate_full_bridge_generated_type_support(full_bridge_generated_dir)
+        cyclonedds_include_dir = resolve_full_bridge_cyclonedds_include_dir(full_bridge_generated_dir)
+        full_bridge_report["full_bridge_cyclonedds_include_dir"] = os.fspath(
+            cyclonedds_include_dir
+        )
         generated_args = [
             "-DVISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=ON",
             f"-DVISUAL_EVENTS_GENERATED_DDS_DIR={full_bridge_report['full_bridge_generated_dir']}",
@@ -194,6 +229,7 @@ def configure_and_build(
             f"-DVISUAL_EVENTS_HEAD_STATE_SOURCE={full_bridge_report['full_bridge_head_state_source']}",
             f"-DVISUAL_EVENTS_GAZE_TARGET_HEADER={full_bridge_report['full_bridge_gaze_target_header']}",
             f"-DVISUAL_EVENTS_GAZE_TARGET_SOURCE={full_bridge_report['full_bridge_gaze_target_source']}",
+            f"-DVISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR={cyclonedds_include_dir}",
         ]
     configure = _run(
         [

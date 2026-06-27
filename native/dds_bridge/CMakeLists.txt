@@ -43,11 +43,23 @@ target_link_libraries(visual_events_dds_bridge_runtime_options PUBLIC
 )
 target_compile_options(visual_events_dds_bridge_runtime_options PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(visual_events_dds_bridge_runtime_loop STATIC
+    src/runtime_loop.cpp
+)
+target_include_directories(visual_events_dds_bridge_runtime_loop PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_link_libraries(visual_events_dds_bridge_runtime_loop PUBLIC
+    visual_events_dds_bridge_abi
+)
+target_compile_options(visual_events_dds_bridge_runtime_loop PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(visual_events_dds_bridge
     src/runtime_main.cpp
 )
 target_link_libraries(visual_events_dds_bridge PRIVATE
     visual_events_dds_bridge_abi
+    visual_events_dds_bridge_runtime_loop
 )
 target_compile_options(visual_events_dds_bridge PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -58,6 +70,14 @@ target_link_libraries(visual_events_dds_bridge_abi_harness PRIVATE
     visual_events_dds_bridge_abi
 )
 target_compile_options(visual_events_dds_bridge_abi_harness PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(visual_events_dds_bridge_runtime_loop_harness
+    src/runtime_loop_harness_main.cpp
+)
+target_link_libraries(visual_events_dds_bridge_runtime_loop_harness PRIVATE
+    visual_events_dds_bridge_runtime_loop
+)
+target_compile_options(visual_events_dds_bridge_runtime_loop_harness PRIVATE -Wall -Wextra -Wpedantic)
 
 if (VISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE)
     if (NOT UNITREE_SDK_ROOT)
@@ -144,6 +164,43 @@ if (VISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE)
             )
         endif()
 
+        target_sources(visual_events_dds_bridge PRIVATE
+            src/unitree_channel_runtime.cpp
+            "${CAMERA_FRAME_SOURCE}"
+            ${VISUAL_EVENTS_GENERATED_DDS_SOURCES}
+        )
+        target_include_directories(visual_events_dds_bridge PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${UNITREE_SDK_ROOT}/include"
+            "${VIDEO_DDS_PUBLISHER_DIR}/include"
+            "${VISUAL_EVENTS_GENERATED_DDS_DIR}"
+        )
+        target_compile_definitions(visual_events_dds_bridge PRIVATE
+            VISUAL_EVENTS_DDS_BRIDGE_FULL_BRIDGE=1
+        )
+        if (VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR)
+            target_include_directories(visual_events_dds_bridge PRIVATE
+                "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}"
+                "${VISUAL_EVENTS_DDS_BRIDGE_CYCLONEDDS_INCLUDE_DIR}/.."
+            )
+        endif()
+        target_link_directories(visual_events_dds_bridge PRIVATE
+            "${UNITREE_SDK_ROOT}/lib"
+        )
+        target_link_libraries(visual_events_dds_bridge PRIVATE
+            visual_events_dds_bridge_runtime_options
+            visual_events_dds_bridge_dds_types
+            unitree_sdk2
+            -Wl,--no-as-needed
+            ddsc
+            ddscxx
+            -Wl,--as-needed
+        )
+        set_target_properties(visual_events_dds_bridge PROPERTIES
+            BUILD_RPATH "${UNITREE_SDK_ROOT}/lib"
+            INSTALL_RPATH "${UNITREE_SDK_ROOT}/lib"
+        )
+
         add_executable(visual_events_dds_bridge_mapping_harness
             src/mapping_harness_main.cpp
         )
@@ -178,6 +235,7 @@ if (VISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE)
         )
         target_link_libraries(visual_events_dds_bridge_construction_harness PRIVATE
             visual_events_dds_bridge_abi
+            visual_events_dds_bridge_dds_types
             visual_events_dds_bridge_runtime_options
             unitree_sdk2
             -Wl,--no-as-needed
