@@ -1,6 +1,9 @@
 val-data/
 runtime/
 artifacts/
+captures/
+logs/
+models/
 
 .venv/
 .cache/
@@ -22,3 +25,33 @@ dist/
 build/
 *.egg-info/
 .eggs/
+
+# Local models / engines
+*.pt
+*.pth
+*.onnx
+*.engine
+*.rknn
+*.safetensors
+*.weights
+
+# DDS / packet / robot capture artifacts
+*.mcap
+*.bag
+*.db3
+*.pcap
+*.pcapng
+
+# Local media captures
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.jpg
+*.jpeg
+*.png
+
+# Local reports / logs
+*.jsonl
+*.log

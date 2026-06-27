@@ -27,6 +27,7 @@ Backpressure：
 2. CLI 发送一帧后等待同 `frame_id` 的 `visual_state` 或 timeout。
 3. 等待期间到达的新 DDS 帧只替换本地 latest，不进入 WebSocket 队列。
 4. timeout 后 CLI 关闭连接并重连。
+5. `gaze_target.stale_ms` watchdog 独立运行；即使 one in-flight frame 还没有到 `response_timeout_ms`，最近有效 gaze target 到达 stale deadline 时也必须发布一次 `valid=false,state=stale`。
 
 ## 2. 客户端帧消息
 
@@ -59,6 +60,8 @@ Header 必填字段：
   "height": 720
 }
 ```
+
+`frame_id` 是 CLI 生成的 per-connection monotonic transport identity。`CameraFrame_` DDS 输入没有源 `frame_id`，CLI 不得使用 DDS `timestamp_ns`/`timestamp_ms` 作为 identity；CLI 将 DDS source timestamp（缺失或不可用时使用 receive fallback）填入 WebSocket header `timestamp_ms`，server 原样回显为 `visual_state.frame_timestamp_ms`。这个 timestamp 只用于时序/freshness，不是 frame identity。CLI 重连后可以从新的 monotonic sequence 开始，服务端状态仍按 WebSocket connection 隔离。
 
 Header 可选字段：
 
@@ -229,7 +232,19 @@ V1 event 枚举：
 CLI 只负责：
 
 - 按 `event_id` 做 Botified 输出幂等保护。
-- 把事件事实转换为 Botified request frame。
+- 按 Botified stdout allowlist 把事件事实转换为 Botified request frame。
+- 不重新实现事件规则，不根据 attention 高频状态生成 Botified 事件。
+
+Botified stdout allowlist：
+
+- `person_appeared`
+- `person_left`
+- `person_passing_by`
+- `person_approaching_robot`
+- `person_stopped_near_robot`
+- `person_waving`
+
+`attention_target_changed` 只保留在 `visual_state.semantic_events` 和诊断 artifact 中，用于调试/PC gate，不输出到 Botified stdout，避免把高频注视闭环泄漏到 Botified。
 
 ## 6. Error Message
 
@@ -266,15 +281,18 @@ CLI 行为：
 - CLI 重连后从新的 `frame_id` 继续发送。
 - CLI 重连后的前 1s 内不输出 Botified frame，避免旧状态造成事件突发。
 - 断线期间 CLI 不使用过期 `attention` 发布有效 gaze target；必须在 250ms 内发布一次 invalid/stale sample，DDS lifespan 只作为后备失效保护。
+- `gaze_target.stale_ms` 与 `service.response_timeout_ms` 是两个计时器。前者决定下游何时必须看到 stale，后者决定 WebSocket request 何时失败重连；不能因为仍有一个 in-flight request 未 timeout 而延迟 stale sample。
 
 ## 8. Botified Frame 输出
 
 本节描述未来 robot CLI 的客户端输出约定；`visual-events-server` 不直接输出 Botified frame。
 
-CLI stdout 默认只输出 Botified frame：
+CLI stdout 默认只输出 Botified allowlist frame：
 
 ```text
 <botified>{"id":"visual:front:evt_000456","urgency":"normal","timeout_secs":8,"request":"视觉事件：有人在机器人前方挥手。track_id=7, confidence=0.86。请根据当前上下文决定是否回应；处理完成后回复 ack。","expect":"ack"}</botified>
 ```
 
 日志、调试状态、性能指标走 stderr 或文件。`--debug-json-stdout` 只能用于手工调试，不能用于 Botified task。
+
+stdout 写入不得阻塞 gaze stale watchdog。CLI 必须使用 bounded queue/drop/coalescing，或定义并测试 BrokenPipe fail behavior；stdout 慢、pipe close 或 Botified 未读取时，CLI 不能无界排队，也不能延迟 `valid=false,state=stale` gaze target。
