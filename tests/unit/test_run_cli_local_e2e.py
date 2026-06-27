@@ -837,6 +837,167 @@ def test_default_head_state_segments_run_all_states_and_report_ga_fields(tmp_pat
     assert report["head_state_segments"] == expected_states
 
 
+def test_default_missing_manifest_partial_smoke_reports_contract_gap(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    assert runner.events
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
+    assert report["slice_pass"] is True
+    assert report["manifest_source"] == "generated"
+    assert report["manifest_authoritative"] is False
+    assert report["manifest_validation_errors"] == []
+    assert report["manifest_contract_required"] is False
+    assert report["manifest_contract_satisfied"] is False
+    assert report["manifest_contract_failure_reasons"] == [
+        "manifest_source_not_file",
+        "manifest_not_authoritative",
+        "oracle_schema_missing",
+        "oracle_schema_invalid",
+    ]
+    assert report["oracle_evaluated"] is False
+    assert report["oracle_evaluation_passed"] is None
+
+
+def test_require_authoritative_manifest_without_manifest_fails_before_runner(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(paths, "--require-authoritative-manifest"),
+        runner=runner,
+    )
+
+    assert rc == 2
+    assert runner.events == []
+    assert runner.started == {}
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert report["manifest_contract_required"] is True
+    assert report["manifest_contract_satisfied"] is False
+    assert report["manifest_contract_failure_reasons"] == [
+        "manifest_source_not_file",
+        "manifest_not_authoritative",
+        "oracle_schema_missing",
+        "oracle_schema_invalid",
+    ]
+    failure_reason = report["failure_reasons"][0]
+    assert "authoritative manifest contract required but not satisfied" in failure_reason
+    for reason in report["manifest_contract_failure_reasons"]:
+        assert reason in failure_reason
+
+
+def test_require_authoritative_manifest_with_invalid_json_manifest_reports_file_evidence(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    manifest_path = paths["data_dir"] / "manifest.json"
+    manifest_path.write_text("{not-json", encoding="utf-8")
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--manifest",
+            os.fspath(manifest_path),
+            "--require-authoritative-manifest",
+        ),
+        runner=runner,
+    )
+
+    marker = module.MANIFEST_UNREADABLE_OR_INVALID
+    assert rc == 2
+    assert runner.events == []
+    assert runner.started == {}
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert report["manifest_source"] == "file"
+    assert report["manifest_path"] == os.fspath(manifest_path.resolve())
+    assert report["manifest_sha256"] is None
+    assert report["manifest_schema_version"] is None
+    assert report["manifest_authoritative"] is False
+    assert report["manifest_validation_errors"] == [marker]
+    assert report["oracle_schema_present"] is False
+    assert report["oracle_schema_valid"] is False
+    assert report["oracle_summary"] is None
+    assert report["scene_count"] is None
+    assert report["frame_count"] is None
+    assert report["effective_manifest"] is None
+    assert report["manifest_contract_required"] is True
+    assert report["manifest_contract_satisfied"] is False
+    assert report["manifest_contract_failure_reasons"] == [
+        "manifest_not_authoritative",
+        f"manifest_validation_errors:{marker}",
+        "oracle_schema_missing",
+        "oracle_schema_invalid",
+    ]
+    assert report["oracle_evaluated"] is False
+    assert report["oracle_evaluation_passed"] is None
+    assert marker in report["failure_reasons"]
+    assert "manifest JSON is invalid" in report["failure_reasons"][0]
+
+
+def test_require_authoritative_manifest_with_legacy_manifest_fails_before_runner(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    manifest_path = paths["data_dir"] / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "scene_count": 2,
+                "frame_count": 2,
+                "scenes": [{"name": "scene-a"}, {"name": "scene-b"}],
+            },
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--manifest",
+            os.fspath(manifest_path),
+            "--require-authoritative-manifest",
+        ),
+        runner=runner,
+    )
+
+    assert rc == 2
+    assert runner.events == []
+    assert runner.started == {}
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert report["manifest_source"] == "file"
+    assert report["manifest_authoritative"] is False
+    assert report["manifest_contract_required"] is True
+    assert report["manifest_contract_satisfied"] is False
+    assert report["manifest_contract_failure_reasons"] == [
+        "manifest_not_authoritative",
+        "oracle_schema_missing",
+        "oracle_schema_invalid",
+    ]
+
+
 def test_explicit_head_state_segments_override_single_head_state_shortcut(tmp_path: Path) -> None:
     module = import_runner_module()
     paths = make_case(tmp_path)
@@ -1676,7 +1837,14 @@ def test_partial_smoke_report_projects_authoritative_manifest_oracle_summary(
     runner = successful_runner()
 
     rc = module.main(
-        base_argv(paths, "--manifest", os.fspath(manifest_path), "--head-state", "stationary"),
+        base_argv(
+            paths,
+            "--manifest",
+            os.fspath(manifest_path),
+            "--require-authoritative-manifest",
+            "--head-state",
+            "stationary",
+        ),
         runner=runner,
     )
 
@@ -1685,14 +1853,18 @@ def test_partial_smoke_report_projects_authoritative_manifest_oracle_summary(
     assert report["slice_pass"] is True
     assert report["overall_pass"] is False
     assert report["ga_gate_pass"] is False
-    assert "oracle" in report["not_covered"]
-    assert "full_scene_matrix" in report["not_covered"]
+    assert report["not_covered"] == module.NOT_COVERED
     assert report["manifest_source"] == "file"
     assert report["manifest_schema_version"] == 1
     assert report["manifest_authoritative"] is True
     assert report["manifest_validation_errors"] == []
     assert report["oracle_schema_present"] is True
     assert report["oracle_schema_valid"] is True
+    assert report["manifest_contract_required"] is True
+    assert report["manifest_contract_satisfied"] is True
+    assert report["manifest_contract_failure_reasons"] == []
+    assert report["oracle_evaluated"] is False
+    assert report["oracle_evaluation_passed"] is None
     assert report["oracle_summary"] == {
         "expected_event_timeline": {
             "source": "oracle/events.json",
@@ -1739,9 +1911,63 @@ def test_invalid_authoritative_manifest_fails_preflight_without_starting_runner(
     ]
     assert report["oracle_schema_present"] is True
     assert report["oracle_schema_valid"] is True
+    assert report["manifest_contract_required"] is False
+    assert report["manifest_contract_satisfied"] is False
+    assert report["manifest_contract_failure_reasons"] == [
+        "manifest_validation_errors:scene_sha256_mismatch:scene-a"
+    ]
+    assert report["oracle_evaluated"] is False
+    assert report["oracle_evaluation_passed"] is None
     assert any(
         "manifest_validation_failed" in reason for reason in report["failure_reasons"]
     )
+
+
+def test_require_authoritative_manifest_with_invalid_v1_manifest_fails_preflight(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    manifest_payload = authoritative_manifest_for_data(
+        module.cli_local_e2e_manifest,
+        paths["data_dir"],
+    )
+    manifest_payload["scene_count"] = 999
+    manifest_path = paths["data_dir"] / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest_payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--manifest",
+            os.fspath(manifest_path),
+            "--require-authoritative-manifest",
+        ),
+        runner=runner,
+    )
+
+    assert rc == 2
+    assert runner.events == []
+    assert runner.started == {}
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert report["manifest_source"] == "file"
+    assert report["manifest_authoritative"] is True
+    assert report["manifest_validation_errors"] == ["scene_count_mismatch"]
+    assert report["oracle_schema_present"] is True
+    assert report["oracle_schema_valid"] is True
+    assert report["manifest_contract_required"] is True
+    assert report["manifest_contract_satisfied"] is False
+    assert report["manifest_contract_failure_reasons"] == [
+        "manifest_validation_errors:scene_count_mismatch"
+    ]
+    failure_reason = report["failure_reasons"][0]
+    assert "authoritative manifest contract required but not satisfied" in failure_reason
+    assert "manifest_validation_errors:scene_count_mismatch" in failure_reason
 
 
 @pytest.mark.parametrize(

@@ -74,6 +74,7 @@ NOT_COVERED = [
     "fault_matrix",
     "release_report",
 ]
+MANIFEST_UNREADABLE_OR_INVALID = "manifest_unreadable_or_invalid"
 MANIFEST_REPORT_KEYS = [
     "data_dir",
     "manifest_source",
@@ -85,6 +86,11 @@ MANIFEST_REPORT_KEYS = [
     "oracle_schema_present",
     "oracle_schema_valid",
     "oracle_summary",
+    "manifest_contract_required",
+    "manifest_contract_satisfied",
+    "manifest_contract_failure_reasons",
+    "oracle_evaluated",
+    "oracle_evaluation_passed",
     "scene_count",
     "frame_count",
     "effective_manifest",
@@ -375,6 +381,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--data-dir", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument(
+        "--require-authoritative-manifest",
+        action="store_true",
+        help="Fail preflight unless a valid authoritative manifest/oracle contract is present.",
+    )
     parser.add_argument("--server-bin", required=True, type=Path)
     parser.add_argument("--cli-bin", required=True, type=Path)
     parser.add_argument("--server", default=DEFAULT_SERVER_URL)
@@ -553,12 +564,19 @@ def main(
             out=args.out,
             manifest=args.manifest,
         )
+        manifest_report = _manifest_report_with_contract(
+            manifest_report,
+            contract_required=args.require_authoritative_manifest,
+        )
         out_for_failure = out
         manifest_report_for_failure = manifest_report
+        _preflight_required_manifest_contract(manifest_report)
         _preflight_manifest_contract(manifest_report)
         config = _build_config(args, out=out, manifest_report=manifest_report)
     except (OSError, PreflightError, cli_local_e2e_manifest.PreflightError, PcDdsToolError) as exc:
         failure_reason = str(exc)
+        if manifest_report_for_failure is None:
+            manifest_report_for_failure = _manifest_read_failure_report(args, exc)
         out_for_failure = out_for_failure or _safe_out_for_preflight_failure(args)
         if out_for_failure is not None:
             report = _build_preflight_failed_report(
@@ -573,6 +591,103 @@ def main(
 
     active_runner = runner or LocalProcessRunner()
     return _run_smoke(config, active_runner)
+
+
+def _manifest_read_failure_report(
+    args: argparse.Namespace,
+    exc: BaseException,
+) -> dict[str, Any] | None:
+    try:
+        data_dir = cli_local_e2e_manifest.resolve_path(args.data_dir)
+        if not data_dir.exists() or not data_dir.is_dir():
+            return None
+        cli_local_e2e_manifest.preflight_out_path(args.out, data_dir=data_dir)
+        manifest_path = _selected_manifest_read_path(args, data_dir=data_dir)
+    except (OSError, cli_local_e2e_manifest.PreflightError):
+        return None
+
+    if manifest_path is None or not _is_manifest_read_or_parse_error(
+        exc, manifest_path=manifest_path
+    ):
+        return None
+
+    return {
+        "data_dir": os.fspath(data_dir),
+        "manifest_source": "file",
+        "manifest_path": os.fspath(manifest_path),
+        "manifest_sha256": None,
+        "manifest_schema_version": None,
+        "manifest_authoritative": False,
+        "manifest_validation_errors": [MANIFEST_UNREADABLE_OR_INVALID],
+        "oracle_schema_present": False,
+        "oracle_schema_valid": False,
+        "oracle_summary": None,
+        "scene_count": None,
+        "frame_count": None,
+        "effective_manifest": None,
+    }
+
+
+def _selected_manifest_read_path(
+    args: argparse.Namespace,
+    *,
+    data_dir: Path,
+) -> Path | None:
+    manifest = getattr(args, "manifest", None)
+    if manifest is not None:
+        manifest_path = cli_local_e2e_manifest.resolve_path(manifest)
+        if manifest_path.exists() and manifest_path.is_file():
+            return manifest_path
+        return None
+
+    default_manifest = data_dir / "manifest.json"
+    return default_manifest if default_manifest.exists() else None
+
+
+def _is_manifest_read_or_parse_error(
+    exc: BaseException,
+    *,
+    manifest_path: Path,
+) -> bool:
+    if isinstance(exc, cli_local_e2e_manifest.PreflightError):
+        return str(exc).startswith("manifest JSON is invalid:")
+    if isinstance(exc, OSError):
+        filenames = [
+            value
+            for value in (
+                getattr(exc, "filename", None),
+                getattr(exc, "filename2", None),
+            )
+            if value is not None
+        ]
+        for filename in filenames:
+            if cli_local_e2e_manifest.resolve_path(Path(filename)) == manifest_path:
+                return True
+        return os.fspath(manifest_path) in str(exc)
+    return False
+
+
+def _manifest_report_with_contract(
+    manifest_report: dict[str, Any],
+    *,
+    contract_required: bool,
+) -> dict[str, Any]:
+    report = dict(manifest_report)
+    validation_errors = report.get("manifest_validation_errors")
+    if isinstance(validation_errors, list):
+        report["manifest_validation_errors"] = list(validation_errors)
+
+    contract_satisfied = cli_local_e2e_manifest.manifest_contract_satisfied(report)
+    report["manifest_contract_required"] = bool(contract_required)
+    report["manifest_contract_satisfied"] = contract_satisfied
+    report["manifest_contract_failure_reasons"] = (
+        []
+        if contract_satisfied
+        else cli_local_e2e_manifest.manifest_contract_failure_reasons(report)
+    )
+    report["oracle_evaluated"] = False
+    report["oracle_evaluation_passed"] = None
+    return report
 
 
 def _build_config(
@@ -661,6 +776,23 @@ def _build_config(
         health_timeout_s=args.health_timeout_s,
         health_interval_s=args.health_interval_s,
         startup_grace_s=args.startup_grace_s,
+    )
+
+
+def _preflight_required_manifest_contract(manifest_report: dict[str, Any]) -> None:
+    if manifest_report.get("manifest_contract_required") is not True:
+        return
+    if manifest_report.get("manifest_contract_satisfied") is True:
+        return
+
+    reasons = manifest_report.get("manifest_contract_failure_reasons")
+    if not isinstance(reasons, list) or not reasons:
+        reasons = cli_local_e2e_manifest.manifest_contract_failure_reasons(
+            manifest_report
+        )
+    joined = ", ".join(str(reason) for reason in reasons)
+    raise PreflightError(
+        "authoritative manifest contract required but not satisfied: " + joined
     )
 
 
@@ -1487,10 +1619,23 @@ def _build_preflight_failed_report(
             "frame_count": None,
             "effective_manifest": None,
         }
+    manifest_report = _manifest_report_with_contract(
+        manifest_report,
+        contract_required=bool(getattr(args, "require_authoritative_manifest", False)),
+    )
+    failure_reasons = [failure_reason]
+    validation_errors = manifest_report.get("manifest_validation_errors")
+    if (
+        isinstance(validation_errors, list)
+        and MANIFEST_UNREADABLE_OR_INVALID in validation_errors
+        and MANIFEST_UNREADABLE_OR_INVALID not in failure_reasons
+    ):
+        failure_reasons.append(MANIFEST_UNREADABLE_OR_INVALID)
+
     report = _base_report(
         manifest_report=manifest_report,
         status="preflight_failed",
-        failure_reasons=[failure_reason],
+        failure_reasons=failure_reasons,
     )
     runtime_report = _runtime_provenance_report_for_failure(args)
     report.update(

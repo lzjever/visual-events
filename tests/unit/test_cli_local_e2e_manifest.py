@@ -70,6 +70,56 @@ def test_module_is_importable():
     assert callable(module.main)
 
 
+def test_manifest_contract_helpers_accept_authoritative_file_manifest():
+    module = import_manifest_module()
+    report = {
+        "manifest_source": "file",
+        "manifest_authoritative": True,
+        "manifest_validation_errors": [],
+        "oracle_schema_present": True,
+        "oracle_schema_valid": True,
+    }
+
+    assert module.manifest_contract_satisfied(report) is True
+    assert module.manifest_contract_failure_reasons(report) == []
+
+
+def test_manifest_contract_helpers_report_concrete_failures():
+    module = import_manifest_module()
+    report = {
+        "manifest_source": "generated",
+        "manifest_authoritative": False,
+        "manifest_validation_errors": ["scene_count_mismatch", "oracle_missing"],
+        "oracle_schema_present": False,
+        "oracle_schema_valid": False,
+    }
+
+    assert module.manifest_contract_satisfied(report) is False
+    assert module.manifest_contract_failure_reasons(report) == [
+        "manifest_source_not_file",
+        "manifest_not_authoritative",
+        "manifest_validation_errors:scene_count_mismatch,oracle_missing",
+        "oracle_schema_missing",
+        "oracle_schema_invalid",
+    ]
+
+
+def test_manifest_contract_helpers_reject_invalid_validation_errors_type():
+    module = import_manifest_module()
+    report = {
+        "manifest_source": "file",
+        "manifest_authoritative": True,
+        "manifest_validation_errors": "scene_count_mismatch",
+        "oracle_schema_present": True,
+        "oracle_schema_valid": True,
+    }
+
+    assert module.manifest_contract_satisfied(report) is False
+    assert module.manifest_contract_failure_reasons(report) == [
+        "manifest_validation_errors_invalid"
+    ]
+
+
 def test_missing_manifest_generates_deterministic_effective_manifest(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

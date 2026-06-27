@@ -89,6 +89,11 @@ _SERVER_PHASES = (
 )
 _VRAM_4GIB_BYTES = 4 * 1024**3
 
+manifest_contract_satisfied = cli_local_e2e_manifest.manifest_contract_satisfied
+manifest_contract_failure_reasons = (
+    cli_local_e2e_manifest.manifest_contract_failure_reasons
+)
+
 
 @dataclass(frozen=True)
 class CaseResult:
@@ -456,40 +461,6 @@ def build_manifest_evidence(
     evidence["oracle_evaluation_passed"] = None
     evidence["semantic_event_oracle_source"] = _SEMANTIC_EVENT_ORACLE_SOURCE
     return evidence
-
-
-def manifest_contract_satisfied(evidence: dict[str, Any]) -> bool:
-    validation_errors = evidence.get("manifest_validation_errors")
-    return (
-        evidence.get("manifest_source") == "file"
-        and evidence.get("manifest_authoritative") is True
-        and isinstance(validation_errors, list)
-        and not validation_errors
-        and evidence.get("oracle_schema_present") is True
-        and evidence.get("oracle_schema_valid") is True
-    )
-
-
-def manifest_contract_failure_reasons(evidence: dict[str, Any]) -> list[str]:
-    reasons: list[str] = []
-    if evidence.get("manifest_source") != "file":
-        reasons.append("manifest_source_not_file")
-    if evidence.get("manifest_authoritative") is not True:
-        reasons.append("manifest_not_authoritative")
-
-    validation_errors = evidence.get("manifest_validation_errors")
-    if isinstance(validation_errors, list):
-        if validation_errors:
-            joined = ",".join(str(error) for error in validation_errors)
-            reasons.append(f"manifest_validation_errors:{joined}")
-    else:
-        reasons.append("manifest_validation_errors_invalid")
-
-    if evidence.get("oracle_schema_present") is not True:
-        reasons.append("oracle_schema_missing")
-    if evidence.get("oracle_schema_valid") is not True:
-        reasons.append("oracle_schema_invalid")
-    return reasons or ["unknown_manifest_contract_failure"]
 
 
 async def _run_full_matrix(

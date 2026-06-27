@@ -396,6 +396,43 @@ def manifest_contract_projection(
     }
 
 
+def manifest_contract_satisfied(report: dict[str, Any]) -> bool:
+    validation_errors = report.get("manifest_validation_errors")
+    return (
+        report.get("manifest_source") == "file"
+        and report.get("manifest_authoritative") is True
+        and isinstance(validation_errors, list)
+        and not validation_errors
+        and report.get("oracle_schema_present") is True
+        and report.get("oracle_schema_valid") is True
+    )
+
+
+def manifest_contract_failure_reasons(report: dict[str, Any]) -> list[str]:
+    if manifest_contract_satisfied(report):
+        return []
+
+    reasons: list[str] = []
+    if report.get("manifest_source") != "file":
+        reasons.append("manifest_source_not_file")
+    if report.get("manifest_authoritative") is not True:
+        reasons.append("manifest_not_authoritative")
+
+    validation_errors = report.get("manifest_validation_errors")
+    if isinstance(validation_errors, list):
+        if validation_errors:
+            joined = ",".join(str(error) for error in validation_errors)
+            reasons.append(f"manifest_validation_errors:{joined}")
+    else:
+        reasons.append("manifest_validation_errors_invalid")
+
+    if report.get("oracle_schema_present") is not True:
+        reasons.append("oracle_schema_missing")
+    if report.get("oracle_schema_valid") is not True:
+        reasons.append("oracle_schema_invalid")
+    return reasons
+
+
 def build_report(
     *,
     data_dir: Path,
