@@ -165,6 +165,34 @@ def test_ga_plan_pins_botified_backpressure_and_broken_pipe_semantics():
     assert 'broken_pipe = "fail_fast"' not in text
 
 
+def test_ga_plan_pins_final_review_contracts_without_expanding_scope():
+    text = read_text(GA_PLAN)
+
+    assert_contains_all(
+        text,
+        [
+            "测试 runner 必须显式传入 domain/network",
+            "标准 PC 值是 `DDS_NETWORK=lo`、`DDS_DOMAIN=57`",
+            "缺少显式 `--dds-domain` 或 `--dds-network` 必须 fail fast",
+            "非 loopback 网络必须显式传入 `--allow-non-loopback-dds`",
+            "Step 3 只负责正式 runtime loop/coordinator/main wiring，不实现真实 DDS adapters",
+            "Step 4 真实 DDS adapters",
+            "expected attention target timeline/rule（target label/track、allowed switch windows、no-target windows）",
+            "现场 checklist 必须验证 expected attention target timeline/rule",
+            "进入、路过、靠近、停留、挥手等每类事件有 expected occurrence 和允许延迟窗口",
+            "负例不得触发",
+            "同一物理人短暂 lost/恢复期间不得产生新的招呼型事件序列",
+            "`track_id` 变化时也必须通过 scene/person label 发现",
+            "Botified owner 完整产品闭环 artifact",
+            "Visual Events semantic event -> Botified 决策/回应动作 -> 冷却不重复招呼",
+            "不要求也不允许把 Botified 会话逻辑实现回本 repo",
+        ],
+    )
+    assert "测试 runner 默认必须使用 `DDS_NETWORK=lo`" not in text
+    assert "E2E 默认使用 `DDS_NETWORK=lo`" not in text
+    assert "真实 DDS adapters：DDS image/head state/gaze target 的 runtime adapter" not in text
+
+
 def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     text = read_text(GA_PLAN)
 
@@ -191,14 +219,14 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "`service_client`：WebSocket wire/pack-unpack、连接复用/关闭、timeout、invalid response、frame_id mismatch、retryable/non-retryable error handling 的单元核心",
             "`frame_pump`：one in-flight coordination、keep-latest frame slot/backpressure、gaze stale watchdog、Botified enqueue 的 deterministic unit core",
             "Botified stdout writer：bounded queue/drop/coalescing + BrokenPipe exception unit core",
-            "仍未完成 formal CLI runtime loop/main wiring",
+            "仍未完成 Step 3 formal CLI runtime loop/main wiring",
             "真实 DDS adapters",
             "runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理",
             "PC 本地 DDS E2E tools",
             "release/runtime 编排",
             "真机 smoke",
             "closed-loop handoff",
-            "仍需完成 formal CLI runtime loop/main wiring、真实 DDS adapters、runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理、PC E2E tools、release/runtime 编排、真机 smoke 和 closed-loop handoff",
+            "仍需完成 Step 3 formal CLI runtime loop/main wiring、runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理、Step 4 真实 DDS adapters、PC E2E tools、release/runtime 编排、真机 smoke 和 closed-loop handoff",
             "DDS contract/schema Step 1 主要产物已完成",
             "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
         ],
