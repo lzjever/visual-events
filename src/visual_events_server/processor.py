@@ -79,10 +79,14 @@ class BackendVisualStreamSession:
         self.event_engine = event_engine
         self.metrics_sink = metrics_sink
         self._clock = clock or time.perf_counter
+        self._last_frame_id: int | None = None
+        self._last_timestamp_ms: int | None = None
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
         total_start = self._clock()
         phase_latencies_ms: dict[str, float] = {}
+        if self._should_reset_for_regression(frame):
+            self.reset()
         try:
             infer_start = self._clock()
             detections = await self.backend.infer(frame)
@@ -123,7 +127,24 @@ class BackendVisualStreamSession:
         phase_latencies_ms["response"] = _elapsed_ms(response_start, self._clock)
         phase_latencies_ms["total"] = _elapsed_ms(total_start, self._clock)
         self._emit_metrics(frame, phase_latencies_ms)
+        self._last_frame_id = frame.frame_id
+        self._last_timestamp_ms = frame.timestamp_ms
         return response
+
+    def reset(self) -> None:
+        self.tracker.reset()
+        self.attention_selector.reset()
+        self.event_engine.reset()
+        self._last_frame_id = None
+        self._last_timestamp_ms = None
+
+    def _should_reset_for_regression(self, frame: FrameMessage) -> bool:
+        if self._last_frame_id is not None and frame.frame_id < self._last_frame_id:
+            return True
+        return (
+            self._last_timestamp_ms is not None
+            and frame.timestamp_ms < self._last_timestamp_ms
+        )
 
     def _emit_metrics(
         self,

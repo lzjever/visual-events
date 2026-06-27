@@ -128,6 +128,9 @@ class EventEngine:
         self._next_event_number = 1
         self._reset_state()
 
+    def reset(self) -> None:
+        self._reset_state()
+
     def update(
         self,
         frame: FrameMessage,

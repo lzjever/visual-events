@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from visual_events_server.app import create_app
@@ -146,6 +147,88 @@ def test_backend_error_does_not_advance_event_engine_or_consume_event_id():
     assert error["code"] == "backend_unavailable"
     assert recovered["semantic_events"][0]["event_id"] == "front:evt_000001"
     assert recovered["semantic_events"][0]["event"] == "person_appeared"
+
+
+@pytest.mark.parametrize(
+    ("regression_header", "recovered_frames"),
+    [
+        pytest.param(
+            {"frame_id": 4, "timestamp_ms": 1300},
+            [(5, 1500), (6, 1700), (7, 1900)],
+            id="timestamp",
+        ),
+        pytest.param(
+            {"frame_id": 2, "timestamp_ms": 1600},
+            [(3, 1800), (4, 2000), (5, 2200)],
+            id="frame-id-only",
+        ),
+    ],
+)
+def test_regression_error_resets_connection_state_before_backend_inference(
+    regression_header,
+    recovered_frames,
+):
+    processor = BackendVisualFrameProcessor(
+        SequenceBackend(
+            [
+                PoseDetections(persons=[person()]),
+                PoseDetections(persons=[person((464.0, 100.0, 824.0, 620.0))]),
+                PoseDetections(persons=[person((468.0, 100.0, 828.0, 620.0))]),
+                RuntimeError("backend exploded"),
+                PoseDetections(persons=[person((472.0, 100.0, 832.0, 620.0))]),
+                PoseDetections(persons=[person((476.0, 100.0, 836.0, 620.0))]),
+                PoseDetections(persons=[person((480.0, 100.0, 840.0, 620.0))]),
+            ]
+        )
+    )
+    client = TestClient(create_app(processor=processor))
+
+    with client.websocket_connect("/v1/stream") as websocket:
+        visual_state_from(websocket, frame_id=1, timestamp_ms=1000)
+        visual_state_from(websocket, frame_id=2, timestamp_ms=1200)
+        stable = visual_state_from(websocket, frame_id=3, timestamp_ms=1400)
+
+        websocket.send_bytes(
+            encode_frame_message(
+                frame_header(**regression_header),
+                JPEG_BYTES,
+            )
+        )
+        error = json.loads(websocket.receive_text())
+
+        recovered = visual_state_from(
+            websocket,
+            frame_id=recovered_frames[0][0],
+            timestamp_ms=recovered_frames[0][1],
+        )
+        visual_state_from(
+            websocket,
+            frame_id=recovered_frames[1][0],
+            timestamp_ms=recovered_frames[1][1],
+        )
+        restabilized = visual_state_from(
+            websocket,
+            frame_id=recovered_frames[2][0],
+            timestamp_ms=recovered_frames[2][1],
+        )
+
+    assert stable["semantic_events"][0]["event_id"] == "front:evt_000001"
+    assert stable["semantic_events"][0]["event"] == "person_appeared"
+    assert error["type"] == "error"
+    assert error["code"] == "backend_unavailable"
+    assert error["frame_id"] == regression_header["frame_id"]
+
+    assert recovered["tracks"][0]["track_id"] == 1
+    assert recovered["tracks"][0]["age_ms"] == 0
+    assert recovered["tracks"][0]["lost_ms"] == 0
+    assert recovered["attention"] is None
+    assert recovered["scene_flags"]["largest_person_stable"] is False
+    assert recovered["semantic_events"] == []
+
+    assert restabilized["tracks"][0]["age_ms"] == 400
+    assert restabilized["attention"]["target_track_id"] == 1
+    assert restabilized["semantic_events"][0]["event_id"] == "front:evt_000002"
+    assert restabilized["semantic_events"][0]["event"] == "person_appeared"
 
 
 def test_semantic_events_have_protocol_fields_and_empty_frames_use_empty_list():
