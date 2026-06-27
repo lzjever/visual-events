@@ -5,6 +5,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GA_PLAN = REPO_ROOT / "docs" / "ga-development-plan.md"
+DDS_STACK_DECISION = REPO_ROOT / "docs" / "dds-stack-decision-record.md"
 PROTOCOL = REPO_ROOT / "common" / "schema" / "protocol.md"
 GITIGNORE = REPO_ROOT / ".gitignore"
 
@@ -16,6 +17,63 @@ def read_text(path: Path) -> str:
 def assert_contains_all(text: str, required: list[str]) -> None:
     missing = [item for item in required if item not in text]
     assert missing == []
+
+
+def test_dds_stack_decision_record_freezes_ga_handoff_fields():
+    assert DDS_STACK_DECISION.exists()
+    text = read_text(DDS_STACK_DECISION)
+
+    assert_contains_all(
+        text,
+        [
+            "docs/dds-stack-decision-record.md",
+            "Unitree SDK2 2.0.0",
+            "CycloneDDS 0.10.2",
+            "C++ native DDS helper/bridge",
+            "VISUAL_EVENTS_DDS_DOMAIN",
+            "VISUAL_EVENTS_DDS_NETWORK",
+            "VISUAL_EVENTS_UNITREE_SDK_ROOT",
+            "VISUAL_EVENTS_DDS_BRIDGE_BIN",
+            "protocol_version=1",
+            "line-delimited JSON",
+            "not implemented by this decision record",
+            "RK3588",
+            "explicit unsupported fail-fast",
+            "不链接、import 或调用运控 SDK",
+            "data_base64",
+            "data_size_bytes",
+            "dds_timestamp_ns",
+            "received_monotonic_ns",
+            "camera_name",
+            "width",
+            "height",
+            "encoding",
+            "step",
+            "track_id",
+            "target_norm_x",
+            "target_norm_y",
+            "valid",
+            "state",
+            "stale_after_ms",
+            "schema_version",
+            "camera",
+            "frame_id",
+            "frame_timestamp_ms",
+            "publish_timestamp_ms",
+            "target_track_id",
+            "target_u",
+            "target_v",
+            "image_width",
+            "image_height",
+            "confidence",
+            "reason",
+            "single-line UTF-8 JSON object",
+            "raw bytes are forbidden",
+            "Unitree Channel API is the only DDS pub/sub API used by the bridge",
+        ],
+    )
+    assert "box_norm_width" not in text
+    assert "box_norm_height" not in text
 
 
 def test_ga_plan_requires_val_data_manifest_and_release_hashes():
@@ -105,12 +163,15 @@ def test_ga_plan_freezes_head_state_contract_and_dds_stack_decision_record():
             "PC publisher 使用的权威类型",
             "compatibility report 字段",
             "DDS stack decision record",
-            "SDK/bridge 名称和版本",
-            "IDL codegen 命令",
+            "`docs/dds-stack-decision-record.md`",
+            "DDS stack decision record 已冻结",
+            "Unitree SDK2 2.0.0 + CycloneDDS 0.10.2 + C++ native DDS helper/bridge",
+            "IDL codegen gate",
             "native bridge ABI",
             "runtime env vars",
-            "PC 安装方式",
-            "板端 probe 命令",
+            "PC loopback smoke plan",
+            "板端 probe gate",
+            "不代表真实 DDS factories/adapters、PC E2E、板端兼容或真机闭环已完成",
         ],
     )
     assert "topic | `/robot/head_state`，实现前需与运控 owner 固化最终名称" not in text
@@ -279,8 +340,11 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "`common/schema/dds/head_state_v1.idl` 和 `head_state_v1.md`",
             "gaze target samples",
             "no-motion-SDK audit 覆盖",
-            "Step 1 仍未完成 DDS stack decision record",
-            "尚未实际确定 SDK/bridge runtime choice",
+            "`docs/dds-stack-decision-record.md`：DDS stack decision record 已冻结",
+            "选择 Unitree SDK2 2.0.0 + CycloneDDS 0.10.2 + C++ native DDS helper/bridge",
+            "IDL codegen/toolchain、真实 bridge/factories 和验证仍属于 Step 4",
+            "Step 1 的 DDS stack decision record 已冻结",
+            "不代表真实 DDS factories/adapters、PC E2E、板端兼容或真机闭环已完成",
             "当前 repo 已完成 CLI Step 3A skeleton + Step 3B pure logic",
             "### Step 3：实现正式 CLI core（3A skeleton/3B pure logic、RuntimeCoordinator/main wiring 和 production runner/lifecycle unit core 已完成；真实 DDS factories/adapters 剩余）",
             "CLI package",
@@ -334,8 +398,9 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "Step 3 不实现真实 DDS factories/adapters",
             "### Step 4：实现 DDS adapters（first slice/unit core 已完成；真实 runtime adapters 剩余）",
             "真实 DDS runtime adapters",
-            "SDK/bridge decision record",
-            "IDL codegen/native bridge ABI",
+            "按 `docs/dds-stack-decision-record.md` 已冻结决策实现 C++ native DDS helper/bridge",
+            "IDL codegen/toolchain implementation",
+            "native bridge ABI implementation",
             "real serialization/QoS construction tests",
             "板端 compatibility probe",
             "真实 DDS factories/adapters",
@@ -346,9 +411,13 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "剩余是 Step 4 真实 DDS factories/adapters",
             "DDS contract/schema Step 1 主要产物已完成",
             "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
-            "真实 DDS factories/adapters、SDK/bridge decision record、IDL codegen/native bridge ABI、real serialization/QoS construction tests、板端 compatibility probe、PC E2E tools、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
+            "真实 DDS factories/adapters、IDL codegen/toolchain implementation、native bridge ABI implementation、real serialization/QoS construction tests、板端 compatibility probe、PC E2E tools、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
+    assert "Step 1 仍未完成 DDS stack decision record" not in text
+    assert "尚未实际确定 SDK/bridge runtime choice" not in text
+    assert "SDK/bridge decision record：SDK/bridge 名称和版本" not in text
+    assert "真实 DDS factories/adapters、SDK/bridge decision record" not in text
     assert "尚未完成 CLI runtime loop、service_client、frame_pump、真实 DDS adapters、Botified stdout writer/backpressure" not in text
     assert "仍需完成 runtime loop、真实 DDS adapters、Botified stdout writer、PC E2E tools 和 release/runtime 编排" not in text
     assert "仍未完成 Step 3 formal CLI runtime loop/main wiring" not in text
