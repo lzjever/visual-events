@@ -8,6 +8,7 @@ GA_PLAN = REPO_ROOT / "docs" / "ga-development-plan.md"
 DDS_STACK_DECISION = REPO_ROOT / "docs" / "dds-stack-decision-record.md"
 NO_MOTION_AUDIT = REPO_ROOT / "docs" / "no-motion-sdk-audit.md"
 PROTOCOL = REPO_ROOT / "common" / "schema" / "protocol.md"
+VAL_DATA_MANIFEST_SCHEMA = REPO_ROOT / "common" / "schema" / "val_data_manifest_v1.md"
 GITIGNORE = REPO_ROOT / ".gitignore"
 
 
@@ -141,6 +142,43 @@ def test_ga_plan_requires_val_data_manifest_and_release_hashes():
     )
     assert "Artifact hash：server baseline、CLI unit/integration、PC local E2E、真机 smoke" not in step9
     assert "Camera DDS owner、gaze consumer/运控 owner、Botified owner sign-off。" not in step9
+
+
+def test_val_data_manifest_v1_schema_is_oracle_contract_skeleton_only():
+    assert VAL_DATA_MANIFEST_SCHEMA.exists()
+    schema_text = read_text(VAL_DATA_MANIFEST_SCHEMA)
+    plan_text = read_text(GA_PLAN)
+
+    assert_contains_all(
+        schema_text,
+        [
+            "schema_version: 1",
+            "fps",
+            "scene_count",
+            "frame_count",
+            "positive integer",
+            "scenes",
+            "scene_name",
+            "scene_sha256",
+            "expected_event_timeline.source",
+            "expected_event_timeline.version",
+            "expected_attention_target_timeline.source",
+            "expected_attention_target_timeline.rule",
+            "does not evaluate event correctness",
+            "does not complete the full PC GA gate",
+        ],
+    )
+    assert_contains_all(
+        plan_text,
+        [
+            "authoritative manifest/oracle schema skeleton",
+            "`common/schema/val_data_manifest_v1.md`",
+            "`val-data/manifest.json` 仍不进 Git",
+            "不做 oracle evaluation",
+            "full PC GA gate 仍未完成",
+        ],
+    )
+    assert "full PC GA gate is complete" not in schema_text
 
 
 def test_ga_plan_defines_current_pc_delivery_gate_and_deferred_hardware_gate():

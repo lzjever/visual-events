@@ -362,6 +362,51 @@ def make_case(tmp_path: Path) -> dict[str, Path]:
     }
 
 
+def authoritative_manifest_for_data(manifest_module: Any, data_dir: Path) -> dict[str, Any]:
+    inventory = manifest_module.generate_effective_manifest(data_dir)
+    return {
+        "schema_version": 1,
+        "fps": 10.0,
+        "scene_count": inventory["scene_count"],
+        "frame_count": inventory["frame_count"],
+        "scenes": [
+            {
+                "scene_name": scene["scene_name"],
+                "frame_count": scene["frame_count"],
+                "scene_sha256": scene["scene_sha256"],
+            }
+            for scene in inventory["scenes"]
+        ],
+        "oracle": {
+            "expected_event_timeline": {
+                "source": "oracle/events.json",
+                "version": "events-v1",
+            },
+            "expected_attention_target_timeline": {
+                "source": "oracle/attention.json",
+                "rule": "largest_stable_person_v1",
+            },
+        },
+    }
+
+
+def write_authoritative_manifest(module: Any, paths: dict[str, Path]) -> Path:
+    manifest_path = paths["data_dir"] / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            authoritative_manifest_for_data(
+                module.cli_local_e2e_manifest,
+                paths["data_dir"],
+            ),
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
 def base_argv(paths: dict[str, Path], *extra: str) -> list[str]:
     return [
         "--data-dir",
@@ -1205,6 +1250,83 @@ def test_success_report_hashes_runtime_provenance_and_server_config(tmp_path: Pa
     assert report["runtime_provenance"]["config_path"] == os.fspath(server_config)
     assert report["server_exit_code"] == -15
     assert report["cli_exit_code"] == -15
+
+
+def test_partial_smoke_report_projects_authoritative_manifest_oracle_summary(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    manifest_path = write_authoritative_manifest(module, paths)
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(paths, "--manifest", os.fspath(manifest_path), "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is True
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert "oracle" in report["not_covered"]
+    assert "full_scene_matrix" in report["not_covered"]
+    assert report["manifest_source"] == "file"
+    assert report["manifest_schema_version"] == 1
+    assert report["manifest_authoritative"] is True
+    assert report["manifest_validation_errors"] == []
+    assert report["oracle_schema_present"] is True
+    assert report["oracle_schema_valid"] is True
+    assert report["oracle_summary"] == {
+        "expected_event_timeline": {
+            "source": "oracle/events.json",
+            "version": "events-v1",
+        },
+        "expected_attention_target_timeline": {
+            "source": "oracle/attention.json",
+            "rule": "largest_stable_person_v1",
+        },
+    }
+
+
+def test_invalid_authoritative_manifest_fails_preflight_without_starting_runner(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    manifest_payload = authoritative_manifest_for_data(
+        module.cli_local_e2e_manifest,
+        paths["data_dir"],
+    )
+    manifest_payload["scenes"][0]["scene_sha256"] = "0" * 64
+    manifest_path = paths["data_dir"] / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest_payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(paths, "--manifest", os.fspath(manifest_path)),
+        runner=runner,
+    )
+
+    assert rc == 2
+    assert runner.events == []
+    assert runner.started == {}
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert report["slice_pass"] is False
+    assert report["manifest_authoritative"] is True
+    assert report["manifest_validation_errors"] == [
+        "scene_sha256_mismatch:scene-a"
+    ]
+    assert report["oracle_schema_present"] is True
+    assert report["oracle_schema_valid"] is True
+    assert any(
+        "manifest_validation_failed" in reason for reason in report["failure_reasons"]
+    )
 
 
 @pytest.mark.parametrize(

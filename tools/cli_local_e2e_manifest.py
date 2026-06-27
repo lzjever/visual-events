@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
 
 
 _JPEG_GLOBS = ("*.jpeg", "*.jpg")
+MANIFEST_SCHEMA_VERSION = 1
 
 
 class PreflightError(Exception):
@@ -161,6 +163,239 @@ def manifest_count_field(manifest: Any, field_name: str) -> int | None:
     return value if isinstance(value, int) else None
 
 
+def manifest_schema_version_field(manifest: Any) -> Any | None:
+    if not isinstance(manifest, dict):
+        return None
+    return manifest.get("schema_version")
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_positive_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(float(value)) and float(value) > 0.0
+
+
+def _non_empty_str(value: Any) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _is_hex_sha256(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    return all(char in "0123456789abcdefABCDEF" for char in value)
+
+
+def _empty_manifest_contract_projection(schema_version: Any | None) -> dict[str, Any]:
+    return {
+        "manifest_schema_version": schema_version,
+        "manifest_authoritative": False,
+        "manifest_validation_errors": [],
+        "oracle_schema_present": False,
+        "oracle_schema_valid": False,
+        "oracle_summary": None,
+    }
+
+
+def _oracle_summary(oracle: Any) -> dict[str, Any] | None:
+    if not isinstance(oracle, dict):
+        return None
+    expected_event = oracle.get("expected_event_timeline")
+    expected_attention = oracle.get("expected_attention_target_timeline")
+    if not isinstance(expected_event, dict):
+        expected_event = {}
+    if not isinstance(expected_attention, dict):
+        expected_attention = {}
+    return {
+        "expected_event_timeline": {
+            "source": expected_event.get("source")
+            if isinstance(expected_event.get("source"), str)
+            else None,
+            "version": expected_event.get("version")
+            if isinstance(expected_event.get("version"), str)
+            else None,
+        },
+        "expected_attention_target_timeline": {
+            "source": expected_attention.get("source")
+            if isinstance(expected_attention.get("source"), str)
+            else None,
+            "rule": expected_attention.get("rule")
+            if isinstance(expected_attention.get("rule"), str)
+            else None,
+        },
+    }
+
+
+def _validate_oracle_schema(manifest: dict[str, Any]) -> tuple[bool, bool, dict[str, Any] | None, list[str]]:
+    oracle = manifest.get("oracle")
+    if not isinstance(oracle, dict):
+        return False, False, None, ["oracle_missing_or_not_object"]
+
+    errors: list[str] = []
+    expected_event = oracle.get("expected_event_timeline")
+    if not isinstance(expected_event, dict):
+        errors.append("oracle.expected_event_timeline_missing")
+        expected_event = {}
+    expected_attention = oracle.get("expected_attention_target_timeline")
+    if not isinstance(expected_attention, dict):
+        errors.append("oracle.expected_attention_target_timeline_missing")
+        expected_attention = {}
+
+    for field_name in ("source", "version"):
+        if not _non_empty_str(expected_event.get(field_name)):
+            errors.append(f"oracle.expected_event_timeline.{field_name}_missing")
+    for field_name in ("source", "rule"):
+        if not _non_empty_str(expected_attention.get(field_name)):
+            errors.append(
+                f"oracle.expected_attention_target_timeline.{field_name}_missing"
+            )
+
+    return True, not errors, _oracle_summary(oracle), errors
+
+
+def _actual_scenes_by_name(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    scenes = inventory.get("scenes")
+    if not isinstance(scenes, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        scene_name = scene.get("scene_name")
+        if isinstance(scene_name, str):
+            result[scene_name] = scene
+    return result
+
+
+def _validate_manifest_scenes(
+    *,
+    manifest: dict[str, Any],
+    inventory: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    scenes = manifest.get("scenes")
+    if not isinstance(scenes, list):
+        return ["scenes_missing_or_not_list"]
+
+    actual_by_name = _actual_scenes_by_name(inventory)
+    seen_names: set[str] = set()
+    manifest_names: set[str] = set()
+    for index, scene in enumerate(scenes):
+        if not isinstance(scene, dict):
+            errors.append(f"scene_invalid:{index}")
+            continue
+
+        raw_name = scene.get("scene_name")
+        if not _non_empty_str(raw_name):
+            errors.append(f"scene_name_missing:{index}")
+            continue
+        scene_name = str(raw_name)
+        if scene_name in seen_names:
+            errors.append(f"scene_duplicate:{scene_name}")
+        else:
+            seen_names.add(scene_name)
+            manifest_names.add(scene_name)
+
+        actual_scene = actual_by_name.get(scene_name)
+        if actual_scene is None:
+            errors.append(f"scene_unknown:{scene_name}")
+
+        frame_count = scene.get("frame_count")
+        if not _is_int(frame_count):
+            errors.append(f"scene_frame_count_invalid:{scene_name}")
+        elif actual_scene is not None and frame_count != actual_scene.get("frame_count"):
+            errors.append(f"scene_frame_count_mismatch:{scene_name}")
+
+        scene_sha256 = scene.get("scene_sha256")
+        if not _is_hex_sha256(scene_sha256):
+            errors.append(f"scene_sha256_invalid:{scene_name}")
+        elif (
+            actual_scene is not None
+            and str(scene_sha256).lower() != actual_scene.get("scene_sha256")
+        ):
+            errors.append(f"scene_sha256_mismatch:{scene_name}")
+
+    for scene_name in sorted(set(actual_by_name) - manifest_names):
+        errors.append(f"scene_missing:{scene_name}")
+    return errors
+
+
+def _validate_manifest_v1(
+    *,
+    manifest: dict[str, Any],
+    inventory: dict[str, Any],
+) -> tuple[list[str], bool, bool, dict[str, Any] | None]:
+    errors: list[str] = []
+    schema_version = manifest.get("schema_version")
+    if not _is_int(schema_version):
+        errors.append("schema_version_invalid")
+    elif schema_version != MANIFEST_SCHEMA_VERSION:
+        errors.append("schema_version_mismatch")
+    if not _is_positive_number(manifest.get("fps")):
+        errors.append("fps_missing_or_non_positive")
+
+    scene_count = manifest.get("scene_count")
+    if not _is_int(scene_count):
+        errors.append("scene_count_invalid")
+    else:
+        if scene_count <= 0:
+            errors.append("scene_count_empty")
+        if scene_count != inventory["scene_count"]:
+            errors.append("scene_count_mismatch")
+
+    frame_count = manifest.get("frame_count")
+    if not _is_int(frame_count):
+        errors.append("frame_count_invalid")
+    else:
+        if frame_count <= 0:
+            errors.append("frame_count_empty")
+        if frame_count != inventory["frame_count"]:
+            errors.append("frame_count_mismatch")
+
+    errors.extend(_validate_manifest_scenes(manifest=manifest, inventory=inventory))
+    oracle_present, oracle_valid, oracle_summary, oracle_errors = _validate_oracle_schema(
+        manifest
+    )
+    errors.extend(oracle_errors)
+    return errors, oracle_present, oracle_valid, oracle_summary
+
+
+def manifest_contract_projection(
+    *,
+    manifest: Any,
+    manifest_source: str,
+    data_dir: Path,
+) -> dict[str, Any]:
+    schema_version = manifest_schema_version_field(manifest)
+    if manifest_source == "generated":
+        return _empty_manifest_contract_projection(schema_version)
+    if not isinstance(manifest, dict):
+        return _empty_manifest_contract_projection(schema_version)
+    if "schema_version" not in manifest:
+        return _empty_manifest_contract_projection(schema_version)
+    if schema_version != MANIFEST_SCHEMA_VERSION:
+        projection = _empty_manifest_contract_projection(schema_version)
+        projection["manifest_validation_errors"] = ["unsupported_manifest_schema_version"]
+        return projection
+
+    inventory = generate_effective_manifest(data_dir)
+    errors, oracle_present, oracle_valid, oracle_summary = _validate_manifest_v1(
+        manifest=manifest,
+        inventory=inventory,
+    )
+    return {
+        "manifest_schema_version": schema_version,
+        "manifest_authoritative": True,
+        "manifest_validation_errors": errors,
+        "oracle_schema_present": oracle_present,
+        "oracle_schema_valid": oracle_valid,
+        "oracle_summary": oracle_summary,
+    }
+
+
 def build_report(
     *,
     data_dir: Path,
@@ -179,6 +414,11 @@ def build_report(
         manifest_source = "file"
         effective_manifest, manifest_sha256 = load_manifest_file(manifest_path)
 
+    contract_projection = manifest_contract_projection(
+        manifest=effective_manifest,
+        manifest_source=manifest_source,
+        data_dir=resolved_data_dir,
+    )
     report = {
         "report_type": "cli_local_e2e_manifest_skeleton",
         "overall_pass": False,
@@ -191,6 +431,7 @@ def build_report(
         "scene_count": manifest_count_field(effective_manifest, "scene_count"),
         "frame_count": manifest_count_field(effective_manifest, "frame_count"),
         "effective_manifest": effective_manifest,
+        **contract_projection,
     }
     return resolved_out, report
 
@@ -214,6 +455,12 @@ def main(argv: list[str] | None = None) -> int:
         write_report(out, report)
     except (OSError, PreflightError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    validation_errors = report.get("manifest_validation_errors")
+    if validation_errors:
+        joined = ",".join(str(error) for error in validation_errors)
+        print(f"error: manifest validation failed: {joined}", file=sys.stderr)
         return 2
 
     print(str(out))

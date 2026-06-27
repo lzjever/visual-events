@@ -26,6 +26,38 @@ def load_report(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def rich_manifest_for_data(module: Any, data_dir: Path) -> dict[str, Any]:
+    inventory = module.generate_effective_manifest(data_dir)
+    return {
+        "schema_version": 1,
+        "fps": 10.0,
+        "scene_count": inventory["scene_count"],
+        "frame_count": inventory["frame_count"],
+        "scenes": [
+            {
+                "scene_name": scene["scene_name"],
+                "frame_count": scene["frame_count"],
+                "scene_sha256": scene["scene_sha256"],
+            }
+            for scene in inventory["scenes"]
+        ],
+        "oracle": {
+            "expected_event_timeline": {
+                "source": "oracle/events.json",
+                "version": "events-v1",
+            },
+            "expected_attention_target_timeline": {
+                "source": "oracle/attention.json",
+                "rule": "largest_stable_person_v1",
+            },
+        },
+    }
+
+
+def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
 def run_tool(module: Any, argv: list[str], capsys: pytest.CaptureFixture[str]) -> int:
     result = module.main(argv)
     assert isinstance(result, int)
@@ -67,6 +99,12 @@ def test_missing_manifest_generates_deterministic_effective_manifest(
     assert first_report["manifest_source"] == "generated"
     assert first_report["manifest_path"] is None
     assert first_report["manifest_sha256"]
+    assert first_report["manifest_schema_version"] is None
+    assert first_report["manifest_authoritative"] is False
+    assert first_report["manifest_validation_errors"] == []
+    assert first_report["oracle_schema_present"] is False
+    assert first_report["oracle_schema_valid"] is False
+    assert first_report["oracle_summary"] is None
     assert first_report["scene_count"] == 2
     assert first_report["frame_count"] == 4
     assert first_summary["scene_count"] == 2
@@ -139,6 +177,12 @@ def test_existing_manifest_uses_file_hash_and_file_source(
     assert report["manifest_source"] == "file"
     assert report["manifest_path"] == str(manifest)
     assert report["manifest_sha256"] == hashlib.sha256(manifest_bytes).hexdigest()
+    assert report["manifest_schema_version"] is None
+    assert report["manifest_authoritative"] is False
+    assert report["manifest_validation_errors"] == []
+    assert report["oracle_schema_present"] is False
+    assert report["oracle_schema_valid"] is False
+    assert report["oracle_summary"] is None
     assert report["scene_count"] is None
     assert report["frame_count"] is None
     assert report["effective_manifest"] == {"scenes": [{"name": "from-file"}]}
@@ -174,6 +218,195 @@ def test_existing_manifest_report_counts_use_standard_fields(
         "frame_count": 41,
         "scenes": [],
     }
+    assert report["manifest_authoritative"] is False
+    assert report["oracle_schema_present"] is False
+
+
+def test_schema_v1_rich_manifest_is_authoritative_and_projects_oracle(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    module = import_manifest_module()
+    data_dir = tmp_path / "val-data"
+    write_frame(data_dir / "scene-a" / "001.jpg", b"a-1")
+    write_frame(data_dir / "scene-a" / "002.jpg", b"a-2")
+    write_frame(data_dir / "scene-b" / "001.jpeg", b"b-1")
+    manifest = data_dir / "manifest.json"
+    write_manifest(manifest, rich_manifest_for_data(module, data_dir))
+    out = tmp_path / "artifacts" / "manifest-report.json"
+
+    result = run_tool(
+        module,
+        ["--data-dir", str(data_dir), "--out", str(out)],
+        capsys,
+    )
+    captured = capsys.readouterr()
+    report = load_report(out)
+
+    assert result == 0
+    assert captured.err == ""
+    assert report["manifest_source"] == "file"
+    assert report["manifest_schema_version"] == 1
+    assert report["manifest_authoritative"] is True
+    assert report["manifest_validation_errors"] == []
+    assert report["oracle_schema_present"] is True
+    assert report["oracle_schema_valid"] is True
+    assert report["oracle_summary"] == {
+        "expected_event_timeline": {
+            "source": "oracle/events.json",
+            "version": "events-v1",
+        },
+        "expected_attention_target_timeline": {
+            "source": "oracle/attention.json",
+            "rule": "largest_stable_person_v1",
+        },
+    }
+    assert report["scene_count"] == 2
+    assert report["frame_count"] == 3
+
+
+def test_schema_v1_manifest_rejects_bool_schema_version(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    module = import_manifest_module()
+    data_dir = tmp_path / "val-data"
+    write_frame(data_dir / "scene" / "001.jpg", b"frame")
+    manifest_payload = rich_manifest_for_data(module, data_dir)
+    manifest_payload["schema_version"] = True
+    write_manifest(data_dir / "manifest.json", manifest_payload)
+    out = tmp_path / "artifacts" / "manifest-report.json"
+
+    result = run_tool(
+        module,
+        ["--data-dir", str(data_dir), "--out", str(out)],
+        capsys,
+    )
+    captured = capsys.readouterr()
+    report = load_report(out)
+
+    assert result == 2
+    assert captured.out == ""
+    assert "schema_version_invalid" in report["manifest_validation_errors"]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "bad_value", "expected_error"),
+    [
+        ("scene_count", 99, "scene_count_mismatch"),
+        ("frame_count", 99, "frame_count_mismatch"),
+    ],
+)
+def test_schema_v1_manifest_rejects_count_mismatches(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    field_name: str,
+    bad_value: int,
+    expected_error: str,
+):
+    module = import_manifest_module()
+    data_dir = tmp_path / "val-data"
+    write_frame(data_dir / "scene" / "001.jpg", b"frame")
+    manifest_payload = rich_manifest_for_data(module, data_dir)
+    manifest_payload[field_name] = bad_value
+    write_manifest(data_dir / "manifest.json", manifest_payload)
+    out = tmp_path / "artifacts" / "manifest-report.json"
+
+    result = run_tool(
+        module,
+        ["--data-dir", str(data_dir), "--out", str(out)],
+        capsys,
+    )
+    captured = capsys.readouterr()
+    report = load_report(out)
+
+    assert result == 2
+    assert captured.out == ""
+    assert expected_error in report["manifest_validation_errors"]
+    assert report["manifest_authoritative"] is True
+    assert report["oracle_schema_valid"] is True
+
+
+def test_schema_v1_manifest_rejects_empty_authoritative_dataset(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    module = import_manifest_module()
+    data_dir = tmp_path / "val-data"
+    data_dir.mkdir()
+    write_manifest(data_dir / "manifest.json", rich_manifest_for_data(module, data_dir))
+    out = tmp_path / "artifacts" / "manifest-report.json"
+
+    result = run_tool(
+        module,
+        ["--data-dir", str(data_dir), "--out", str(out)],
+        capsys,
+    )
+    captured = capsys.readouterr()
+    report = load_report(out)
+
+    assert result == 2
+    assert captured.out == ""
+    assert report["manifest_authoritative"] is True
+    assert report["scene_count"] == 0
+    assert report["frame_count"] == 0
+    assert "scene_count_empty" in report["manifest_validation_errors"]
+    assert "frame_count_empty" in report["manifest_validation_errors"]
+    assert report["oracle_schema_valid"] is True
+
+
+def test_schema_v1_manifest_rejects_scene_sha_mismatch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    module = import_manifest_module()
+    data_dir = tmp_path / "val-data"
+    write_frame(data_dir / "scene" / "001.jpg", b"frame")
+    manifest_payload = rich_manifest_for_data(module, data_dir)
+    manifest_payload["scenes"][0]["scene_sha256"] = "0" * 64
+    write_manifest(data_dir / "manifest.json", manifest_payload)
+    out = tmp_path / "artifacts" / "manifest-report.json"
+
+    result = run_tool(
+        module,
+        ["--data-dir", str(data_dir), "--out", str(out)],
+        capsys,
+    )
+    report = load_report(out)
+
+    assert result == 2
+    assert "scene_sha256_mismatch:scene" in report["manifest_validation_errors"]
+
+
+def test_schema_v1_manifest_rejects_missing_oracle_fields(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    module = import_manifest_module()
+    data_dir = tmp_path / "val-data"
+    write_frame(data_dir / "scene" / "001.jpg", b"frame")
+    manifest_payload = rich_manifest_for_data(module, data_dir)
+    del manifest_payload["oracle"]["expected_event_timeline"]["version"]
+    del manifest_payload["oracle"]["expected_attention_target_timeline"]["rule"]
+    write_manifest(data_dir / "manifest.json", manifest_payload)
+    out = tmp_path / "artifacts" / "manifest-report.json"
+
+    result = run_tool(
+        module,
+        ["--data-dir", str(data_dir), "--out", str(out)],
+        capsys,
+    )
+    report = load_report(out)
+
+    assert result == 2
+    assert report["oracle_schema_present"] is True
+    assert report["oracle_schema_valid"] is False
+    assert "oracle.expected_event_timeline.version_missing" in report[
+        "manifest_validation_errors"
+    ]
+    assert "oracle.expected_attention_target_timeline.rule_missing" in report[
+        "manifest_validation_errors"
+    ]
 
 
 def test_explicit_missing_manifest_fails_fast(

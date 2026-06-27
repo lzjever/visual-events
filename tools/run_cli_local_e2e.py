@@ -76,6 +76,12 @@ MANIFEST_REPORT_KEYS = [
     "manifest_source",
     "manifest_path",
     "manifest_sha256",
+    "manifest_schema_version",
+    "manifest_authoritative",
+    "manifest_validation_errors",
+    "oracle_schema_present",
+    "oracle_schema_valid",
+    "oracle_summary",
     "scene_count",
     "frame_count",
     "effective_manifest",
@@ -545,6 +551,7 @@ def main(
         )
         out_for_failure = out
         manifest_report_for_failure = manifest_report
+        _preflight_manifest_contract(manifest_report)
         config = _build_config(args, out=out, manifest_report=manifest_report)
     except (OSError, PreflightError, cli_local_e2e_manifest.PreflightError, PcDdsToolError) as exc:
         failure_reason = str(exc)
@@ -651,6 +658,16 @@ def _build_config(
         health_interval_s=args.health_interval_s,
         startup_grace_s=args.startup_grace_s,
     )
+
+
+def _preflight_manifest_contract(manifest_report: dict[str, Any]) -> None:
+    errors = manifest_report.get("manifest_validation_errors")
+    if not errors:
+        return
+    if not isinstance(errors, list):
+        raise PreflightError("manifest_validation_failed")
+    joined = ",".join(str(error) for error in errors)
+    raise PreflightError(f"manifest_validation_failed:{joined}")
 
 
 def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
@@ -1300,6 +1317,12 @@ def _build_preflight_failed_report(
             "manifest_source": None,
             "manifest_path": None,
             "manifest_sha256": None,
+            "manifest_schema_version": None,
+            "manifest_authoritative": False,
+            "manifest_validation_errors": [],
+            "oracle_schema_present": False,
+            "oracle_schema_valid": False,
+            "oracle_summary": None,
             "scene_count": None,
             "frame_count": None,
             "effective_manifest": None,
