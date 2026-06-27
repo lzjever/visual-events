@@ -163,6 +163,9 @@ class VisualEventsServiceClient:
             self._websocket = await self._connect(self._url)
         return self._websocket
 
+    async def close(self) -> None:
+        await self._close_connection()
+
     async def _close_connection(self) -> None:
         websocket = self._websocket
         self._websocket = None

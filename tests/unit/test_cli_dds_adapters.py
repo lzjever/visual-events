@@ -130,6 +130,7 @@ def test_fake_image_subscriber_keeps_latest_valid_frame_only_and_drops_invalid()
     fake = import_dds_module("fake")
     subscriber = fake.FakeDdsImageSubscriber()
 
+    subscriber.start()
     subscriber.push(make_camera_message(types, timestamp_ms=1000))
     subscriber.push(make_camera_message(types, timestamp_ms=2000))
     subscriber.push(make_camera_message(types, timestamp_ms=3000))
@@ -153,11 +154,35 @@ def test_fake_image_subscriber_poll_latest_raises_after_close():
     fake = import_dds_module("fake")
     subscriber = fake.FakeDdsImageSubscriber()
 
+    subscriber.start()
     subscriber.push(make_camera_message(types, timestamp_ms=1000))
     subscriber.close()
 
     with pytest.raises(RuntimeError, match="closed"):
         subscriber.poll_latest()
+
+
+def test_fake_image_subscriber_requires_start_before_use_and_rejects_start_after_close():
+    types = import_dds_module("types")
+    fake = import_dds_module("fake")
+    subscriber = fake.FakeDdsImageSubscriber()
+
+    with pytest.raises(RuntimeError, match="not started"):
+        subscriber.push(make_camera_message(types, timestamp_ms=1000))
+    with pytest.raises(RuntimeError, match="not started"):
+        subscriber.poll_latest()
+
+    subscriber.start()
+    subscriber.start()
+    subscriber.push(make_camera_message(types, timestamp_ms=1000))
+    assert isinstance(subscriber.poll_latest(), InputFrame)
+
+    subscriber.close()
+    subscriber.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        subscriber.start()
+    with pytest.raises(RuntimeError, match="closed"):
+        subscriber.push(make_camera_message(types, timestamp_ms=2000))
 
 
 @pytest.mark.parametrize(
@@ -262,6 +287,7 @@ def test_fake_head_state_subscriber_returns_current_motion_and_unknown_without_s
         stationary_pitch_vel_rad_s=0.03,
     )
 
+    subscriber.start()
     assert_unknown_motion(subscriber.current_motion(now_ms=1710000000000))
 
     subscriber.push(make_head_sample(types, timestamp_ms=1710000000000, yaw_vel_rad_s=0.04))
@@ -279,9 +305,33 @@ def test_fake_head_state_subscriber_current_motion_raises_after_close():
     fake = import_dds_module("fake")
     subscriber = fake.FakeDdsHeadStateSubscriber()
 
+    subscriber.start()
     subscriber.push(make_head_sample(types, timestamp_ms=1000))
     subscriber.close()
 
+    with pytest.raises(RuntimeError, match="closed"):
+        subscriber.current_motion(now_ms=1000)
+
+
+def test_fake_head_state_subscriber_requires_start_before_use_and_rejects_start_after_close():
+    types = import_dds_module("types")
+    fake = import_dds_module("fake")
+    subscriber = fake.FakeDdsHeadStateSubscriber()
+
+    with pytest.raises(RuntimeError, match="not started"):
+        subscriber.push(make_head_sample(types, timestamp_ms=1000))
+    with pytest.raises(RuntimeError, match="not started"):
+        subscriber.current_motion(now_ms=1000)
+
+    subscriber.start()
+    subscriber.start()
+    subscriber.push(make_head_sample(types, timestamp_ms=1000))
+    assert subscriber.current_motion(now_ms=1000).state == "stationary"
+
+    subscriber.close()
+    subscriber.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        subscriber.start()
     with pytest.raises(RuntimeError, match="closed"):
         subscriber.current_motion(now_ms=1000)
 
@@ -304,6 +354,26 @@ def test_fake_gaze_target_publisher_lifecycle_and_payload_history():
     publisher.close()
     with pytest.raises(RuntimeError, match="closed"):
         publisher.publish({"schema_version": 1, "state": "tracking", "frame_id": 3})
+
+
+def test_fake_gaze_target_publisher_requires_start_before_publish_and_rejects_start_after_close():
+    fake = import_dds_module("fake")
+    publisher = fake.FakeDdsGazeTargetPublisher()
+
+    with pytest.raises(RuntimeError, match="not started"):
+        publisher.publish({"schema_version": 1, "state": "tracking", "frame_id": 1})
+
+    publisher.start()
+    publisher.start()
+    publisher.publish({"schema_version": 1, "state": "tracking", "frame_id": 1})
+    assert publisher.latest() == {"schema_version": 1, "state": "tracking", "frame_id": 1}
+
+    publisher.close()
+    publisher.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        publisher.start()
+    with pytest.raises(RuntimeError, match="closed"):
+        publisher.publish({"schema_version": 1, "state": "lost", "frame_id": 2})
 
 
 def test_protocol_module_exports_dds_protocol_names():

@@ -94,6 +94,17 @@ def test_runtime_without_check_config_calls_runtime_runner_and_returns_exit_code
     assert captured.err == ""
 
 
+def test_default_runtime_runner_writes_dds_not_implemented_and_returns_two(capsys):
+    main = import_main()
+
+    result = main([])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert "Step 4 DDS adapters not implemented" in captured.err
+
+
 def test_runtime_runner_receives_config_after_cli_overrides(capsys):
     main = import_main()
     received_configs = []

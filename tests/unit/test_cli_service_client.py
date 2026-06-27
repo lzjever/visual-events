@@ -189,6 +189,30 @@ async def test_retryable_error_response_returns_error_and_keeps_connection_reusa
 
 
 @pytest.mark.asyncio
+async def test_close_closes_cached_websocket_and_next_request_reconnects():
+    module = import_service_client()
+    first_ws = FakeWebSocket([visual_state(frame_id=7)])
+    second_ws = FakeWebSocket([visual_state(frame_id=8)])
+    connect = FakeConnect(first_ws, second_ws)
+    client = module.VisualEventsServiceClient(
+        "ws://service/v1/stream",
+        response_timeout_ms=1000,
+        connect=connect,
+    )
+
+    first_result = await client.request_frame(frame_header(frame_id=7), JPEG_1280X720)
+    await client.close()
+    await client.close()
+    second_result = await client.request_frame(frame_header(frame_id=8), JPEG_1280X720)
+
+    assert first_result.visual_state == visual_state(frame_id=7)
+    assert first_ws.closed is True
+    assert second_result.visual_state == visual_state(frame_id=8)
+    assert second_ws.closed is False
+    assert connect.urls == ["ws://service/v1/stream", "ws://service/v1/stream"]
+
+
+@pytest.mark.asyncio
 async def test_non_retryable_error_closes_connection_and_next_request_reconnects():
     module = import_service_client()
     first_ws = FakeWebSocket(

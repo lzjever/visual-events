@@ -107,11 +107,24 @@ class FakeServiceClient:
             self._request_event.clear()
 
 
+class ShieldedFakeServiceClient(FakeServiceClient):
+    async def request_frame(self, header: dict[str, Any], jpeg: bytes) -> Any:
+        self.requests.append((header, jpeg))
+        self._request_event.set()
+        result = self._results.pop(0)
+        if isinstance(result, asyncio.Future):
+            return await asyncio.shield(result)
+        return result
+
+
 class FakeGazePublisher:
     def __init__(self):
         self.payloads: list[Any] = []
+        self.closed = False
 
     def publish(self, payload: Any) -> None:
+        if self.closed:
+            raise AssertionError("published after close")
         self.payloads.append(payload)
 
     def dicts(self) -> list[dict[str, Any]]:
@@ -150,6 +163,19 @@ class BlockingDrainWriter(FakeBotifiedWriter):
         self.drain_calls += 1
         self.started.set()
         time.sleep(self.sleep_seconds)
+
+
+class BlockingFailingDrainWriter(FakeBotifiedWriter):
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def drain_available(self) -> None:
+        self.drain_calls += 1
+        self.started.set()
+        self.release.wait(timeout=TICK_TIMEOUT_SECONDS)
+        raise BotifiedPipeClosed("botified stdout closed")
 
 
 def head_motion() -> HeadMotion:
@@ -404,3 +430,72 @@ async def test_runtime_coordinator_broken_botified_pipe_publishes_stale_and_retu
         publish_timestamp_ms=1710000000082,
         stale_after_ms=250,
     ).to_dict()
+
+
+@pytest.mark.asyncio
+async def test_runtime_coordinator_shutdown_cancels_pending_service_process_task():
+    runtime = import_runtime()
+    clock = FakeClock(1710000000100)
+    pending_response: asyncio.Future[Any] = asyncio.Future()
+    frame_source = FakeFrameSource([make_frame(timestamp_ms=1710000000000)])
+    service = ShieldedFakeServiceClient([pending_response])
+    gaze = FakeGazePublisher()
+    coordinator = make_coordinator(
+        runtime,
+        frame_source=frame_source,
+        service=service,
+        gaze=gaze,
+        clock=clock,
+    )
+
+    await run_tick(coordinator)
+    await asyncio.wait_for(
+        service.wait_for_requests(1),
+        timeout=TICK_TIMEOUT_SECONDS,
+    )
+
+    await asyncio.wait_for(
+        coordinator.shutdown(),
+        timeout=TICK_TIMEOUT_SECONDS,
+    )
+    assert getattr(coordinator, "_process_task") is None
+
+    gaze.closed = True
+    pending_response.set_result(
+        service_result(visual_state_lost(frame_id=1, timestamp_ms=1710000000000))
+    )
+    await asyncio.sleep(0)
+
+    assert gaze.dicts() == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_coordinator_shutdown_cancels_pending_botified_drain_task():
+    runtime = import_runtime()
+    clock = FakeClock(1710000000100)
+    frame_source = FakeFrameSource([])
+    service = FakeServiceClient([])
+    gaze = FakeGazePublisher()
+    botified = BlockingFailingDrainWriter()
+    coordinator = make_coordinator(
+        runtime,
+        frame_source=frame_source,
+        service=service,
+        gaze=gaze,
+        botified=botified,
+        clock=clock,
+    )
+
+    await run_tick(coordinator)
+    assert botified.started.wait(timeout=TICK_TIMEOUT_SECONDS)
+
+    try:
+        await asyncio.wait_for(
+            coordinator.shutdown(),
+            timeout=TICK_TIMEOUT_SECONDS,
+        )
+        assert getattr(coordinator, "_drain_task") is None
+    finally:
+        botified.release.set()
+
+    await asyncio.sleep(0.05)

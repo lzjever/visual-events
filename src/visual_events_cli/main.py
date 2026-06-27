@@ -5,6 +5,7 @@ import sys
 from typing import Callable
 
 from visual_events_cli.config import ConfigError, apply_overrides, load_config
+from visual_events_cli.runtime import RuntimeUnavailable, run_runtime
 
 
 def main(
@@ -29,7 +30,11 @@ def main(
         return 0
 
     runner = runtime_runner or _default_runtime_runner
-    return int(runner(config))
+    try:
+        return int(runner(config))
+    except RuntimeUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -61,8 +66,7 @@ def _overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _default_runtime_runner(_config: object) -> int:
-    print("Step 4 DDS adapters not implemented", file=sys.stderr)
-    return 2
+    return run_runtime(_config)
 
 
 if __name__ == "__main__":

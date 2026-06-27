@@ -164,14 +164,23 @@ def test_ga_plan_pins_review_followup_contract_boundaries():
             "manifest/oracle 标注的短遮挡、lost hold/cooldown 和空间邻近窗口",
             "不承诺 ReID/长期记忆",
             "重复招呼风险控制仍由 server semantic event rules",
-            "Production runner/lifecycle 自动化测试",
-            "正式 start/run/shutdown/reconnect",
-            "signal/process cleanup",
+            "Production runner/lifecycle unit core 已覆盖",
+            "`RuntimeFactories/run_runtime`",
+            "start/run/shutdown lifecycle unit core",
+            "stop_requested cleanup seam",
             "Botified task 启停",
             "required head_state 模式",
-            "真实 DDS adapter wiring failure/fail-fast",
-            "DDS resource cleanup",
-            "真机 smoke 不能替代 production runner/lifecycle 的单元/集成测试",
+            "默认 DDS factories fail-fast",
+            "真实 DDS factories/adapters wiring",
+            "sync/async resource close",
+            "service client public close",
+            "coordinator shutdown",
+            "Botified drain daemon-thread bounded shutdown",
+            "shutdown observe timeout 内观察到的 BrokenPipe publish stale then nonzero",
+            "start failure cleanup",
+            "真实 serialization/QoS construction tests",
+            "release/runtime 真跑",
+            "真机 smoke 不能替代 production runner/lifecycle unit core",
             "native DDS bridge/helper",
             "aarch64/RK3588 build/probe",
             "explicit unsupported fail-fast",
@@ -187,6 +196,9 @@ def test_ga_plan_pins_review_followup_contract_boundaries():
             "当前 server 默认 500ms 不能被当作 GA pass 证据",
         ],
     )
+    assert "正式 start/run/shutdown/reconnect 单元核心" not in text
+    assert "signal/process cleanup path" not in text
+    assert "BrokenPipe during shutdown publish stale then nonzero" not in text
     assert "同一物理人短暂 lost/恢复期间不得产生新的招呼型事件序列" not in text
 
 
@@ -200,16 +212,27 @@ def test_ga_plan_pins_botified_backpressure_and_broken_pipe_semantics():
             "slow stdout bounded queue/drop/coalescing 不阻塞 gaze stale",
             "stdout bounded queue/drop/coalescing 不阻塞 gaze stale",
             "RuntimeCoordinator/main wiring unit core",
-            "main runtime_runner 注入和默认 Step 4 DDS adapters fail-fast",
+            "main runtime_runner 注入和默认 DDS factories fail-fast",
+            "`RuntimeFactories/run_runtime` production runner/lifecycle unit core",
+            "测试注入 factories",
+            "start image/head/gaze",
+            "head current_motion wiring",
+            "coordinator shutdown",
+            "sync/async resource close",
+            "service client public close",
+            "Botified drain daemon-thread bounded shutdown",
             "exact stale deadline",
             "slow Botified drain 不阻塞 stale",
             "BrokenPipe publish stale then nonzero unit core",
+            "shutdown observe timeout 内观察到的 BrokenPipe publish stale then nonzero",
+            "start failure cleanup",
             "Botified stdout BrokenPipe 时必须尽力发布一次 stale，然后受控非 0 退出",
             'broken_pipe = "publish_stale_then_exit_nonzero"',
             "BrokenPipe 受控非 0 退出",
         ],
     )
     assert 'broken_pipe = "fail_fast"' not in text
+    assert "BrokenPipe during shutdown publish stale then nonzero" not in text
     assert "Runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理" not in text
     assert "runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理" not in text
 
@@ -224,8 +247,8 @@ def test_ga_plan_pins_final_review_contracts_without_expanding_scope():
             "标准 PC 值是 `DDS_NETWORK=lo`、`DDS_DOMAIN=57`",
             "缺少显式 `--dds-domain` 或 `--dds-network` 必须 fail fast",
             "非 loopback 网络必须显式传入 `--allow-non-loopback-dds`",
-            "Step 3 不实现真实 DDS adapters",
-            "Step 4 真实 DDS adapters",
+            "Step 3 不实现真实 DDS factories/adapters",
+            "Step 4 真实 DDS factories/adapters",
             "expected attention target timeline/rule（target label/track、allowed switch windows、no-target windows）",
             "现场 checklist 必须验证 expected attention target timeline/rule",
             "进入、路过、靠近、停留、挥手等每类事件有 expected occurrence 和允许延迟窗口",
@@ -259,7 +282,7 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "Step 1 仍未完成 DDS stack decision record",
             "尚未实际确定 SDK/bridge runtime choice",
             "当前 repo 已完成 CLI Step 3A skeleton + Step 3B pure logic",
-            "### Step 3：实现正式 CLI core（3A skeleton/3B pure logic 和 RuntimeCoordinator/main wiring unit core 已完成；production runner/lifecycle 依赖 Step 4 DDS adapters）",
+            "### Step 3：实现正式 CLI core（3A skeleton/3B pure logic、RuntimeCoordinator/main wiring 和 production runner/lifecycle unit core 已完成；真实 DDS factories/adapters 剩余）",
             "CLI package",
             "`visual-events-cli` entrypoint",
             "配置 skeleton",
@@ -268,11 +291,22 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "并已完成 CLI unit core 的 `service_client` WebSocket wire client",
             "`frame_pump` deterministic core/stale watchdog",
             "RuntimeCoordinator/main wiring unit core",
-            "main runtime_runner 注入和默认 Step 4 DDS adapters fail-fast",
+            "main runtime_runner 注入和默认 DDS factories fail-fast",
             "exact stale deadline",
             "slow Botified drain 不阻塞 stale",
             "Botified stdout bounded queue/drop/coalescing 与 BrokenPipe exception 单元核心",
             "BrokenPipe publish stale then nonzero unit core",
+            "`RuntimeFactories/run_runtime` production runner/lifecycle unit core 已完成",
+            "默认 DDS factories fail-fast 且不 import DDS/native",
+            "测试注入 factories",
+            "start image/head/gaze",
+            "head current_motion wiring",
+            "coordinator shutdown",
+            "sync/async resource close",
+            "service client public close",
+            "Botified drain daemon-thread bounded shutdown",
+            "shutdown observe timeout 内观察到的 BrokenPipe publish stale then nonzero",
+            "start failure cleanup",
             "当前 repo 已完成 Step 4 first slice/unit core",
             "纯 Python SDK-neutral DDS adapter core/fakes",
             "`visual_events_cli.dds.qos`",
@@ -282,6 +316,7 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "QoS constants",
             "CameraJpegMessage JPEG SOF dimension validation",
             "fake image latest-only",
+            "Fake DDS adapters lifecycle unit core（start/close idempotent；close 后拒绝使用/重启）",
             "HeadStateSample stationary/moving/unknown stale/future timestamp mapping",
             "FakeDdsGazeTargetPublisher lifecycle",
             "protocol names",
@@ -289,28 +324,29 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "不 import 真实 DDS SDK/ML/运控依赖",
             "`service_client`：WebSocket wire/pack-unpack、连接复用/关闭、timeout、invalid response、frame_id mismatch、retryable/non-retryable error handling 的单元核心",
             "`frame_pump`：one in-flight coordination、keep-latest frame slot/backpressure、gaze stale watchdog、Botified enqueue 的 deterministic unit core",
-            "main runtime_runner 注入和默认 Step 4 DDS adapters fail-fast",
+            "main runtime_runner 注入和默认 DDS factories fail-fast",
             "exact stale deadline",
             "slow Botified drain 不阻塞 stale",
             "Botified stdout writer：bounded queue/drop/coalescing + BrokenPipe exception unit core",
             "BrokenPipe publish stale then nonzero unit core",
-            "production runner/lifecycle 依赖 Step 4 真实 DDS adapters 实例化 RuntimeCoordinator",
-            "正式 start/run/shutdown/reconnect、metrics/logging",
+            "真实 DDS factories/adapters 仍未完成",
+            "当前默认 factories 只 fail-fast，不是真实 DDS runtime",
+            "Step 3 不实现真实 DDS factories/adapters",
             "### Step 4：实现 DDS adapters（first slice/unit core 已完成；真实 runtime adapters 剩余）",
             "真实 DDS runtime adapters",
             "SDK/bridge decision record",
             "IDL codegen/native bridge ABI",
             "real serialization/QoS construction tests",
             "板端 compatibility probe",
-            "真实 DDS adapters",
+            "真实 DDS factories/adapters",
             "PC 本地 DDS E2E tools",
-            "release/runtime 编排",
+            "release/runtime 真跑",
             "真机 smoke",
             "closed-loop handoff",
-            "剩余是 Step 4 真实 DDS adapters、PC E2E tools、release/runtime 编排、真机 smoke 和 closed-loop handoff",
+            "剩余是 Step 4 真实 DDS factories/adapters",
             "DDS contract/schema Step 1 主要产物已完成",
             "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
-            "真实 DDS runtime adapters、SDK/bridge decision record、IDL codegen/native bridge ABI、real serialization/QoS construction tests、板端 compatibility probe、PC E2E tools、release/runtime 编排、真机 smoke/closed-loop handoff 仍未完成",
+            "真实 DDS factories/adapters、SDK/bridge decision record、IDL codegen/native bridge ABI、real serialization/QoS construction tests、板端 compatibility probe、PC E2E tools、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
     assert "尚未完成 CLI runtime loop、service_client、frame_pump、真实 DDS adapters、Botified stdout writer/backpressure" not in text
@@ -318,12 +354,16 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     assert "仍未完成 Step 3 formal CLI runtime loop/main wiring" not in text
     assert "仍需完成 Step 3 formal CLI runtime loop/main wiring" not in text
     assert "production runner/lifecycle 剩余" not in text
+    assert "production runner/lifecycle 依赖 Step 4 真实 DDS adapters 实例化 RuntimeCoordinator" not in text
     assert "生产 runtime runner/lifecycle 编排需要 Step 4 真实 DDS adapters 实例化 RuntimeCoordinator" not in text
     assert "runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理" not in text
     assert "Runtime coordinator 对 BrokenPipe 的 publish stale then nonzero exit 处理" not in text
     assert "Step 4 真实 DDS adapters 全部未开始" not in text
     assert "真实 DDS adapters 全部未开始" not in text
+    assert "真实 DDS factories/adapters 已完成" not in text
     assert "Step 4 完全完成" not in text
+    assert "Fake DDS adapters started/closed lifecycle unit core" not in text
+    assert "可重复 start/stop" not in text
 
 
 def test_ga_plan_baseline_and_team_review_match_current_server_state():
