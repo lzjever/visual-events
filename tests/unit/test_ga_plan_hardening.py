@@ -418,6 +418,23 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "logical camera",
             "stale/cleanup",
             "child nonzero/fatal",
+            "Step 4 native DDS bridge build/probe foundation slice 已完成",
+            "`native/dds_bridge` CMake project",
+            "`visual_events_dds_bridge_probe` probe target",
+            "Unitree SDK2 + `CameraFrame_` build inputs",
+            "camera/head/gaze topic/type/QoS constants",
+            "单行 JSONL status frame（`protocol_version=1,type=status,code=probe_ok,message=...`）",
+            "`tools/build_dds_bridge.py` split gate",
+            "foundation check/build/probe 只要求 SDK root、video publisher dir 和 `CameraFrame_` inputs",
+            "可在无 IDL generator 时成功",
+            "`foundation_ready=true`",
+            "`visual_events_codegen_ready=false`",
+            '`visual_events_codegen_error="not required for foundation check"`',
+            "`--check-full-bridge` 才要求 Visual Events `HeadStateV1_`/`GazeTargetV1_` type support/codegen toolchain",
+            "缺 IDL generator 时 fail-fast",
+            "Visual Events type support/codegen",
+            "full bridge runtime",
+            "real serialization/QoS",
             "真实 DDS/C++/IDL/QoS/PC E2E/RK/真机仍未完成",
             "`service_client`：WebSocket wire/pack-unpack、连接复用/关闭、timeout、invalid response、frame_id mismatch、retryable/non-retryable error handling 的单元核心",
             "`frame_pump`：one in-flight coordination、keep-latest frame slot/backpressure、gaze stale watchdog、Botified enqueue 的 deterministic unit core",
@@ -432,9 +449,15 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "### Step 4：实现 DDS adapters（first slice/unit core 已完成；真实 runtime adapters 剩余）",
             "真实 DDS runtime adapters",
             "按 `docs/dds-stack-decision-record.md` 已冻结决策实现 C++ native DDS helper/bridge",
-            "C++ native bridge binary",
             "IDL codegen/toolchain implementation",
             "real serialization/QoS tests",
+            "`native/dds_bridge` CMake project 可构建 very small `visual_events_dds_bridge_probe`",
+            "`tools/build_dds_bridge.py` 拆分 foundation gate 和 full-bridge gate",
+            "`foundation_ready`、`visual_events_codegen_ready`、`visual_events_codegen_error`",
+            "只证明 camera/probe foundation",
+            "不实现 `HeadStateV1_`/`GazeTargetV1_` C++ type support",
+            "不实现 full bridge runtime loop",
+            "不证明真实 serialization/QoS、PC E2E、board/RK 或真机闭环",
             "PC E2E",
             "native bridge ABI implementation",
             "real serialization/QoS construction tests",
@@ -450,7 +473,11 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "剩余是 Step 4 真实 DDS factories/adapters",
             "DDS contract/schema Step 1 主要产物已完成",
             "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
-            "真实 DDS factories/adapters、C++ native bridge binary、IDL codegen/toolchain implementation、native bridge ABI implementation、real serialization/QoS tests / construction tests、板端 compatibility probe、PC E2E tools、board/RK probe、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
+            "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` C++ type support/codegen、full bridge runtime、real serialization/QoS 和 native bridge ABI implementation 仍未完成",
+            "`visual_events_dds_bridge_probe` 可输出既有 JSONL bridge ABI status frame（`protocol_version=1,type=status,code=probe_ok,message=...`）",
+            "`tools/build_dds_bridge.py` foundation gate 可在无 IDL generator 时通过并报告 `foundation_ready=true`",
+            "`--check-full-bridge` 缺 IDL generator 时仍 fail-fast",
+            "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` C++ type support/codegen、full bridge runtime、real serialization/QoS tests / construction tests、板端 compatibility probe、PC E2E tools、board/RK probe、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
     assert "Step 1 仍未完成 DDS stack decision record" not in text
@@ -470,6 +497,8 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     assert "真实 DDS adapters 全部未开始" not in text
     assert "真实 DDS factories/adapters 已完成" not in text
     assert "Step 4 完全完成" not in text
+    assert "full bridge ready" not in text
+    assert "检查 SDK root、video publisher dir 和 IDL generator/toolchain，缺失时 fail-fast" not in text
     assert "Step 4 Python JSONL bridge runtime integration slice 仍未完成" not in text
     assert "真实 DDS/C++ bridge/PC E2E/RK probe 已完成" not in text
     assert "Step 4 Python JSONL bridge runtime integration slice 完成代表真实 DDS" not in text

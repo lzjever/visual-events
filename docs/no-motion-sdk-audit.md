@@ -35,3 +35,41 @@ The allowed Step 1 DDS contract names are:
 The CLI and DDS bridge must not publish motor or head control command topics. They must not send low-level motor commands, arm SDK commands, sport mode commands, look-at requests, head position setpoints, yaw velocity setpoints, pitch velocity setpoints, or any other motion-control request.
 
 The only permitted head-related data flow is read-only `HeadStateV1_` input and `GazeTargetV1_` target fact output. Any downstream component that chooses to move hardware must live outside this Visual Events CLI/DDS bridge contract and must consume these facts through its own separately audited safety boundary.
+
+## Native bridge audit commands
+
+Run the repo-local native bridge audit without scanning Unitree SDK includes, because SDK headers contain unrelated motion-control IDL names:
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev pytest -q tests/unit/test_native_dds_bridge_foundation.py
+```
+
+The native source/binary boundary can also be inspected directly:
+
+```bash
+rg -n 'LowCmd|MotorCmd|SportModeCmd|MotionSwitcherClient|look_at|head_position|yaw_velocity|pitch_velocity|motor_command|rt/lowcmd|rt/arm_sdk' native/dds_bridge
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/build_dds_bridge.py \
+  --check --build --probe \
+  --unitree-sdk-root "$UNITREE_SDK_ROOT" \
+  --video-dds-publisher-dir "$VIDEO_DDS_PUBLISHER_DIR" \
+  --out artifacts/dds_bridge/foundation-report.json
+ldd build/dds_bridge/visual_events_dds_bridge_probe
+readelf -d build/dds_bridge/visual_events_dds_bridge_probe
+```
+
+The foundation build/probe gate does not require an IDL generator and its report must distinguish `foundation_ready` from `visual_events_codegen_ready`. The full bridge type-support/codegen gate is explicit:
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/build_dds_bridge.py \
+  --check --check-full-bridge \
+  --unitree-sdk-root "$UNITREE_SDK_ROOT" \
+  --video-dds-publisher-dir "$VIDEO_DDS_PUBLISHER_DIR" \
+  --out artifacts/dds_bridge/full-bridge-toolchain-report.json
+```
+
+If no `idlc`, `cyclonedds-idlc`, or `fastddsgen` is on `PATH`, the full bridge gate must fail fast while the foundation gate can still pass.
+
+The `ldd`/`readelf` commands are only meaningful after a local CMake probe build. Build output must stay under ignored `build/`; reports must stay under ignored `artifacts/`.
