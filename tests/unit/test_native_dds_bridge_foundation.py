@@ -505,6 +505,56 @@ def _run_prepare_codegen_tool(
     )
 
 
+@pytest.fixture
+def native_abi_build(tmp_path):
+    if shutil.which("cmake") is None:
+        pytest.skip("cmake is required for native ABI target tests")
+    if (
+        shutil.which("c++") is None
+        and shutil.which("g++") is None
+        and shutil.which("clang++") is None
+    ):
+        pytest.skip("a C++ compiler is required for native ABI target tests")
+
+    build_dir = REPO_ROOT / "build" / "test-dds-bridge" / f"{tmp_path.name}-abi"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    configure = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            os.fspath(NATIVE_BRIDGE),
+            "-B",
+            os.fspath(build_dir),
+            "-DVISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE=OFF",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert configure.returncode == 0, configure.stderr
+
+    build = subprocess.run(
+        [
+            "cmake",
+            "--build",
+            os.fspath(build_dir),
+            "--target",
+            "visual_events_dds_bridge",
+            "visual_events_dds_bridge_abi_harness",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+
+    yield build_dir
+
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+
 def test_native_bridge_source_allowlist_has_only_camera_head_gaze_and_no_motion_tokens():
     text = _combined_native_source_text()
 
@@ -564,6 +614,22 @@ def test_native_bridge_cmake_has_optional_full_bridge_generated_type_support_inp
     assert missing == []
 
 
+def test_native_bridge_cmake_declares_runtime_abi_core_and_test_harness_targets():
+    text = (NATIVE_BRIDGE / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    required = [
+        "VISUAL_EVENTS_DDS_BRIDGE_BUILD_PROBE",
+        "visual_events_dds_bridge_abi",
+        "src/bridge_abi.cpp",
+        "visual_events_dds_bridge",
+        "src/runtime_main.cpp",
+        "visual_events_dds_bridge_abi_harness",
+        "src/abi_harness_main.cpp",
+    ]
+    missing = [item for item in required if item not in text]
+    assert missing == []
+
+
 def test_native_probe_source_references_generated_head_and_gaze_type_props():
     probe = NATIVE_BRIDGE / "src" / "probe_main.cpp"
     text = probe.read_text(encoding="utf-8")
@@ -615,6 +681,195 @@ def test_native_probe_binary_emits_single_jsonl_status_frame_without_stdout_logs
     assert status["message"]
     assert status["mode"] == "probe"
     assert "log" not in status
+
+
+def test_native_runtime_probe_and_no_args_fail_fast_as_jsonl(native_abi_build):
+    from visual_events_cli.dds.bridge_protocol import BridgeErrorFrame, BridgeStatusFrame
+    from visual_events_cli.dds.bridge_protocol import decode_bridge_line
+
+    binary = native_abi_build / "visual_events_dds_bridge"
+
+    probe = subprocess.run(
+        [os.fspath(binary), "--probe"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert probe.returncode == 0
+    assert len(probe.stdout.splitlines()) == 1
+    status = decode_bridge_line(probe.stdout, logical_camera_name="front")
+    assert isinstance(status, BridgeStatusFrame)
+    assert status.code == "probe_ok"
+    assert "log" not in json.loads(probe.stdout)
+
+    runtime = subprocess.run(
+        [os.fspath(binary)],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert runtime.returncode != 0
+    stdout_lines = runtime.stdout.splitlines()
+    assert len(stdout_lines) == 1
+    error = decode_bridge_line(stdout_lines[0], logical_camera_name="front")
+    assert isinstance(error, BridgeErrorFrame)
+    assert error.fatal is True
+    assert error.code == "dds_runtime_not_implemented"
+    assert runtime.stderr
+
+
+@pytest.mark.parametrize("gaze_state", ["tracking", "lost", "stale", "disabled"])
+def test_native_abi_harness_outputs_camera_head_and_accepts_python_gaze(
+    native_abi_build,
+    gaze_state: str,
+):
+    from visual_events_cli.dds.bridge_protocol import BridgeHeadStateFrame
+    from visual_events_cli.dds.bridge_protocol import decode_bridge_line, encode_gaze_target_line
+    from visual_events_cli.dds.types import CameraJpegMessage
+    from visual_events_cli.target_mapper import GazeTargetPayload
+
+    payload = GazeTargetPayload(
+        schema_version=1,
+        camera="front",
+        frame_id=42,
+        frame_timestamp_ms=1_710_000_000_000,
+        publish_timestamp_ms=1_710_000_000_082,
+        valid=True,
+        state=gaze_state,
+        target_track_id=7,
+        target_u=640.0,
+        target_v=360.0,
+        target_norm_x=0.0,
+        target_norm_y=0.0,
+        image_width=1280,
+        image_height=720,
+        confidence=0.91,
+        reason="nearest",
+        stale_after_ms=250,
+    )
+
+    result = subprocess.run(
+        [os.fspath(native_abi_build / "visual_events_dds_bridge_abi_harness")],
+        cwd=REPO_ROOT,
+        input=encode_gaze_target_line(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "accepted_gaze_target=1" in result.stderr
+    stdout_lines = result.stdout.splitlines()
+    assert len(stdout_lines) == 2
+    raw_frames = [json.loads(line) for line in stdout_lines]
+    assert [frame["type"] for frame in raw_frames] == ["camera_jpeg", "head_state"]
+    assert "data" not in raw_frames[0]
+    assert raw_frames[0]["data_size_bytes"] > 0
+    assert raw_frames[0]["data_base64"]
+
+    camera = decode_bridge_line(stdout_lines[0], logical_camera_name="front")
+    head = decode_bridge_line(stdout_lines[1], logical_camera_name="front")
+    assert isinstance(camera, CameraJpegMessage)
+    assert camera.camera == "front"
+    assert camera.data
+    assert isinstance(head, BridgeHeadStateFrame)
+    assert head.state in {"stationary", "moving", "unknown"}
+
+
+@pytest.mark.parametrize(
+    "malformed_gaze",
+    [
+        json.dumps(
+            {
+                "protocol_version": 1,
+                "type": "gaze_target",
+                "schema_version": 1,
+                "camera": "front",
+            },
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "protocol_version": 1,
+                "type": "gaze_target",
+                "schema_version": 1,
+                "camera": "front",
+                "frame_id": "42",
+                "frame_timestamp_ms": 1_710_000_000_000,
+                "publish_timestamp_ms": 1_710_000_000_082,
+                "valid": True,
+                "state": "tracking",
+                "target_track_id": 7,
+                "target_u": 640.0,
+                "target_v": 360.0,
+                "target_norm_x": 0.0,
+                "target_norm_y": 0.0,
+                "image_width": 1280,
+                "image_height": 720,
+                "confidence": 0.91,
+                "reason": "nearest",
+                "stale_after_ms": 250,
+            },
+            separators=(",", ":"),
+        ),
+        (
+            '{"protocol_version":1,"type":"gaze_target","schema_version":1,'
+            '"camera":"front","frame_id":42,"frame_timestamp_ms":1710000000000,'
+            '"publish_timestamp_ms":1710000000082,"valid":true,"state":"tracking",'
+            '"target_track_id":7,"target_u":1e999,"target_v":360.0,'
+            '"target_norm_x":0.0,"target_norm_y":0.0,"image_width":1280,'
+            '"image_height":720,"confidence":0.91,"reason":"nearest",'
+            '"stale_after_ms":250}'
+        ),
+        (
+            '{"protocol_version":1,"type":"gaze_target","schema_version":1,'
+            '"camera":"front","frame_id":42,"frame_timestamp_ms":1710000000000,'
+            '"publish_timestamp_ms":1710000000082,"valid":true,"state":"tracking",'
+            '"target_track_id":7,"target_u":NaN,"target_v":360.0,'
+            '"target_norm_x":0.0,"target_norm_y":0.0,"image_width":1280,'
+            '"image_height":720,"confidence":0.91,"reason":"nearest",'
+            '"stale_after_ms":250}'
+        ),
+        (
+            '{"protocol_version":1,"type":"gaze_target","schema_version":1,'
+            '"camera":"front","frame_id":42,"frame_timestamp_ms":1710000000000,'
+            '"publish_timestamp_ms":1710000000082,"valid":true,"state":"bogus",'
+            '"target_track_id":7,"target_u":640.0,"target_v":360.0,'
+            '"target_norm_x":0.0,"target_norm_y":0.0,"image_width":1280,'
+            '"image_height":720,"confidence":0.91,"reason":"nearest",'
+            '"stale_after_ms":250}'
+        ),
+    ],
+)
+def test_native_abi_harness_rejects_invalid_gaze_with_fatal_jsonl(
+    native_abi_build,
+    malformed_gaze: str,
+):
+    from visual_events_cli.dds.bridge_protocol import BridgeErrorFrame
+    from visual_events_cli.dds.bridge_protocol import decode_bridge_line
+
+    result = subprocess.run(
+        [os.fspath(native_abi_build / "visual_events_dds_bridge_abi_harness")],
+        cwd=REPO_ROOT,
+        input=malformed_gaze + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    stdout_lines = result.stdout.splitlines()
+    assert len(stdout_lines) == 3
+    decoded_error = decode_bridge_line(stdout_lines[-1], logical_camera_name="front")
+    assert isinstance(decoded_error, BridgeErrorFrame)
+    assert decoded_error.fatal is True
+    assert decoded_error.code == "invalid_gaze_target"
+    for line in stdout_lines:
+        frame = json.loads(line)
+        assert "log" not in frame
+        assert "data" not in frame
 
 
 def test_build_tool_foundation_check_does_not_require_idl_generator(tmp_path, repo_report_path):
