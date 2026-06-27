@@ -67,10 +67,16 @@ def _require_pinned_version(value: str, expected: str, label: str) -> None:
         raise CodegenToolchainError(f"{label} must be pinned to {expected}, got {value}")
 
 
-def _run_idlc_args(idlc: Path, args: list[str], *, timeout: int = 10) -> subprocess.CompletedProcess[str]:
+def _run_idlc_args(
+    idlc: Path,
+    args: list[str],
+    *,
+    timeout: int = 10,
+    cwd: Path = REPO_ROOT,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [os.fspath(idlc), *args],
-        cwd=REPO_ROOT,
+        cwd=cwd,
         text=True,
         capture_output=True,
         check=False,
@@ -143,20 +149,24 @@ def _read_idlc_version(idlc: Path) -> tuple[str, dict[str, object]]:
 def _inspect_backend_text(idlc: Path) -> dict[str, object]:
     backend_output_parts: list[str] = []
     backend_errors: list[str] = []
-    for arg in ("--help", "-h", "-l"):
+    cxx_backend_help_ok = False
+    for args in (["--help"], ["-h"], ["-l"], ["-l", "cxx", "-h"]):
+        label = " ".join(args)
         try:
-            result = _run_idlc(idlc, arg)
+            result = _run_idlc_args(idlc, args)
         except OSError as exc:
-            backend_errors.append(f"{arg}: {exc}")
+            backend_errors.append(f"{label}: {exc}")
             continue
         except subprocess.TimeoutExpired:
-            backend_errors.append(f"{arg}: timed out")
+            backend_errors.append(f"{label}: timed out")
             continue
         output = result.stdout + result.stderr
         if result.returncode == 0:
             backend_output_parts.append(output)
+            if args == ["-l", "cxx", "-h"]:
+                cxx_backend_help_ok = True
         else:
-            backend_errors.append(f"{arg}: {_compact_output(output)}")
+            backend_errors.append(f"{label}: {_compact_output(output)}")
 
     backend_output = "\n".join(backend_output_parts)
     report: dict[str, object] = {
@@ -172,7 +182,7 @@ def _inspect_backend_text(idlc: Path) -> dict[str, object]:
             f"idlc cannot load generator cxx: {_compact_output(backend_output)}",
             report=report,
         )
-    if not _has_cxx_backend(backend_output):
+    if not (cxx_backend_help_ok or _has_cxx_backend(backend_output)):
         report["cxx_backend_available"] = False
         raise CodegenToolchainError("idlc cxx backend is required", report=report)
 
@@ -253,6 +263,7 @@ def _probe_idlc_codegen(
                 idlc,
                 ["-l", "cxx", "-o", os.fspath(output_dir), os.fspath(probe_idl)],
                 timeout=30,
+                cwd=output_dir,
             )
         except OSError as exc:
             raise CodegenToolchainError(
@@ -282,6 +293,7 @@ def _probe_idlc_codegen(
                 "generated_files": generated_for_idl,
                 "expected_generated_file_presence": presence,
                 "expected_generated_files_present": expected_present,
+                "idlc_codegen_cwd": os.fspath(output_dir),
                 "idlc_codegen_returncode": result.returncode,
                 "idlc_codegen_stdout": result.stdout,
                 "idlc_codegen_stderr": result.stderr,
@@ -326,6 +338,7 @@ def _probe_idlc_codegen(
         "expected_generated_file_presence": presence,
         "expected_generated_files_present": expected_present,
         "codegen_probes": codegen_probes,
+        "idlc_codegen_cwd": os.fspath(output_dir),
         "idlc_codegen_returncode": aggregate_returncode,
         "idlc_codegen_stdout": "\n".join(
             str(probe["idlc_codegen_stdout"]) for probe in codegen_probes

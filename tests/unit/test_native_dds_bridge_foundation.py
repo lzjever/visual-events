@@ -214,6 +214,75 @@ def _make_fake_idlc_v_h_only(tmp_path: Path, *, version: str, backends: str) -> 
     return script
 
 
+def _make_fake_idlc_backend_help_only(tmp_path: Path, *, version: str) -> Path:
+    script = tmp_path / f"fake-idlc-backend-help-only-{version}"
+    script.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = '--version' ] || [ \"$1\" = '-v' ]; then\n"
+        f"    printf '%s\\n' 'CycloneDDS idlc {version}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = '--help' ] || [ \"$1\" = '-h' ]; then\n"
+        "    printf '%s\\n' 'Usage: idlc [OPTIONS] IDL'\n"
+        "    exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = '-l' ] && [ \"$2\" = 'cxx' ] && [ \"$3\" = '-h' ]; then\n"
+        "    printf '%s\\n' '--bounded-sequence-template TEMPLATE'\n"
+        "    exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = '-l' ] && [ \"$#\" -eq 1 ]; then\n"
+        "    printf '%s\\n' 'available backends: c'\n"
+        "    exit 0\n"
+        "fi\n"
+        "printf '%s\\n' 'fake idlc unsupported args' >&2\n"
+        "exit 64\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _make_fake_idlc_codegen_only_from_output_cwd(tmp_path: Path, *, version: str) -> Path:
+    script = tmp_path / f"fake-idlc-codegen-output-cwd-only-{version}"
+    script.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = '--version' ] || [ \"$1\" = '-v' ]; then\n"
+        f"    printf '%s\\n' 'CycloneDDS idlc {version}'\n"
+        "    exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = '--help' ] || { [ \"$1\" = '-l' ] && [ \"$#\" -eq 1 ]; }; then\n"
+        "    printf '%s\\n' 'available backends: c cxx'\n"
+        "    exit 0\n"
+        "fi\n"
+        "lang=''\n"
+        "out_dir=''\n"
+        "idl=''\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "    case \"$1\" in\n"
+        "      -l) shift; lang=\"$1\" ;;\n"
+        "      -o) shift; out_dir=\"$1\" ;;\n"
+        "      *.idl) idl=\"$1\" ;;\n"
+        "    esac\n"
+        "    shift\n"
+        "done\n"
+        "if [ \"$lang\" != 'cxx' ] || [ -z \"$out_dir\" ] || [ -z \"$idl\" ]; then\n"
+        "    printf '%s\\n' 'fake idlc only supports --version, --help, -l, and -l cxx -o OUT IDL' >&2\n"
+        "    exit 64\n"
+        "fi\n"
+        "if [ \"$(pwd -P)\" != \"$(cd \"$out_dir\" && pwd -P)\" ]; then\n"
+        "    exit 0\n"
+        "fi\n"
+        "base=${idl##*/}\n"
+        "base=${base%.idl}\n"
+        "printf '%s\\n' '// fake generated header' > \"$out_dir/$base.hpp\"\n"
+        "printf '%s\\n' '// fake generated source' > \"$out_dir/$base.cpp\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
 def _make_fake_idlc_version_generator_error(tmp_path: Path) -> Path:
     script = tmp_path / "fake-idlc-version-generator-error"
     script.write_text(
@@ -643,6 +712,24 @@ def test_prepare_dds_codegen_toolchain_check_accepts_idlc_with_short_version_and
     assert report["oracle_ok"] is False
 
 
+def test_prepare_dds_codegen_toolchain_check_accepts_backend_specific_cxx_help(
+    tmp_path,
+):
+    fake_idlc = _make_fake_idlc_backend_help_only(tmp_path, version="0.10.2")
+    result = _run_prepare_codegen_tool(
+        ["--check", "--dry-run", "--idlc", os.fspath(fake_idlc)]
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    report = json.loads(result.stdout)
+    assert report["ok"] is True
+    assert report["cxx_backend_available"] is True
+    assert "--bounded-sequence-template TEMPLATE" in report["idlc_backend_inspection_stdout"]
+    assert report["probe_codegen"] is False
+    assert report["oracle_ok"] is False
+
+
 def test_prepare_dds_codegen_toolchain_check_rejects_generator_load_error_in_version_output(
     tmp_path,
 ):
@@ -732,6 +819,41 @@ def test_prepare_dds_codegen_toolchain_probe_codegen_accepts_fake_idlc_that_writ
         assert report["oracle_ok"] is True
         assert (probe_output_dir / "CameraFrame_.hpp").is_file()
         assert (probe_output_dir / "CameraFrame_.cpp").is_file()
+    finally:
+        shutil.rmtree(probe_output_dir, ignore_errors=True)
+
+
+def test_prepare_dds_codegen_toolchain_probe_codegen_runs_from_probe_output_dir(
+    tmp_path,
+):
+    fake_idlc = _make_fake_idlc_codegen_only_from_output_cwd(tmp_path, version="0.10.2")
+    probe_idl = _make_probe_idl(tmp_path)
+    probe_output_dir = _repo_build_probe_dir(tmp_path, "prepare-output-cwd")
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--probe-codegen",
+                "--idlc",
+                os.fspath(fake_idlc),
+                "--probe-idl",
+                os.fspath(probe_idl),
+                "--probe-output-dir",
+                os.fspath(probe_output_dir),
+            ]
+        )
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        report = json.loads(result.stdout)
+        assert report["ok"] is True
+        assert report["oracle_ok"] is True
+        assert report["probe_output_dir"] == os.fspath(probe_output_dir.resolve())
+        assert report["idlc_codegen_cwd"] == os.fspath(probe_output_dir.resolve())
+        assert report["codegen_probes"][0]["idlc_codegen_cwd"] == os.fspath(
+            probe_output_dir.resolve()
+        )
+        assert set(report["generated_files"]) == {"CameraFrame_.hpp", "CameraFrame_.cpp"}
     finally:
         shutil.rmtree(probe_output_dir, ignore_errors=True)
 
