@@ -588,12 +588,17 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "real serialization/QoS tests",
             "板端 compatibility probe",
             "board/RK probe",
-            "Python runner/wrappers",
+            "Step 5 Python native participant wrappers slice 已完成",
+            "`tools/dds_pc_tools.py`",
+            "显式 `--dds-domain`/`--dds-network`",
+            "非 `lo` 必须 `--allow-non-loopback-dds`",
+            "默认只从 `--build-dir` 找 native binary",
+            "Python wrappers 不 import DDS SDK/visual_events_cli/server",
             "PC E2E",
             "release report",
             "真机 smoke",
             "closed-loop handoff",
-            "剩余是 Python runner/wrappers、manifest reader/report、mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff",
+            "剩余是 manifest reader/report、mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff",
             "DDS contract/schema Step 1 主要产物已完成",
             "完整 DDS PC E2E/over-wire GA gate 和板端 compatibility probe 仍必须补齐",
             "native runtime loop core 和 full-bridge wiring 已完成",
@@ -744,9 +749,8 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
     assert_contains_all(
         remaining_gap,
         [
-            "native PC DDS over-wire test participants 已完成",
+            "native PC DDS over-wire test participants 和 Python native participant wrappers 已完成",
             "完整 PC 本地 DDS E2E GA gate 仍未完成",
-            "Python runner/wrappers",
             "manifest reader/report",
             "mock visual_state server",
             "正式 CLI+real server 编排",
@@ -758,7 +762,7 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
             "DDS discovery/real serialization over wire/QoS behavior 的完整测试矩阵",
             "real serialization/QoS tests",
             "release report 仍未完成",
-            "Python runner/wrappers、manifest reader/report、mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
+            "manifest reader/report、mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
 
@@ -775,7 +779,7 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
     assert "真机 smoke/closed-loop 已完成" not in text
 
 
-def test_ga_plan_records_step5_native_participants_without_claiming_full_pc_e2e():
+def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming_full_pc_e2e():
     text = read_text(GA_PLAN)
     step5 = section_between(text, "### Step 5：实现 PC 本地测试工具", "### Step 6：CLI 单元与集成测试")
 
@@ -799,7 +803,23 @@ def test_ga_plan_records_step5_native_participants_without_claiming_full_pc_e2e(
             "gaze subscriber 收到 DDS `gaze_target`",
             "frame_id=77",
             "track_id=12",
-            "Python runner/wrappers",
+            "Step 5 Python native participant wrappers slice 已完成",
+            "`tools/dds_pc_tools.py`",
+            "`tools/publish_test_dds_images.py`",
+            "`tools/publish_test_head_state.py`",
+            "`tools/subscribe_test_gaze_targets.py`",
+            "显式 `--dds-domain`/`--dds-network`",
+            "非 `lo` 必须 `--allow-non-loopback-dds`",
+            "默认只从 `--build-dir` 找 native binary",
+            "不搜索 PATH",
+            "argv domain/network 覆盖 env",
+            "stdout/stderr 直接透传 child",
+            "child return code 原样返回",
+            "Python wrappers 不 import DDS SDK/visual_events_cli/server",
+            "不做 manifest/report/mock server/full runner",
+            "wrapper-level PC loopback smoke",
+            "frame_id=88",
+            "track_id=13",
             "manifest reader/report",
             "mock visual_state server",
             "正式 CLI+real server 编排",
@@ -818,12 +838,12 @@ def test_ga_plan_records_step5_native_participants_without_claiming_full_pc_e2e(
             "Step 5 native PC DDS over-wire test participant slice 已完成",
             "image publisher、head publisher、gaze subscriber 和 `pc_test_tools`",
             "loopback over-wire smoke",
-            "Python runner/wrappers、manifest reader/report、mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff 仍未完成",
+            "Step 5 Python native participant wrappers slice 已完成",
+            "manifest reader/report、mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff 仍未完成",
         ],
     )
 
     assert "完整 PC local E2E GA gate 已完成" not in text
-    assert "Python runner/wrappers 已完成" not in text
     assert "manifest reader/report 已完成" not in text
     assert "mock visual_state server 已完成" not in text
     assert "正式 CLI+real server 编排已完成" not in text
