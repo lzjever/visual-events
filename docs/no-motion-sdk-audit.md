@@ -59,17 +59,27 @@ ldd build/dds_bridge/visual_events_dds_bridge_probe
 readelf -d build/dds_bridge/visual_events_dds_bridge_probe
 ```
 
-The foundation build/probe gate does not require an IDL generator and its report must distinguish `foundation_ready` from `visual_events_codegen_ready`. The full bridge type-support/codegen gate is explicit:
+The foundation build/probe gate does not require an IDL generator and its report must distinguish `foundation_ready` from `visual_events_codegen_ready`. The repo-local codegen toolchain proof is dry-run/check only and must not download, build, or write outside ignored repo paths:
+
+```bash
+UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
+  uv run --group dev python tools/prepare_dds_codegen_toolchain.py \
+  --check --dry-run \
+  --idlc "$VISUAL_EVENTS_IDLC"
+```
+
+The full bridge type-support/codegen gate is explicit and does not search `PATH`; pass the same pinned `idlc` with `--idlc` or `VISUAL_EVENTS_IDLC`:
 
 ```bash
 UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
   uv run --group dev python tools/build_dds_bridge.py \
   --check --check-full-bridge \
+  --idlc "$VISUAL_EVENTS_IDLC" \
   --unitree-sdk-root "$UNITREE_SDK_ROOT" \
   --video-dds-publisher-dir "$VIDEO_DDS_PUBLISHER_DIR" \
   --out artifacts/dds_bridge/full-bridge-toolchain-report.json
 ```
 
-If no `idlc`, `cyclonedds-idlc`, or `fastddsgen` is on `PATH`, the full bridge gate must fail fast while the foundation gate can still pass.
+If neither `--idlc` nor `VISUAL_EVENTS_IDLC` is provided, if the generator is not pinned to 0.10.2, or if it does not expose a `cxx` backend, the full bridge gate must fail fast while the foundation gate can still pass.
 
 The `ldd`/`readelf` commands are only meaningful after a local CMake probe build. Build output must stay under ignored `build/`; reports must stay under ignored `artifacts/`.

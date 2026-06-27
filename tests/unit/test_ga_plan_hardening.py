@@ -430,9 +430,17 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "`foundation_ready=true`",
             "`visual_events_codegen_ready=false`",
             '`visual_events_codegen_error="not required for foundation check"`',
-            "`--check-full-bridge` 才要求 Visual Events `HeadStateV1_`/`GazeTargetV1_` type support/codegen toolchain",
-            "缺 IDL generator 时 fail-fast",
-            "Visual Events type support/codegen",
+            "Step 4 DDS C++ IDL codegen toolchain proof slice 已完成",
+            "`tools/prepare_dds_codegen_toolchain.py`",
+            "默认 pinned CycloneDDS/CycloneDDS-CXX 0.10.2",
+            "`build/tools/cyclonedds-cxx-idlc-0.10.2/`",
+            "`--check`/`--dry-run` 只验证版本、路径、显式 `idlc` 和 cxx backend",
+            "不下载、不构建、不写系统或用户目录",
+            "fake idlc 覆盖 0.10.2+cxx pass、0.11.0 fail、缺 cxx backend fail",
+            "`tools/build_dds_bridge.py --check-full-bridge` 不再搜索 PATH",
+            "只接受显式 `--idlc` 或 `VISUAL_EVENTS_IDLC`",
+            "`visual_events_codegen_ready=true`",
+            "Head/Gaze generated type support 仍未生成或接入",
             "full bridge runtime",
             "real serialization/QoS",
             "真实 DDS/C++/IDL/QoS/PC E2E/RK/真机仍未完成",
@@ -449,11 +457,16 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "### Step 4：实现 DDS adapters（first slice/unit core 已完成；真实 runtime adapters 剩余）",
             "真实 DDS runtime adapters",
             "按 `docs/dds-stack-decision-record.md` 已冻结决策实现 C++ native DDS helper/bridge",
-            "IDL codegen/toolchain implementation",
+            "Head/Gaze generated type support 接入",
             "real serialization/QoS tests",
             "`native/dds_bridge` CMake project 可构建 very small `visual_events_dds_bridge_probe`",
             "`tools/build_dds_bridge.py` 拆分 foundation gate 和 full-bridge gate",
             "`foundation_ready`、`visual_events_codegen_ready`、`visual_events_codegen_error`",
+            "`tools/prepare_dds_codegen_toolchain.py` 默认 pinned CycloneDDS/CycloneDDS-CXX 0.10.2",
+            "`tools/build_dds_bridge.py --check-full-bridge` 不再搜索 PATH",
+            "缺显式 `--idlc`/`VISUAL_EVENTS_IDLC`、版本不是 0.10.2 或缺 cxx backend 时 fail-fast",
+            "只证明未来 `HeadStateV1_`/`GazeTargetV1_` C++ type support 可以走 pinned generator route",
+            "不生成或提交外部源码/构建输出，也不接入 generated type support",
             "只证明 camera/probe foundation",
             "不实现 `HeadStateV1_`/`GazeTargetV1_` C++ type support",
             "不实现 full bridge runtime loop",
@@ -473,11 +486,12 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "剩余是 Step 4 真实 DDS factories/adapters",
             "DDS contract/schema Step 1 主要产物已完成",
             "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
-            "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` C++ type support/codegen、full bridge runtime、real serialization/QoS 和 native bridge ABI implementation 仍未完成",
+            "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` generated C++ type support 接入、full bridge runtime、real serialization/QoS 和 native bridge ABI implementation 仍未完成",
             "`visual_events_dds_bridge_probe` 可输出既有 JSONL bridge ABI status frame（`protocol_version=1,type=status,code=probe_ok,message=...`）",
             "`tools/build_dds_bridge.py` foundation gate 可在无 IDL generator 时通过并报告 `foundation_ready=true`",
-            "`--check-full-bridge` 缺 IDL generator 时仍 fail-fast",
-            "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` C++ type support/codegen、full bridge runtime、real serialization/QoS tests / construction tests、板端 compatibility probe、PC E2E tools、board/RK probe、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
+            "`tools/prepare_dds_codegen_toolchain.py` 和 `tools/build_dds_bridge.py --check-full-bridge` 证明显式 `--idlc`/`VISUAL_EVENTS_IDLC` 指向的 0.10.2+cxx fake idlc route 可重复校验",
+            "但这只证明 pinned generator route",
+            "真实 DDS factories/adapters、Visual Events `HeadStateV1_`/`GazeTargetV1_` generated C++ type support 接入、full bridge runtime、real serialization/QoS tests / construction tests、板端 compatibility probe、PC E2E tools、board/RK probe、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
     assert "Step 1 仍未完成 DDS stack decision record" not in text
@@ -499,6 +513,7 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     assert "Step 4 完全完成" not in text
     assert "full bridge ready" not in text
     assert "检查 SDK root、video publisher dir 和 IDL generator/toolchain，缺失时 fail-fast" not in text
+    assert "随便依赖 PATH 上的 idlc" not in text
     assert "Step 4 Python JSONL bridge runtime integration slice 仍未完成" not in text
     assert "真实 DDS/C++ bridge/PC E2E/RK probe 已完成" not in text
     assert "Step 4 Python JSONL bridge runtime integration slice 完成代表真实 DDS" not in text

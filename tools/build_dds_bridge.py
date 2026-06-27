@@ -3,18 +3,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+try:
+    from tools.prepare_dds_codegen_toolchain import (
+        CodegenToolchainError,
+        check_idlc_codegen_toolchain,
+    )
+except ModuleNotFoundError:
+    from prepare_dds_codegen_toolchain import (  # type: ignore[no-redef]
+        CodegenToolchainError,
+        check_idlc_codegen_toolchain,
+    )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NATIVE_BRIDGE_DIR = REPO_ROOT / "native" / "dds_bridge"
 DEFAULT_BUILD_DIR = REPO_ROOT / "build" / "dds_bridge"
 DEFAULT_REPORT = REPO_ROOT / "artifacts" / "dds_bridge" / "build_report.json"
-IDL_GENERATORS = ("idlc", "cyclonedds-idlc", "fastddsgen")
 
 
 class CheckError(RuntimeError):
@@ -62,18 +71,6 @@ def _check_video_dds_publisher_dir(path: Path) -> None:
         raise CheckError(f"VIDEO_DDS_PUBLISHER_DIR is missing CameraFrame_ inputs: {formatted}")
 
 
-def _find_idl_generator() -> str:
-    for name in IDL_GENERATORS:
-        found = shutil.which(name)
-        if found:
-            return found
-    expected = ", ".join(IDL_GENERATORS)
-    raise CheckError(
-        "IDL generator is required before building Visual Events HeadStateV1_/GazeTargetV1_ "
-        f"type support; none found on PATH ({expected})"
-    )
-
-
 def _write_report(path: Path, report: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -102,10 +99,15 @@ def check_foundation_environment(
     }
 
 
-def check_visual_events_codegen() -> dict[str, object]:
-    generator = _find_idl_generator()
+def check_visual_events_codegen(idlc: Path | None) -> dict[str, object]:
+    try:
+        result = check_idlc_codegen_toolchain(idlc)
+    except CodegenToolchainError as exc:
+        raise CheckError(str(exc)) from exc
     return {
-        "idl_generator": generator,
+        "idl_generator": result["idlc"],
+        "idl_generator_version": result["idlc_version"],
+        "idl_generator_cxx_backend": result["cxx_backend_available"],
         "visual_events_codegen_ready": True,
         "visual_events_codegen_error": "",
     }
@@ -181,6 +183,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--build-dir", type=Path, default=DEFAULT_BUILD_DIR)
     parser.add_argument("--out", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--idlc", type=Path, default=_env_path("VISUAL_EVENTS_IDLC"))
     parser.add_argument("--check", action="store_true", help="only validate foundation inputs")
     parser.add_argument(
         "--check-full-bridge",
@@ -214,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.check_full_bridge:
             try:
-                report.update(check_visual_events_codegen())
+                report.update(check_visual_events_codegen(args.idlc))
             except CheckError as exc:
                 report["visual_events_codegen_ready"] = False
                 report["visual_events_codegen_error"] = str(exc)
