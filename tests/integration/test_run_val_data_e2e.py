@@ -1,9 +1,11 @@
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from tests.jpeg_fixtures import JPEG_1280X720
+from tools import cli_local_e2e_manifest
 from tools.replay_val_data import ReplayStats
 from tools.run_val_data_e2e import (
     MOVING_SUPPRESSION_SCENE_NAMES,
@@ -38,6 +40,60 @@ def make_val_data_root(tmp_path: Path, name: str = "val-data") -> Path:
         scene_dir.mkdir(parents=True)
         write_jpeg(scene_dir / "img_1710000000000000000.jpeg")
     return root
+
+
+def authoritative_manifest_for_data(data_dir: Path) -> dict:
+    inventory = cli_local_e2e_manifest.generate_effective_manifest(data_dir)
+    return {
+        "schema_version": 1,
+        "fps": 10.0,
+        "scene_count": inventory["scene_count"],
+        "frame_count": inventory["frame_count"],
+        "scenes": [
+            {
+                "scene_name": scene["scene_name"],
+                "frame_count": scene["frame_count"],
+                "scene_sha256": scene["scene_sha256"],
+            }
+            for scene in inventory["scenes"]
+        ],
+        "oracle": {
+            "expected_event_timeline": {
+                "source": "oracle/events.json",
+                "version": "events-v1",
+            },
+            "expected_attention_target_timeline": {
+                "source": "oracle/attention.json",
+                "rule": "largest_stable_person_v1",
+            },
+        },
+    }
+
+
+def write_manifest(path: Path, payload: dict) -> None:
+    path.write_text(
+        json.dumps(payload, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def assert_generated_manifest_evidence(report: dict) -> None:
+    assert report["manifest_source"] == "generated"
+    assert report["manifest_path"] is None
+    assert report["manifest_sha256"]
+    assert report["manifest_schema_version"] is None
+    assert report["manifest_authoritative"] is False
+    assert report["manifest_validation_errors"] == []
+    assert report["scene_count"] == len(REQUIRED_SCENE_NAMES)
+    assert report["frame_count"] == len(REQUIRED_SCENE_NAMES)
+    assert report["oracle_schema_present"] is False
+    assert report["oracle_schema_valid"] is False
+    assert report["oracle_summary"] is None
+    assert report["oracle_evaluated"] is False
+    assert report["oracle_evaluation_passed"] is None
+    assert report["semantic_event_oracle_source"] == (
+        "tools.replay_val_data.hardcoded_scene_expectations"
+    )
 
 
 def passing_stats(scene: str, head_motion: str) -> ReplayStats:
@@ -373,6 +429,192 @@ async def test_runner_replays_stationary_unknown_and_moving_rounds_and_writes_ar
     assert perf["server_phase_latency_ms"]["infer"] == {"available": False}
     assert perf["vram"] == {"available": False}
     assert perf["memory"] == {"available": False}
+
+
+@pytest.mark.asyncio
+async def test_default_missing_manifest_records_generated_non_authoritative_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+
+    async def fake_replay_scene(**kwargs):
+        write_fake_jsonl(kwargs["save_jsonl"])
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads((out / "report.json").read_text())
+    assert report["overall_pass"] is True
+    assert_generated_manifest_evidence(report)
+    assert report["manifest_contract_required"] is False
+    assert report["manifest_contract_satisfied"] is False
+
+
+@pytest.mark.asyncio
+async def test_explicit_authoritative_manifest_projects_oracle_without_evaluation(
+    tmp_path,
+    monkeypatch,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+    manifest = tmp_path / "manifest-v1.json"
+    write_manifest(manifest, authoritative_manifest_for_data(data_dir))
+
+    async def fake_replay_scene(**kwargs):
+        write_fake_jsonl(kwargs["save_jsonl"])
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--manifest",
+            str(manifest),
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads((out / "report.json").read_text())
+    assert report["overall_pass"] is True
+    assert report["manifest_source"] == "file"
+    assert report["manifest_path"] == str(manifest)
+    assert report["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert report["manifest_schema_version"] == 1
+    assert report["manifest_authoritative"] is True
+    assert report["manifest_validation_errors"] == []
+    assert report["scene_count"] == len(REQUIRED_SCENE_NAMES)
+    assert report["frame_count"] == len(REQUIRED_SCENE_NAMES)
+    assert report["oracle_schema_present"] is True
+    assert report["oracle_schema_valid"] is True
+    assert report["oracle_summary"] == {
+        "expected_event_timeline": {
+            "source": "oracle/events.json",
+            "version": "events-v1",
+        },
+        "expected_attention_target_timeline": {
+            "source": "oracle/attention.json",
+            "rule": "largest_stable_person_v1",
+        },
+    }
+    assert report["manifest_contract_required"] is False
+    assert report["manifest_contract_satisfied"] is True
+    assert report["oracle_evaluated"] is False
+    assert report["oracle_evaluation_passed"] is None
+    assert report["semantic_event_oracle_source"] == (
+        "tools.replay_val_data.hardcoded_scene_expectations"
+    )
+
+
+@pytest.mark.asyncio
+async def test_require_authoritative_manifest_without_manifest_fails_preflight(
+    tmp_path,
+    monkeypatch,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+    calls = []
+
+    async def fake_replay_scene(**kwargs):
+        calls.append(kwargs)
+        write_fake_jsonl(kwargs["save_jsonl"])
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--require-authoritative-manifest",
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 1
+    assert calls == []
+    report = json.loads((out / "report.json").read_text())
+    assert report["overall_pass"] is False
+    assert_generated_manifest_evidence(report)
+    assert report["manifest_contract_required"] is True
+    assert report["manifest_contract_satisfied"] is False
+    assert any(
+        "authoritative manifest contract required but not satisfied" in reason
+        for reason in report["failure_reasons"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_require_authoritative_manifest_with_invalid_v1_manifest_fails_preflight(
+    tmp_path,
+    monkeypatch,
+):
+    data_dir = make_val_data_root(tmp_path)
+    out = tmp_path / "artifacts" / "e2e"
+    manifest = tmp_path / "manifest-v1.json"
+    manifest_payload = authoritative_manifest_for_data(data_dir)
+    manifest_payload["scene_count"] = 999
+    write_manifest(manifest, manifest_payload)
+    calls = []
+
+    async def fake_replay_scene(**kwargs):
+        calls.append(kwargs)
+        write_fake_jsonl(kwargs["save_jsonl"])
+        return passing_stats(Path(kwargs["scene_dir"]).name, kwargs["head_motion"])
+
+    monkeypatch.setattr("tools.run_val_data_e2e.replay_scene", fake_replay_scene)
+
+    exit_code = await async_main(
+        [
+            "--server",
+            "ws://127.0.0.1:8765/v1/stream",
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--manifest",
+            str(manifest),
+            "--require-authoritative-manifest",
+            "--no-realtime",
+        ]
+    )
+
+    assert exit_code == 1
+    assert calls == []
+    report = json.loads((out / "report.json").read_text())
+    assert report["overall_pass"] is False
+    assert report["manifest_source"] == "file"
+    assert report["manifest_authoritative"] is True
+    assert report["oracle_schema_present"] is True
+    assert report["oracle_schema_valid"] is True
+    assert "scene_count_mismatch" in report["manifest_validation_errors"]
+    assert report["manifest_contract_required"] is True
+    assert report["manifest_contract_satisfied"] is False
 
 
 @pytest.mark.asyncio
@@ -967,6 +1209,9 @@ async def test_replay_exception_writes_failure_report_and_perf(tmp_path, monkeyp
     report = json.loads((out / "report.json").read_text())
     perf = json.loads((tmp_path / "artifacts" / "perf" / "server_perf.json").read_text())
     assert report["overall_pass"] is False
+    assert_generated_manifest_evidence(report)
+    assert report["manifest_contract_required"] is False
+    assert report["manifest_contract_satisfied"] is False
     assert report["cases"][0]["case"] == "pci_stand"
     assert len(report["cases"]) == 1
     assert "e2e exception: RuntimeError: connection refused" in report[

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from tools import cli_local_e2e_manifest
     from tools.replay_val_data import (
         DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS,
         ReplayStats,
@@ -21,6 +22,7 @@ try:
 except ModuleNotFoundError as exc:  # pragma: no cover - direct script execution
     if exc.name != "tools":
         raise
+    import cli_local_e2e_manifest  # type: ignore[no-redef]
     from replay_val_data import (
         DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS,
         ReplayStats,
@@ -59,6 +61,22 @@ _HZ_MIN = 9.0
 _TOTAL_LATENCY_P95_MAX_MS = 120.0
 _TOTAL_LATENCY_P99_MAX_MS = 200.0
 _ERROR_RATE_MAX = 0.01
+_SEMANTIC_EVENT_ORACLE_SOURCE = (
+    "tools.replay_val_data.hardcoded_scene_expectations"
+)
+_MANIFEST_EVIDENCE_KEYS = (
+    "manifest_source",
+    "manifest_path",
+    "manifest_sha256",
+    "manifest_schema_version",
+    "manifest_authoritative",
+    "manifest_validation_errors",
+    "scene_count",
+    "frame_count",
+    "oracle_schema_present",
+    "oracle_schema_valid",
+    "oracle_summary",
+)
 _SERVER_PHASES = (
     "decode",
     "infer",
@@ -134,6 +152,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--server", required=True)
     parser.add_argument("--data-dir", required=True, type=Path)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument(
+        "--require-authoritative-manifest",
+        action="store_true",
+        help="Fail preflight unless a valid authoritative manifest/oracle contract is present.",
+    )
     parser.add_argument("--camera", default=DEFAULT_CAMERA)
     parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
     parser.add_argument("--response-timeout-ms", type=int, default=None)
@@ -180,9 +204,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 async def async_main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    manifest_evidence: dict[str, Any] | None = None
     try:
         scene_dirs = preflight_val_data_root(args.data_dir)
         preflight_out_path(args.out, data_dir=args.data_dir)
+        manifest_evidence = build_manifest_evidence(
+            data_dir=args.data_dir,
+            out=args.out,
+            manifest=args.manifest,
+            contract_required=args.require_authoritative_manifest,
+        )
+        if (
+            args.require_authoritative_manifest
+            and not manifest_evidence["manifest_contract_satisfied"]
+        ):
+            raise PreflightError(
+                "authoritative manifest contract required but not satisfied: "
+                + ", ".join(manifest_contract_failure_reasons(manifest_evidence))
+            )
         if args.server_metrics_jsonl is not None:
             preflight_server_metrics_jsonl_path(
                 args.server_metrics_jsonl,
@@ -213,6 +252,12 @@ async def async_main(argv: list[str] | None = None) -> int:
             prepare_server_metrics_jsonl_path(args.server_metrics_jsonl)
     except PreflightError as exc:
         print(f"preflight failed: {exc}", file=sys.stderr)
+        if manifest_evidence is not None:
+            _write_preflight_failure_artifacts(
+                args.out,
+                reason=f"preflight failed: {exc}",
+                manifest_evidence=manifest_evidence,
+            )
         return 1
 
     cases: list[CaseResult] = []
@@ -244,7 +289,11 @@ async def async_main(argv: list[str] | None = None) -> int:
                     soak_report=soak_report,
                     server_metrics_jsonl=args.server_metrics_jsonl,
                 )
-                report = build_e2e_report(cases, perf_report=perf_report)
+                report = build_e2e_report(
+                    cases,
+                    perf_report=perf_report,
+                    manifest_evidence=manifest_evidence,
+                )
                 _write_json(args.out / "report.json", report)
                 _write_json(args.out.parent / "perf" / "server_perf.json", perf_report)
                 return 1
@@ -265,7 +314,11 @@ async def async_main(argv: list[str] | None = None) -> int:
             soak_report=soak_report,
             server_metrics_jsonl=args.server_metrics_jsonl,
         )
-        report = build_e2e_report(cases, perf_report=perf_report)
+        report = build_e2e_report(
+            cases,
+            perf_report=perf_report,
+            manifest_evidence=manifest_evidence,
+        )
         _write_json(args.out / "report.json", report)
         perf_path = args.out.parent / "perf" / "server_perf.json"
         _write_json(perf_path, perf_report)
@@ -279,7 +332,13 @@ async def async_main(argv: list[str] | None = None) -> int:
                 memory_growth_max_mb=args.soak_memory_growth_max_mb,
                 initial_rss_mb=initial_rss_mb,
             )
-        _write_failure_artifacts(args.out, cases=cases, exc=exc, soak_report=soak_report)
+        _write_failure_artifacts(
+            args.out,
+            cases=cases,
+            exc=exc,
+            soak_report=soak_report,
+            manifest_evidence=manifest_evidence,
+        )
         return 1
 
     return 0 if report["overall_pass"] else 1
@@ -365,6 +424,72 @@ def prepare_server_metrics_jsonl_path(metrics_jsonl: Path) -> None:
         raise
     except OSError as exc:
         raise PreflightError(f"could not prepare server-metrics-jsonl: {exc}") from exc
+
+
+def build_manifest_evidence(
+    *,
+    data_dir: Path,
+    out: Path,
+    manifest: Path | None,
+    contract_required: bool,
+) -> dict[str, Any]:
+    try:
+        _, manifest_report = cli_local_e2e_manifest.build_report(
+            data_dir=data_dir,
+            out=out,
+            manifest=manifest,
+        )
+    except (OSError, cli_local_e2e_manifest.PreflightError) as exc:
+        raise PreflightError(str(exc)) from exc
+
+    evidence = {
+        key: manifest_report.get(key)
+        for key in _MANIFEST_EVIDENCE_KEYS
+    }
+    validation_errors = evidence.get("manifest_validation_errors")
+    if isinstance(validation_errors, list):
+        evidence["manifest_validation_errors"] = list(validation_errors)
+
+    evidence["manifest_contract_required"] = bool(contract_required)
+    evidence["manifest_contract_satisfied"] = manifest_contract_satisfied(evidence)
+    evidence["oracle_evaluated"] = False
+    evidence["oracle_evaluation_passed"] = None
+    evidence["semantic_event_oracle_source"] = _SEMANTIC_EVENT_ORACLE_SOURCE
+    return evidence
+
+
+def manifest_contract_satisfied(evidence: dict[str, Any]) -> bool:
+    validation_errors = evidence.get("manifest_validation_errors")
+    return (
+        evidence.get("manifest_source") == "file"
+        and evidence.get("manifest_authoritative") is True
+        and isinstance(validation_errors, list)
+        and not validation_errors
+        and evidence.get("oracle_schema_present") is True
+        and evidence.get("oracle_schema_valid") is True
+    )
+
+
+def manifest_contract_failure_reasons(evidence: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if evidence.get("manifest_source") != "file":
+        reasons.append("manifest_source_not_file")
+    if evidence.get("manifest_authoritative") is not True:
+        reasons.append("manifest_not_authoritative")
+
+    validation_errors = evidence.get("manifest_validation_errors")
+    if isinstance(validation_errors, list):
+        if validation_errors:
+            joined = ",".join(str(error) for error in validation_errors)
+            reasons.append(f"manifest_validation_errors:{joined}")
+    else:
+        reasons.append("manifest_validation_errors_invalid")
+
+    if evidence.get("oracle_schema_present") is not True:
+        reasons.append("oracle_schema_missing")
+    if evidence.get("oracle_schema_valid") is not True:
+        reasons.append("oracle_schema_invalid")
+    return reasons or ["unknown_manifest_contract_failure"]
 
 
 async def _run_full_matrix(
@@ -748,6 +873,7 @@ def build_e2e_report(
     cases: list[CaseResult],
     *,
     perf_report: dict[str, Any],
+    manifest_evidence: dict[str, Any] | None = None,
     extra_failure_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
     soak_report = perf_report.get("soak", build_soak_report_disabled())
@@ -764,7 +890,7 @@ def build_e2e_report(
             f"perf: {reason}" for reason in perf_report["failure_reasons"]
         )
 
-    return {
+    report = {
         "overall_pass": all(case.passed for case in cases) and perf_report["passed"],
         "cases": case_entries,
         "soak": soak_report,
@@ -778,6 +904,9 @@ def build_e2e_report(
             "soak_passed": soak_report["passed"],
         },
     }
+    if manifest_evidence is not None:
+        report.update(manifest_evidence)
+    return report
 
 
 def build_perf_report(
@@ -1233,12 +1362,33 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def _write_preflight_failure_artifacts(
+    out: Path,
+    *,
+    reason: str,
+    manifest_evidence: dict[str, Any],
+) -> None:
+    try:
+        perf_report = build_failed_perf_report([reason])
+        report = build_e2e_report(
+            [],
+            perf_report=perf_report,
+            manifest_evidence=manifest_evidence,
+            extra_failure_reasons=[reason],
+        )
+        _write_json(out / "report.json", report)
+        _write_json(out.parent / "perf" / "server_perf.json", perf_report)
+    except Exception as write_exc:
+        print(f"failed to write preflight failure artifacts: {write_exc}", file=sys.stderr)
+
+
 def _write_failure_artifacts(
     out: Path,
     *,
     cases: list[CaseResult],
     exc: Exception,
     soak_report: dict[str, Any] | None = None,
+    manifest_evidence: dict[str, Any] | None = None,
 ) -> None:
     reason = f"e2e exception: {type(exc).__name__}: {exc}"
     try:
@@ -1246,6 +1396,7 @@ def _write_failure_artifacts(
         report = build_e2e_report(
             cases,
             perf_report=perf_report,
+            manifest_evidence=manifest_evidence,
             extra_failure_reasons=[reason],
         )
         _write_json(out / "report.json", report)
