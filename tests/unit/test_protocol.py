@@ -3,6 +3,7 @@ import struct
 
 import pytest
 
+from tests.jpeg_fixtures import jpeg_with_sof0_dimensions
 from visual_events_server.protocol import (
     MAX_HEADER_BYTES,
     MAX_JPEG_BYTES,
@@ -14,7 +15,7 @@ from visual_events_server.protocol import (
 )
 
 
-JPEG_BYTES = b"\xff\xd8\xff\xe0minimal-jpeg\xff\xd9"
+JPEG_BYTES = jpeg_with_sof0_dimensions(width=1280, height=720)
 
 
 def frame_header(**overrides):
@@ -33,7 +34,7 @@ def frame_header(**overrides):
     return header
 
 
-def test_encode_decode_frame_message_round_trips_valid_jpeg_envelope():
+def test_decode_accepts_jpeg_when_header_dimensions_match():
     payload = encode_frame_message(frame_header(), JPEG_BYTES)
 
     decoded = decode_frame_message(payload)
@@ -45,6 +46,34 @@ def test_encode_decode_frame_message_round_trips_valid_jpeg_envelope():
     assert decoded.height == 720
     assert decoded.head_motion_state == "stationary"
     assert decoded.jpeg_bytes == JPEG_BYTES
+
+
+def test_decode_rejects_jpeg_dimension_mismatch():
+    payload = encode_frame_message(
+        frame_header(width=1280, height=720),
+        jpeg_with_sof0_dimensions(width=640, height=480),
+        validate=False,
+    )
+
+    with pytest.raises(ProtocolError) as exc:
+        decode_frame_message(payload)
+
+    assert exc.value.code == "invalid_frame"
+    assert exc.value.frame_id == 42
+
+
+def test_decode_rejects_soi_eoi_bytes_without_decodable_dimensions():
+    payload = encode_frame_message(
+        frame_header(width=1280, height=720),
+        b"\xff\xd8minimal-envelope-only\xff\xd9",
+        validate=False,
+    )
+
+    with pytest.raises(ProtocolError) as exc:
+        decode_frame_message(payload)
+
+    assert exc.value.code == "invalid_frame"
+    assert exc.value.frame_id == 42
 
 
 def test_decode_defaults_missing_head_motion_to_unknown():

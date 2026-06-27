@@ -186,7 +186,12 @@ def build_visual_state(
         track.to_protocol(image_width=frame.width, image_height=frame.height)
         for track in tracks
     ]
-    visible_person_count = sum(1 for track in tracks if track.lost_ms == 0)
+    visible_person_tracks = [
+        track
+        for track in tracks
+        if track.lost_ms == 0 and track.class_name == "person"
+    ]
+    visible_person_count = len(visible_person_tracks)
     return {
         "type": "visual_state",
         "schema_version": SCHEMA_VERSION,
@@ -203,10 +208,33 @@ def build_visual_state(
             "largest_person_stable": (
                 attention.largest_person_stable if attention is not None else False
             ),
-            "someone_near_center": False,
+            "someone_near_center": _has_person_near_center(
+                visible_person_tracks,
+                width=frame.width,
+                height=frame.height,
+            ),
         },
         "semantic_events": semantic_events or [],
     }
+
+
+def _has_person_near_center(
+    tracks: list[TrackSnapshot],
+    *,
+    width: int,
+    height: int,
+) -> bool:
+    min_x = 0.25 * float(width)
+    max_x = 0.75 * float(width)
+    min_y = 0.25 * float(height)
+    max_y = 0.75 * float(height)
+    for track in tracks:
+        x1, y1, x2, y2 = track.bbox_xyxy
+        center_x = (float(x1) + float(x2)) / 2.0
+        center_y = (float(y1) + float(y2)) / 2.0
+        if min_x <= center_x <= max_x and min_y <= center_y <= max_y:
+            return True
+    return False
 
 
 def _elapsed_ms(start: float, clock: Callable[[], float]) -> float:

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.jpeg_fixtures import JPEG_1280X720
 from tools.replay_val_data import ReplayStats
 from tools.run_val_data_e2e import (
     MOVING_SUPPRESSION_SCENE_NAMES,
@@ -11,7 +12,7 @@ from tools.run_val_data_e2e import (
 )
 
 
-JPEG_BYTES = b"\xff\xd8\xff\xe0minimal-jpeg\xff\xd9"
+JPEG_BYTES = JPEG_1280X720
 EXPECTED_MOVING_SUPPRESSION_SCENE_NAMES = (
     "pci_stand",
     "pic_1_l_to_r",

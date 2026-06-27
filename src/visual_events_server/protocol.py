@@ -10,6 +10,22 @@ MAX_HEADER_BYTES = 16 * 1024
 MAX_JPEG_BYTES = 2 * 1024 * 1024
 _HEADER_PREFIX_BYTES = 4
 _SUPPORTED_HEAD_MOTION_STATES = {"stationary", "moving", "unknown"}
+_SOF_MARKERS = {
+    0xC0,
+    0xC1,
+    0xC2,
+    0xC3,
+    0xC5,
+    0xC6,
+    0xC7,
+    0xC9,
+    0xCA,
+    0xCB,
+    0xCD,
+    0xCE,
+    0xCF,
+}
+_STANDALONE_MARKERS = {0x01, *range(0xD0, 0xD8)}
 
 
 @dataclass(frozen=True)
@@ -52,7 +68,12 @@ def encode_frame_message(
     if len(header_json) > MAX_HEADER_BYTES:
         raise ProtocolError("invalid_header", "header exceeds 16 KiB")
     if validate:
-        _validate_jpeg(jpeg_bytes, frame_id=_frame_id_from_header(header))
+        _validate_jpeg(
+            jpeg_bytes,
+            frame_id=_frame_id_from_header(header),
+            expected_width=_positive_int_or_none(header.get("width")),
+            expected_height=_positive_int_or_none(header.get("height")),
+        )
     return struct.pack(">I", len(header_json)) + header_json + jpeg_bytes
 
 
@@ -74,8 +95,12 @@ def decode_frame_message(message: bytes) -> FrameMessage:
     jpeg_bytes = message[header_end:]
 
     _validate_frame_header(header)
-    _validate_jpeg_size(jpeg_bytes, frame_id=frame_id)
-    _validate_jpeg(jpeg_bytes, frame_id=frame_id)
+    _validate_jpeg(
+        jpeg_bytes,
+        frame_id=frame_id,
+        expected_width=header["width"],
+        expected_height=header["height"],
+    )
 
     head_motion = header.get("head_motion")
     head_motion_state = "unknown"
@@ -195,9 +220,20 @@ def _validate_jpeg_size(jpeg_bytes: bytes, *, frame_id: int | None) -> None:
         )
 
 
-def _validate_jpeg(jpeg_bytes: bytes, *, frame_id: int | None) -> None:
+def _validate_jpeg(
+    jpeg_bytes: bytes,
+    *,
+    frame_id: int | None,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+) -> None:
     _validate_jpeg_size(jpeg_bytes, frame_id=frame_id)
-    if not jpeg_bytes.startswith(b"\xff\xd8") or not jpeg_bytes.endswith(b"\xff\xd9"):
+    width, height = _parse_jpeg_dimensions(jpeg_bytes, frame_id=frame_id)
+    if (
+        expected_width is not None
+        and expected_height is not None
+        and (width != expected_width or height != expected_height)
+    ):
         raise ProtocolError(
             "invalid_frame",
             "jpeg payload is invalid",
@@ -205,8 +241,105 @@ def _validate_jpeg(jpeg_bytes: bytes, *, frame_id: int | None) -> None:
         )
 
 
+def _parse_jpeg_dimensions(
+    jpeg_bytes: bytes,
+    *,
+    frame_id: int | None,
+) -> tuple[int, int]:
+    if not jpeg_bytes.startswith(b"\xff\xd8") or not jpeg_bytes.endswith(b"\xff\xd9"):
+        raise ProtocolError(
+            "invalid_frame",
+            "jpeg payload is invalid",
+            frame_id=frame_id,
+        )
+
+    index = 2
+    payload_len = len(jpeg_bytes)
+    while index < payload_len - 2:
+        if jpeg_bytes[index] != 0xFF:
+            raise ProtocolError(
+                "invalid_frame",
+                "jpeg payload is invalid",
+                frame_id=frame_id,
+            )
+
+        while index < payload_len and jpeg_bytes[index] == 0xFF:
+            index += 1
+        if index >= payload_len:
+            break
+
+        marker = jpeg_bytes[index]
+        index += 1
+
+        if marker == 0x00:
+            raise ProtocolError(
+                "invalid_frame",
+                "jpeg payload is invalid",
+                frame_id=frame_id,
+            )
+        if marker == 0xD9:
+            break
+        if marker in _STANDALONE_MARKERS:
+            continue
+
+        if index + 2 > payload_len:
+            raise ProtocolError(
+                "invalid_frame",
+                "jpeg payload is invalid",
+                frame_id=frame_id,
+            )
+        segment_length = struct.unpack(">H", jpeg_bytes[index : index + 2])[0]
+        index += 2
+        if segment_length < 2:
+            raise ProtocolError(
+                "invalid_frame",
+                "jpeg payload is invalid",
+                frame_id=frame_id,
+            )
+
+        segment_payload_length = segment_length - 2
+        segment_end = index + segment_payload_length
+        if segment_end > payload_len:
+            raise ProtocolError(
+                "invalid_frame",
+                "jpeg payload is invalid",
+                frame_id=frame_id,
+            )
+
+        if marker in _SOF_MARKERS:
+            if segment_payload_length < 5:
+                raise ProtocolError(
+                    "invalid_frame",
+                    "jpeg payload is invalid",
+                    frame_id=frame_id,
+                )
+            height, width = struct.unpack(">HH", jpeg_bytes[index + 1 : index + 5])
+            if width <= 0 or height <= 0:
+                raise ProtocolError(
+                    "invalid_frame",
+                    "jpeg payload is invalid",
+                    frame_id=frame_id,
+                )
+            return width, height
+
+        if marker == 0xDA:
+            break
+
+        index = segment_end
+
+    raise ProtocolError(
+        "invalid_frame",
+        "jpeg payload is invalid",
+        frame_id=frame_id,
+    )
+
+
 def _positive_int(value: Any) -> bool:
     return isinstance(value, int) and value > 0
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    return value if _positive_int(value) else None
 
 
 def _frame_id_from_header(header: dict[str, Any]) -> int | None:

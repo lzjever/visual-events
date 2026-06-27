@@ -4,6 +4,7 @@ import json
 
 from fastapi.testclient import TestClient
 
+from tests.jpeg_fixtures import JPEG_1280X720
 from visual_events_server.app import create_app
 from visual_events_server.inference.base import (
     PersonPoseDetection,
@@ -14,7 +15,7 @@ from visual_events_server.processor import BackendVisualFrameProcessor
 from visual_events_server.protocol import encode_frame_message
 
 
-JPEG_BYTES = b"\xff\xd8\xff\xe0minimal-jpeg\xff\xd9"
+JPEG_BYTES = JPEG_1280X720
 
 
 def frame_header(**overrides):

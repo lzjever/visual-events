@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.jpeg_fixtures import JPEG_1280X720
 from tools.replay_val_data import (
     ReplayStats,
     _stats_passed,
@@ -19,7 +20,7 @@ from tools.replay_val_data import (
 from visual_events_server.protocol import decode_frame_message
 
 
-JPEG_BYTES = b"\xff\xd8\xff\xe0minimal-jpeg\xff\xd9"
+JPEG_BYTES = JPEG_1280X720
 
 
 def write_jpeg(path: Path) -> None:
