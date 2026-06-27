@@ -617,7 +617,17 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "release report",
             "真机 smoke",
             "closed-loop handoff",
-            "剩余是 mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff",
+            "Step 5 mock visual_state server slice 已完成",
+            "`tools/mock_visual_state_server.py` 提供 `/healthz` 和 `/v1/stream`",
+            "复用现有 `visual_events_server.protocol` decode/serialize",
+            "不定义第二套协议",
+            "支持 `tracking/lost/event` profile、`--delay-ms`、`--disconnect-after`",
+            "用于 CLI deterministic attention/event、slow response、disconnect 测试",
+            "不 import DDS/CLI runtime/模型",
+            "不启动 DDS participant",
+            "不读取 val-data",
+            "不做 runner/report",
+            "剩余是正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff",
             "DDS contract/schema Step 1 主要产物已完成",
             "完整 DDS PC E2E/over-wire GA gate 和板端 compatibility probe 仍必须补齐",
             "native runtime loop core 和 full-bridge wiring 已完成",
@@ -768,20 +778,20 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
     assert_contains_all(
         remaining_gap,
         [
-            "native PC DDS over-wire test participants、Python native participant wrappers 和 Step 5 manifest reader/report skeleton slice 已完成",
+            "native PC DDS over-wire test participants、Python native participant wrappers、Step 5 manifest reader/report skeleton slice 和 mock visual_state server slice 已完成",
             "完整 PC 本地 DDS E2E GA gate 仍未完成",
-            "mock visual_state server",
             "正式 CLI+real server 编排",
             "真实 runtime server/CLI",
             "stdout collector",
             "`/camera/image/jpeg` -> bridge/CLI -> server -> `/visual_events/gaze_target` over wire",
             "manifest skeleton 只做数据集身份和报告骨架",
+            "mock visual_state server 只覆盖 CLI deterministic/failure-path",
             "native runtime loop core 和 full-bridge wiring 已完成",
             "不能替代这个端到端 gate",
             "DDS discovery/real serialization over wire/QoS behavior 的完整测试矩阵",
             "real serialization/QoS tests",
             "release report 仍未完成",
-            "mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
+            "正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
 
@@ -858,6 +868,17 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "不能替代 full E2E",
             "`--out` 不能写入 data dir",
             "本机 ignored `val-data` 当前可识别 7 scene / 576 frames",
+            "Step 5 mock visual_state server slice 已完成",
+            "`tools/mock_visual_state_server.py` 提供 `/healthz` 和 `/v1/stream`",
+            "复用现有 `visual_events_server.protocol` decode/serialize",
+            "不定义第二套协议",
+            "支持 `tracking/lost/event` profile、`--delay-ms`、`--disconnect-after`",
+            "用于 CLI deterministic attention/event、slow response、disconnect 测试",
+            "不 import DDS/CLI runtime/模型",
+            "不启动 DDS participant",
+            "不读取 val-data",
+            "不做 runner/report",
+            "不能替代 full E2E 或正式 CLI + real server + `val-data` GA gate",
             "完整 PC local E2E 的 manifest/oracle 仍需列出",
             "mock visual_state server",
             "正式 CLI+real server 编排",
@@ -878,15 +899,16 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "loopback over-wire smoke",
             "Step 5 Python native participant wrappers slice 已完成",
             "Step 5 manifest reader/report skeleton slice 已完成",
+            "Step 5 mock visual_state server slice 已完成",
             "`tools/cli_local_e2e_manifest.py`",
             "本机 ignored `val-data` 当前可识别 7 scene / 576 frames",
-            "剩余是 mock visual_state server、正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff 仍未完成",
+            "剩余是正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff 仍未完成",
         ],
     )
 
     assert "完整 PC local E2E GA gate 已完成" not in text
     assert "manifest reader/report 已完成" not in text
-    assert "mock visual_state server 已完成" not in text
+    assert "mock visual_state server 仍未完成" not in text
     assert "正式 CLI+real server 编排已完成" not in text
     assert "fault matrix 已完成" not in text
     assert "release report 已完成" not in text
