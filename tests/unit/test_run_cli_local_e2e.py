@@ -99,6 +99,24 @@ class FakeRunner:
         self.health_urls: list[str] = []
         self._next_pid = 1001
 
+    def _lookup_result(
+        self,
+        results: dict[str, FakeResult],
+        name: str,
+    ) -> FakeResult | None:
+        if name in results:
+            return results[name]
+        base_name = name.split(":", 1)[0]
+        return results.get(base_name)
+
+    def _default_head_result(self, name: str) -> FakeResult | None:
+        if not name.startswith("head_publisher:"):
+            return None
+        command = self.commands.get(name, [])
+        state = arg_value(command, "--state") or name.split(":", 1)[1]
+        count = int(arg_value(command, "--count") or "5")
+        return FakeResult(0, stdout=head_publisher_stdout(state, count=count))
+
     def start_process(
         self,
         command: list[str],
@@ -108,7 +126,7 @@ class FakeRunner:
         name: str,
     ) -> FakeProcess:
         del cwd, env
-        result = self.process_results.get(name, FakeResult(0))
+        result = self._lookup_result(self.process_results, name) or FakeResult(0)
         process = FakeProcess(
             name,
             self._next_pid,
@@ -136,7 +154,7 @@ class FakeRunner:
         del cwd, env, timeout_s
         self.commands[name] = command
         self.events.append(("run_sync", name))
-        return self.sync_results.get(name, FakeResult(0))
+        return self._lookup_result(self.sync_results, name) or FakeResult(0)
 
     def wait_healthz(
         self,
@@ -160,7 +178,12 @@ class FakeRunner:
     ) -> FakeResult:
         del timeout_s
         self.events.append(("wait", name))
-        result = self.sync_results.get(name, FakeResult(0))
+        result = (
+            self._lookup_result(self.sync_results, name)
+            or self._lookup_result(self.process_results, name)
+            or self._default_head_result(name)
+            or FakeResult(0)
+        )
         process.returncode = result.returncode
         return result
 
@@ -232,6 +255,45 @@ def base_argv(paths: dict[str, Path], *extra: str) -> list[str]:
 
 def load_report(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def arg_value(command: list[str], option: str) -> str | None:
+    try:
+        index = command.index(option)
+    except ValueError:
+        return None
+    try:
+        return command[index + 1]
+    except IndexError:
+        return None
+
+
+def head_publisher_stdout(
+    state: str,
+    *,
+    count: int = 5,
+    mapped_state: str | None = None,
+    mapped_valid: bool | None = None,
+    dds_valid: bool | None = None,
+) -> str:
+    if mapped_state is None:
+        mapped_state = state
+    if mapped_valid is None:
+        mapped_valid = state != "unknown"
+    if dds_valid is None:
+        dds_valid = state != "unknown"
+    payload = {
+        "protocol_version": 1,
+        "type": "status",
+        "code": "publish_test_head_state_ok",
+        "published": count,
+        "state": state,
+        "head_state_topic": "/robot/head_state",
+        "dds_valid": dds_valid,
+        "mapped_valid": mapped_valid,
+        "mapped_state": mapped_state,
+    }
+    return json.dumps(payload, separators=(",", ":")) + "\n"
 
 
 def successful_runner(
@@ -379,7 +441,7 @@ def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Pat
             "--head-state",
             "moving",
             "--head-state-hz",
-            "8.5",
+            "9.5",
             "--gaze-count",
             "1",
             "--gaze-timeout-ms",
@@ -434,7 +496,7 @@ def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Pat
         "--gaze-topic",
         "/visual_events/gaze_target",
     ]
-    assert runner.commands["image_publisher"] == [
+    assert runner.commands["image_publisher:moving"] == [
         os.fspath(module.sys.executable),
         os.fspath(tools_dir / "publish_test_dds_images.py"),
         "--build-dir",
@@ -454,7 +516,7 @@ def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Pat
         "--camera-topic",
         "/camera/image/jpeg",
     ]
-    assert runner.commands["head_publisher"] == [
+    assert runner.commands["head_publisher:moving"] == [
         os.fspath(module.sys.executable),
         os.fspath(tools_dir / "publish_test_head_state.py"),
         "--build-dir",
@@ -468,10 +530,355 @@ def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Pat
         "--count",
         "7",
         "--hz",
-        "8.5",
+        "9.5",
         "--head-state-topic",
         "/robot/head_state",
     ]
+
+
+def test_default_head_state_segments_run_all_states_and_report_ga_fields(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc == 0
+    expected_states = ["stationary", "moving", "unknown"]
+    for state in expected_states:
+        command = runner.commands[f"head_publisher:{state}"]
+        assert arg_value(command, "--state") == state
+        assert arg_value(command, "--count") == "5"
+        assert arg_value(command, "--hz") == "10"
+
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is True
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert report["head_state"]["required"] is True
+    assert report["head_state"]["publisher_mode"] == "required"
+    assert report["head_state"]["hz"] == 10.0
+    assert report["head_state"]["count"] == 5
+    assert [
+        segment["requested_state"] for segment in report["head_state"]["segments"]
+    ] == expected_states
+    assert [segment["returncode"] for segment in report["head_state"]["segments"]] == [0, 0, 0]
+    assert report["head_state"]["evidence_source"] == "synthetic_publisher_stdout"
+    assert report["head_state_publisher_mode"] == "required"
+    assert report["head_state_hz"] == 10.0
+    assert report["head_state_stale_count"] is None
+    assert report["head_state_unknown_ratio"] == 0.0
+    assert report["head_state_segments"] == expected_states
+
+
+def test_explicit_head_state_segments_override_single_head_state_shortcut(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--head-state",
+            "moving",
+            "--head-state-segments",
+            "stationary,moving,unknown",
+        ),
+        runner=runner,
+    )
+
+    assert rc == 0
+    assert {
+        name
+        for event, name in runner.events
+        if event == "start" and name.startswith("head_publisher:")
+    } == {
+        "head_publisher:stationary",
+        "head_publisher:moving",
+        "head_publisher:unknown",
+    }
+    report = load_report(paths["out"])
+    assert report["head_state_segments"] == ["stationary", "moving", "unknown"]
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        "",
+        "stationary,,moving",
+        "stationary,stationary",
+        "stationary,bad",
+    ],
+)
+def test_preflight_rejects_invalid_head_state_segments_and_writes_report(
+    tmp_path: Path,
+    segments: str,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+
+    rc = module.main(
+        base_argv(paths, "--head-state-segments", segments),
+        runner=FakeRunner(),
+    )
+
+    assert rc != 0
+    assert paths["out"].exists()
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert report["slice_pass"] is False
+    assert any("--head-state-segments" in reason for reason in report["failure_reasons"])
+
+
+def test_head_publisher_overlaps_image_replay_for_each_segment(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc == 0
+    for state in ("stationary", "moving", "unknown"):
+        segment_events = [
+            event
+            for event in runner.events
+            if event[1] in {f"head_publisher:{state}", f"image_publisher:{state}"}
+        ]
+        assert segment_events == [
+            ("start", f"head_publisher:{state}"),
+            ("run_sync", f"image_publisher:{state}"),
+            ("wait", f"head_publisher:{state}"),
+        ]
+    assert not any(event == ("run_sync", "head_publisher") for event in runner.events)
+
+
+@pytest.mark.parametrize(
+    ("process_result", "expected_reason"),
+    [
+        (
+            FakeResult(7, stdout=head_publisher_stdout("moving"), stderr="head failed"),
+            "head_publisher_failed",
+        ),
+        (
+            FakeResult(0, stdout="{not-json}\n"),
+            "head_publisher_malformed_json",
+        ),
+    ],
+)
+def test_segment_head_publisher_failure_or_malformed_json_fails_partial_slice(
+    tmp_path: Path,
+    process_result: FakeResult,
+    expected_reason: str,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+            )
+        },
+        process_results={"head_publisher:moving": process_result},
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state-segments", "stationary,moving,unknown"),
+        runner=runner,
+    )
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is False
+    assert any(
+        expected_reason in reason and "moving" in reason
+        for reason in report["failure_reasons"]
+    )
+    moving_segment = next(
+        segment
+        for segment in report["head_state"]["segments"]
+        if segment["requested_state"] == "moving"
+    )
+    assert moving_segment["returncode"] == process_result.returncode
+
+
+@pytest.mark.parametrize(
+    ("segments", "process_results", "expected_reason"),
+    [
+        (
+            "stationary",
+            {
+                "head_publisher:stationary": FakeResult(
+                    0,
+                    stdout=head_publisher_stdout(
+                        "stationary",
+                        mapped_state="unknown",
+                        mapped_valid=False,
+                    ),
+                )
+            },
+            "head_state_unknown_ratio_above_max",
+        ),
+        (
+            "stationary",
+            {
+                "head_publisher:stationary": FakeResult(
+                    0,
+                    stdout=head_publisher_stdout(
+                        "stationary",
+                        mapped_state="moving",
+                    ),
+                )
+            },
+            "head_state_segment_state_mismatch:segment=stationary",
+        ),
+        (
+            "moving",
+            {
+                "head_publisher:moving": FakeResult(
+                    0,
+                    stdout=head_publisher_stdout(
+                        "moving",
+                        mapped_state="stationary",
+                    ),
+                )
+            },
+            "head_state_segment_state_mismatch:segment=moving",
+        ),
+        (
+            "unknown",
+            {
+                "head_publisher:unknown": FakeResult(
+                    0,
+                    stdout=head_publisher_stdout(
+                        "unknown",
+                        mapped_state="moving",
+                        mapped_valid=True,
+                        dds_valid=True,
+                    ),
+                )
+            },
+            "head_state_unknown_segment_missing_unknown_evidence",
+        ),
+    ],
+)
+def test_head_state_native_json_evidence_enforces_segment_mapping(
+    tmp_path: Path,
+    segments: str,
+    process_results: dict[str, FakeResult],
+    expected_reason: str,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+            )
+        },
+        process_results=process_results,
+    )
+
+    rc = module.main(base_argv(paths, "--head-state-segments", segments), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert any(expected_reason in reason for reason in report["failure_reasons"])
+
+
+def test_legacy_scalar_fields_use_first_failing_segment(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+            )
+        },
+        process_results={
+            "head_publisher:moving": FakeResult(
+                7,
+                stdout=head_publisher_stdout("moving"),
+                stderr="moving head failed",
+            ),
+        },
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state-segments", "stationary,moving,unknown"),
+        runner=runner,
+    )
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is False
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert report["returncodes"]["head_publisher"] == 7
+    assert report["returncodes"]["head_publishers"] == {
+        "stationary": 0,
+        "moving": 7,
+        "unknown": 0,
+    }
+    assert '"state":"moving"' in report["stdout_stderr_tails"]["head_publisher"][
+        "stdout_tail"
+    ]
+    assert "moving head failed" in report["stdout_stderr_tails"]["head_publisher"][
+        "stderr_tail"
+    ]
+    assert '"state":"unknown"' in report["stdout_stderr_tails"]["head_publishers"][
+        "unknown"
+    ]["stdout_tail"]
+    assert [segment["returncode"] for segment in report["head_state"]["segments"]] == [
+        0,
+        7,
+        0,
+    ]
+
+
+def test_image_failure_reason_is_segment_specific(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+            ),
+            "image_publisher:moving": FakeResult(4, stderr="moving image failed"),
+        }
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state-segments", "stationary,moving,unknown"),
+        runner=runner,
+    )
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert "image_publisher_failed:segment=moving" in report["failure_reasons"]
+    assert "image_publisher_failed" not in report["failure_reasons"]
+    assert report["returncodes"]["image_publishers"] == {
+        "stationary": 0,
+        "moving": 4,
+        "unknown": 0,
+    }
+
+
+def test_head_state_hz_below_min_fails_partial_slice(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(base_argv(paths, "--head-state-hz", "8.5"), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+    assert report["slice_pass"] is False
+    assert "head_state_hz_below_min" in report["failure_reasons"]
 
 
 def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -> None:
@@ -490,17 +897,21 @@ def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -
         }
     )
 
-    rc = module.main(base_argv(paths, "--gaze-count", "2"), runner=runner)
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary", "--gaze-count", "2"),
+        runner=runner,
+    )
 
     assert rc == 0
     assert runner.events == [
         ("start", "server"),
         ("healthz", "server"),
-        ("start", "gaze_subscriber"),
         ("start", "cli"),
         ("sleep", "0.5"),
-        ("run_sync", "head_publisher"),
-        ("run_sync", "image_publisher"),
+        ("start", "gaze_subscriber"),
+        ("start", "head_publisher:stationary"),
+        ("run_sync", "image_publisher:stationary"),
+        ("wait", "head_publisher:stationary"),
         ("wait", "gaze_subscriber"),
         ("stop", "cli"),
         ("stop", "server"),
@@ -849,12 +1260,12 @@ def test_local_process_runner_stop_process_drains_live_stdout_and_stderr(tmp_pat
         (
             None,
             {"image_publisher": FakeResult(9, stderr="image failed")},
-            "image_publisher_failed",
+            "image_publisher_failed:segment=stationary",
         ),
         (
             None,
             {"gaze_subscriber": FakeResult(0, stdout="{not-json}\n")},
-            "gaze_target_count_shortfall",
+            "gaze_target_count_shortfall:segment=stationary",
         ),
     ],
 )

@@ -45,6 +45,9 @@ DEFAULT_SERVER_URL = "ws://127.0.0.1:8767/v1/stream"
 DEFAULT_DDS_BRIDGE_BINARY = "visual_events_dds_bridge"
 STOP_TIMEOUT_S = 5.0
 VALID_GAZE_STATES = {"tracking", "lost", "stale", "disabled"}
+VALID_HEAD_STATES = ("stationary", "moving", "unknown")
+DEFAULT_HEAD_STATE_SEGMENTS = VALID_HEAD_STATES
+MIN_HEAD_STATE_HZ = 9.0
 PROCESS_COLLECTED_LINE_LIMIT = 4096
 PROCESS_READER_JOIN_TIMEOUT_S = 1.0
 BOTIFIED_OPEN = "<botified>"
@@ -101,6 +104,25 @@ class HealthzResponse:
     status: int
     payload: dict[str, Any] | None
     failure_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class HeadStateSegment:
+    state: str
+    frame_count: int
+    head_state_hz: float
+
+
+@dataclass(frozen=True)
+class SegmentSmokeResult:
+    segment: HeadStateSegment
+    head_result: CommandResult | None
+    image_result: CommandResult | None
+    gaze_result: CommandResult | None
+    gaze_summary: dict[str, Any]
+    head_stdout_json: dict[str, Any] | None
+    head_stdout_parse_error: str | None
+    failure_reasons: list[str]
 
 
 class ProcessLike(Protocol):
@@ -320,7 +342,8 @@ class CliLocalE2EConfig:
     scene_dir: Path
     frame_count: int
     image_hz: float
-    head_state: str
+    head_state_mode: str
+    head_state_segments: tuple[HeadStateSegment, ...]
     head_state_hz: float
     gaze_count: int
     gaze_timeout_ms: int
@@ -355,9 +378,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--image-hz", type=_positive_float, default=10.0)
     parser.add_argument(
         "--head-state",
-        choices=("stationary", "moving", "unknown"),
-        default="stationary",
+        choices=VALID_HEAD_STATES,
+        default=None,
+        help="Compatibility shortcut for a single required head-state segment.",
     )
+    parser.add_argument("--head-state-mode", choices=("required",), default="required")
+    parser.add_argument("--head-state-segments", default=None)
     parser.add_argument("--head-state-hz", type=_positive_float, default=10.0)
     parser.add_argument("--gaze-count", type=_positive_int, default=1)
     parser.add_argument("--gaze-timeout-ms", type=_positive_int, default=5000)
@@ -569,6 +595,10 @@ def _build_config(
         raise PreflightError(f"scene is not a directory: {scene_dir}")
     if not cli_local_e2e_manifest.jpeg_files(scene_dir):
         raise PreflightError(f"scene has no JPEG frames: {selected_scene}")
+    head_state_segment_names = _parse_head_state_segment_names(
+        head_state=args.head_state,
+        head_state_segments=args.head_state_segments,
+    )
 
     return CliLocalE2EConfig(
         data_dir=data_dir,
@@ -592,7 +622,15 @@ def _build_config(
         scene_dir=scene_dir,
         frame_count=args.frame_count,
         image_hz=args.image_hz,
-        head_state=args.head_state,
+        head_state_mode=args.head_state_mode,
+        head_state_segments=tuple(
+            HeadStateSegment(
+                state=state,
+                frame_count=args.frame_count,
+                head_state_hz=args.head_state_hz,
+            )
+            for state in head_state_segment_names
+        ),
         head_state_hz=args.head_state_hz,
         gaze_count=args.gaze_count,
         gaze_timeout_ms=args.gaze_timeout_ms,
@@ -610,24 +648,34 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
     cli_command = _cli_command(config)
     gaze_command = _gaze_subscriber_command(config)
     image_command = _image_publisher_command(config)
-    head_command = _head_publisher_command(config)
+    head_commands = {
+        segment.state: _head_publisher_command(config, segment)
+        for segment in config.head_state_segments
+    }
+    first_segment = config.head_state_segments[0]
     commands = {
         "server": server_command,
         "cli": cli_command,
         "gaze_subscriber": gaze_command,
-        "head_publisher": head_command,
+        "head_publisher": head_commands[first_segment.state],
+        "head_publishers": head_commands,
         "image_publisher": image_command,
+        "image_publishers": {
+            segment.state: image_command for segment in config.head_state_segments
+        },
     }
     failure_reasons: list[str] = []
     server_process: ProcessLike | None = None
     cli_process: ProcessLike | None = None
     gaze_process: ProcessLike | None = None
+    head_process: ProcessLike | None = None
     health_result: HealthCheckResult | None = None
-    head_result: CommandResult | None = None
-    image_result: CommandResult | None = None
-    gaze_result: CommandResult | None = None
+    segment_results: list[SegmentSmokeResult] = []
     gaze_summary = _summarize_gaze_jsonl("", config.logical_camera_name, config.gaze_count)
     botified_stdout = _summarize_botified_stdout_from_process(None)
+
+    if config.head_state_hz < MIN_HEAD_STATE_HZ:
+        failure_reasons.append("head_state_hz_below_min")
 
     try:
         server_process = runner.start_process(
@@ -645,12 +693,6 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
         if not health_result.passed:
             failure_reasons.append(health_result.failure_reason or "healthz_failed")
         else:
-            gaze_process = runner.start_process(
-                gaze_command,
-                cwd=REPO_ROOT,
-                env=env,
-                name="gaze_subscriber",
-            )
             cli_process = runner.start_process(
                 cli_command,
                 cwd=REPO_ROOT,
@@ -658,43 +700,93 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
                 name="cli",
             )
             runner.sleep(config.startup_grace_s)
-            head_result = runner.run_sync(
-                head_command,
-                cwd=REPO_ROOT,
-                env=env,
-                name="head_publisher",
-            )
-            if head_result.returncode != 0:
-                failure_reasons.append("head_publisher_failed")
-            image_result = runner.run_sync(
-                image_command,
-                cwd=REPO_ROOT,
-                env=env,
-                name="image_publisher",
-            )
-            if image_result.returncode != 0:
-                failure_reasons.append("image_publisher_failed")
-            gaze_result = runner.wait_process(
-                gaze_process,
-                name="gaze_subscriber",
-                timeout_s=(config.gaze_timeout_ms / 1000.0) + STOP_TIMEOUT_S,
-            )
-            if gaze_result.returncode != 0:
-                failure_reasons.append("gaze_subscriber_failed")
-            gaze_summary = _summarize_gaze_jsonl(
-                gaze_result.stdout,
-                config.logical_camera_name,
-                config.gaze_count,
-            )
-            if gaze_summary["parse_errors"]:
-                failure_reasons.append("gaze_json_parse_errors")
-            if gaze_summary["accepted_count"] < config.gaze_count:
-                failure_reasons.append("gaze_target_count_shortfall")
+            for segment in config.head_state_segments:
+                segment_suffix = f":segment={segment.state}"
+                gaze_process = runner.start_process(
+                    gaze_command,
+                    cwd=REPO_ROOT,
+                    env=env,
+                    name="gaze_subscriber",
+                )
+                head_name = f"head_publisher:{segment.state}"
+                head_process = runner.start_process(
+                    head_commands[segment.state],
+                    cwd=REPO_ROOT,
+                    env=env,
+                    name=head_name,
+                )
+                image_result = runner.run_sync(
+                    image_command,
+                    cwd=REPO_ROOT,
+                    env=env,
+                    name=f"image_publisher:{segment.state}",
+                )
+                segment_failure_reasons: list[str] = []
+                if image_result.returncode != 0:
+                    segment_failure_reasons.append(
+                        f"image_publisher_failed{segment_suffix}"
+                    )
+
+                head_result = runner.wait_process(
+                    head_process,
+                    name=head_name,
+                    timeout_s=_publisher_timeout_s(segment.frame_count, segment.head_state_hz),
+                )
+                head_stdout_json, head_stdout_parse_error = _parse_head_publisher_stdout(
+                    head_result.stdout
+                )
+                segment_failure_reasons.extend(
+                    _head_segment_failure_reasons(
+                        segment=segment,
+                        result=head_result,
+                        stdout_json=head_stdout_json,
+                        stdout_parse_error=head_stdout_parse_error,
+                    )
+                )
+                head_process = None
+
+                gaze_result = runner.wait_process(
+                    gaze_process,
+                    name="gaze_subscriber",
+                    timeout_s=(config.gaze_timeout_ms / 1000.0) + STOP_TIMEOUT_S,
+                )
+                if gaze_result.returncode != 0:
+                    segment_failure_reasons.append(
+                        f"gaze_subscriber_failed{segment_suffix}"
+                    )
+                gaze_summary = _summarize_gaze_jsonl(
+                    gaze_result.stdout,
+                    config.logical_camera_name,
+                    config.gaze_count,
+                )
+                if gaze_summary["parse_errors"]:
+                    segment_failure_reasons.append(
+                        f"gaze_json_parse_errors{segment_suffix}"
+                    )
+                if gaze_summary["accepted_count"] < config.gaze_count:
+                    segment_failure_reasons.append(
+                        f"gaze_target_count_shortfall{segment_suffix}"
+                    )
+                segment_results.append(
+                    SegmentSmokeResult(
+                        segment=segment,
+                        head_result=head_result,
+                        image_result=image_result,
+                        gaze_result=gaze_result,
+                        gaze_summary=gaze_summary,
+                        head_stdout_json=head_stdout_json,
+                        head_stdout_parse_error=head_stdout_parse_error,
+                        failure_reasons=segment_failure_reasons,
+                    )
+                )
+                failure_reasons.extend(segment_failure_reasons)
     except Exception as exc:
         failure_reasons.append(f"runner_exception:{type(exc).__name__}")
     finally:
         if cli_process is not None:
             runner.stop_process(cli_process)
+        if head_process is not None and head_process.poll() is None:
+            runner.stop_process(head_process)
         if gaze_process is not None and gaze_process.poll() is None:
             runner.stop_process(gaze_process)
         if server_process is not None:
@@ -706,10 +798,8 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
     slice_pass = _slice_pass(
         failure_reasons=failure_reasons,
         health_result=health_result,
-        head_result=head_result,
-        image_result=image_result,
-        gaze_result=gaze_result,
-        gaze_summary=gaze_summary,
+        segment_results=segment_results,
+        expected_segment_count=len(config.head_state_segments),
         expected_gaze_count=config.gaze_count,
     )
     report = _build_smoke_report(
@@ -723,9 +813,7 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
         server_process=server_process,
         cli_process=cli_process,
         gaze_process=gaze_process,
-        head_result=head_result,
-        image_result=image_result,
-        gaze_result=gaze_result,
+        segment_results=segment_results,
         gaze_summary=gaze_summary,
         botified_stdout=botified_stdout,
     )
@@ -815,18 +903,107 @@ def _image_publisher_command(config: CliLocalE2EConfig) -> list[str]:
     ]
 
 
-def _head_publisher_command(config: CliLocalE2EConfig) -> list[str]:
+def _head_publisher_command(config: CliLocalE2EConfig, segment: HeadStateSegment) -> list[str]:
     return [
         *_wrapper_common_command(config, "publish_test_head_state.py"),
         "--state",
-        config.head_state,
+        segment.state,
         "--count",
-        str(config.frame_count),
+        str(segment.frame_count),
         "--hz",
-        _format_number(config.head_state_hz),
+        _format_number(segment.head_state_hz),
         "--head-state-topic",
         config.head_state_topic,
     ]
+
+
+def _parse_head_state_segment_names(
+    *,
+    head_state: str | None,
+    head_state_segments: str | None,
+) -> tuple[str, ...]:
+    if head_state_segments is None:
+        if head_state is not None:
+            return (head_state,)
+        return DEFAULT_HEAD_STATE_SEGMENTS
+
+    raw_segments = head_state_segments.split(",")
+    if not raw_segments or any(segment.strip() == "" for segment in raw_segments):
+        raise PreflightError("--head-state-segments must not contain empty values")
+
+    segments = tuple(segment.strip() for segment in raw_segments)
+    unknown = [segment for segment in segments if segment not in VALID_HEAD_STATES]
+    if unknown:
+        allowed = ",".join(VALID_HEAD_STATES)
+        raise PreflightError(
+            f"--head-state-segments contains unsupported value {unknown[0]!r}; "
+            f"allowed values: {allowed}"
+        )
+    if len(set(segments)) != len(segments):
+        raise PreflightError("--head-state-segments must not contain duplicate values")
+    return segments
+
+
+def _publisher_timeout_s(frame_count: int, hz: float) -> float:
+    return max(STOP_TIMEOUT_S, (frame_count / hz) + STOP_TIMEOUT_S)
+
+
+def _parse_head_publisher_stdout(stdout: str) -> tuple[dict[str, Any] | None, str | None]:
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None, "expected exactly one head publisher JSON summary line"
+    try:
+        payload = json.loads(lines[0])
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON: {exc.msg}"
+    if not isinstance(payload, dict):
+        return None, "head publisher JSON summary is not an object"
+    return payload, None
+
+
+def _head_segment_failure_reasons(
+    *,
+    segment: HeadStateSegment,
+    result: CommandResult,
+    stdout_json: dict[str, Any] | None,
+    stdout_parse_error: str | None,
+) -> list[str]:
+    reasons: list[str] = []
+    suffix = f":segment={segment.state}"
+    if result.returncode != 0:
+        reasons.append(f"head_publisher_failed{suffix}")
+    if stdout_parse_error is not None:
+        reasons.append(f"head_publisher_malformed_json{suffix}")
+        return reasons
+    if stdout_json is None:
+        reasons.append(f"head_publisher_malformed_json{suffix}")
+        return reasons
+
+    if stdout_json.get("state") != segment.state:
+        reasons.append(f"head_publisher_state_mismatch{suffix}")
+    published = stdout_json.get("published")
+    if isinstance(published, bool) or not isinstance(published, int):
+        reasons.append(f"head_publisher_count_mismatch{suffix}")
+    elif published != segment.frame_count:
+        reasons.append(f"head_publisher_count_mismatch{suffix}")
+
+    mapped_state = stdout_json.get("mapped_state")
+    mapped_valid = stdout_json.get("mapped_valid")
+    dds_valid = stdout_json.get("dds_valid")
+    if segment.state in {"stationary", "moving"}:
+        if mapped_state != segment.state:
+            reasons.append(f"head_state_segment_state_mismatch{suffix}")
+        if mapped_state == "unknown" or mapped_valid is False:
+            reasons.append(f"head_state_unknown_ratio_above_max{suffix}")
+    elif segment.state == "unknown":
+        has_unknown_evidence = (
+            mapped_state == "unknown"
+            or mapped_valid is False
+            or dds_valid is False
+        )
+        if not has_unknown_evidence:
+            reasons.append(f"head_state_unknown_segment_missing_unknown_evidence{suffix}")
+    return reasons
 
 
 def _build_smoke_report(
@@ -841,12 +1018,20 @@ def _build_smoke_report(
     server_process: ProcessLike | None,
     cli_process: ProcessLike | None,
     gaze_process: ProcessLike | None,
-    head_result: CommandResult | None,
-    image_result: CommandResult | None,
-    gaze_result: CommandResult | None,
+    segment_results: list[SegmentSmokeResult],
     gaze_summary: dict[str, Any],
     botified_stdout: dict[str, Any],
 ) -> dict[str, Any]:
+    legacy_segment_result = _legacy_segment_result(segment_results)
+    head_result = None if legacy_segment_result is None else legacy_segment_result.head_result
+    image_result = None if legacy_segment_result is None else legacy_segment_result.image_result
+    gaze_result = None if legacy_segment_result is None else legacy_segment_result.gaze_result
+    legacy_gaze_summary = (
+        gaze_summary if legacy_segment_result is None else legacy_segment_result.gaze_summary
+    )
+    head_state_segments = _head_state_segment_reports(segment_results)
+    head_state_unknown_ratio = _head_state_unknown_ratio(segment_results)
+    head_state_stale_count = _head_state_stale_count(segment_results)
     report = _base_report(
         manifest_report=config.manifest_report,
         status="partial_smoke_pass" if slice_pass else "partial_smoke_failed",
@@ -869,8 +1054,26 @@ def _build_smoke_report(
             },
             "returncodes": {
                 "head_publisher": None if head_result is None else head_result.returncode,
+                "head_publishers": {
+                    result.segment.state: None
+                    if result.head_result is None
+                    else result.head_result.returncode
+                    for result in segment_results
+                },
                 "image_publisher": None if image_result is None else image_result.returncode,
+                "image_publishers": {
+                    result.segment.state: None
+                    if result.image_result is None
+                    else result.image_result.returncode
+                    for result in segment_results
+                },
                 "gaze_subscriber": None if gaze_result is None else gaze_result.returncode,
+                "gaze_subscribers": {
+                    result.segment.state: None
+                    if result.gaze_result is None
+                    else result.gaze_result.returncode
+                    for result in segment_results
+                },
             },
             "dds": {
                 "domain": config.dds_domain,
@@ -890,12 +1093,31 @@ def _build_smoke_report(
             "image_hz": config.image_hz,
             "head_state": {
                 "required": True,
-                "publisher_mode": "required",
-                "state": config.head_state,
+                "publisher_mode": config.head_state_mode,
+                "state": config.head_state_segments[0].state,
                 "hz": config.head_state_hz,
                 "count": config.frame_count,
+                "segments": head_state_segments,
+                "stale_count": head_state_stale_count,
+                "unknown_ratio": head_state_unknown_ratio,
+                "evidence_source": "synthetic_publisher_stdout",
+                "partial_smoke_only": True,
             },
-            "gaze": gaze_summary,
+            "head_state_publisher_mode": config.head_state_mode,
+            "head_state_hz": config.head_state_hz,
+            "head_state_stale_count": head_state_stale_count,
+            "head_state_unknown_ratio": head_state_unknown_ratio,
+            "head_state_segments": [
+                segment.state for segment in config.head_state_segments
+            ],
+            "gaze": legacy_gaze_summary,
+            "gaze_segments": [
+                {
+                    "requested_head_state": result.segment.state,
+                    "summary": result.gaze_summary,
+                }
+                for result in segment_results
+            ],
             "botified_stdout": botified_stdout,
             "health": {
                 "ok": False if health_result is None else health_result.passed,
@@ -918,6 +1140,21 @@ def _build_smoke_report(
                     "stdout_tail": _tail("" if head_result is None else head_result.stdout),
                     "stderr_tail": _tail("" if head_result is None else head_result.stderr),
                 },
+                "head_publishers": {
+                    result.segment.state: {
+                        "stdout_tail": _tail(
+                            ""
+                            if result.head_result is None
+                            else result.head_result.stdout
+                        ),
+                        "stderr_tail": _tail(
+                            ""
+                            if result.head_result is None
+                            else result.head_result.stderr
+                        ),
+                    }
+                    for result in segment_results
+                },
                 "image_publisher": {
                     "stdout_tail": _tail("" if image_result is None else image_result.stdout),
                     "stderr_tail": _tail("" if image_result is None else image_result.stderr),
@@ -929,6 +1166,90 @@ def _build_smoke_report(
         }
     )
     return report
+
+
+def _legacy_segment_result(
+    segment_results: list[SegmentSmokeResult],
+) -> SegmentSmokeResult | None:
+    for result in segment_results:
+        if result.failure_reasons:
+            return result
+    return segment_results[-1] if segment_results else None
+
+
+def _head_state_segment_reports(
+    segment_results: list[SegmentSmokeResult],
+) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for result in segment_results:
+        summary = result.head_stdout_json or {}
+        reports.append(
+            {
+                "requested_state": result.segment.state,
+                "frame_count": result.segment.frame_count,
+                "head_state_hz": result.segment.head_state_hz,
+                "publisher_mode": "required",
+                "returncode": None
+                if result.head_result is None
+                else result.head_result.returncode,
+                "published": summary.get("published"),
+                "state": summary.get("state"),
+                "mapped_state": summary.get("mapped_state"),
+                "mapped_valid": summary.get("mapped_valid"),
+                "dds_valid": summary.get("dds_valid"),
+                "head_state_topic": summary.get("head_state_topic"),
+                "stale_count": summary.get("stale_count"),
+                "stdout_json": result.head_stdout_json,
+                "stdout_parse_error": result.head_stdout_parse_error,
+                "failure_reasons": result.failure_reasons,
+            }
+        )
+    return reports
+
+
+def _head_state_unknown_ratio(
+    segment_results: list[SegmentSmokeResult],
+) -> float | None:
+    unknown_count = 0
+    sample_count = 0
+    for result in segment_results:
+        if result.segment.state == "unknown" or result.head_stdout_json is None:
+            continue
+        samples = _published_count(result)
+        sample_count += samples
+        if (
+            result.head_stdout_json.get("mapped_state") == "unknown"
+            or result.head_stdout_json.get("mapped_valid") is False
+        ):
+            unknown_count += samples
+    if sample_count == 0:
+        return None
+    return unknown_count / sample_count
+
+
+def _head_state_stale_count(segment_results: list[SegmentSmokeResult]) -> int | None:
+    total = 0
+    saw_stale_count = False
+    for result in segment_results:
+        summary = result.head_stdout_json
+        if summary is None:
+            continue
+        stale_count = summary.get("stale_count")
+        if isinstance(stale_count, bool) or not isinstance(stale_count, int):
+            continue
+        saw_stale_count = True
+        total += stale_count
+    return total if saw_stale_count else None
+
+
+def _published_count(result: SegmentSmokeResult) -> int:
+    summary = result.head_stdout_json
+    if summary is None:
+        return result.segment.frame_count
+    published = summary.get("published")
+    if isinstance(published, bool) or not isinstance(published, int):
+        return result.segment.frame_count
+    return published
 
 
 def _build_preflight_failed_report(
@@ -1198,23 +1519,26 @@ def _slice_pass(
     *,
     failure_reasons: list[str],
     health_result: HealthCheckResult | None,
-    head_result: CommandResult | None,
-    image_result: CommandResult | None,
-    gaze_result: CommandResult | None,
-    gaze_summary: dict[str, Any],
+    segment_results: list[SegmentSmokeResult],
+    expected_segment_count: int,
     expected_gaze_count: int,
 ) -> bool:
     return (
         not failure_reasons
         and health_result is not None
         and health_result.passed
-        and head_result is not None
-        and head_result.returncode == 0
-        and image_result is not None
-        and image_result.returncode == 0
-        and gaze_result is not None
-        and gaze_result.returncode == 0
-        and gaze_summary["accepted_count"] >= expected_gaze_count
+        and len(segment_results) == expected_segment_count
+        and all(
+            result.head_result is not None
+            and result.head_result.returncode == 0
+            and result.head_stdout_parse_error is None
+            and result.image_result is not None
+            and result.image_result.returncode == 0
+            and result.gaze_result is not None
+            and result.gaze_result.returncode == 0
+            and result.gaze_summary["accepted_count"] >= expected_gaze_count
+            for result in segment_results
+        )
     )
 
 
