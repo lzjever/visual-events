@@ -1,0 +1,21 @@
+module visual_events { module msg { module dds_ {
+struct GazeTargetV1_ {
+  unsigned long schema_version;
+  string camera;
+  long long frame_id;
+  long long frame_timestamp_ms;
+  long long publish_timestamp_ms;
+  boolean valid;
+  string state;
+  long long target_track_id;
+  float target_u;
+  float target_v;
+  float target_norm_x;
+  float target_norm_y;
+  unsigned long image_width;
+  unsigned long image_height;
+  float confidence;
+  string reason;
+  unsigned long stale_after_ms;
+};
+};};};

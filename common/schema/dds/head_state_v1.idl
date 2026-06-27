@@ -1,0 +1,11 @@
+module visual_events { module msg { module dds_ {
+struct HeadStateV1_ {
+  unsigned long schema_version;
+  long long timestamp_ms;
+  boolean valid;
+  double yaw_rad;
+  double pitch_rad;
+  double yaw_vel_rad_s;
+  double pitch_vel_rad_s;
+};
+};};};

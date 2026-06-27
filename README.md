@@ -32,6 +32,7 @@ DDS JPEG @10Hz
 - [Server handoff](docs/server-handoff.md)
 - [GA 后续开发计划](docs/ga-development-plan.md)
 - [协议草案](common/schema/protocol.md)
+- DDS contracts: [camera JPEG](common/schema/dds/camera_jpeg_contract.md), [gaze target v1](common/schema/dds/gaze_target_v1.md), [head state v1](common/schema/dds/head_state_v1.md)
 
 当前基线决策：
 

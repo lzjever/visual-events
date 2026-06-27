@@ -6,6 +6,12 @@
 
 S0-S8 当前实现范围是 server WebSocket 协议、mock/真实推理 `visual_state`、项目内 ByteTrack-style IoU/TTL tracker baseline、attention selector、semantic events、`val-data` E2E/perf/soak、runtime smoke 和 opt-in metrics evidence。本文中提到的 robot CLI、DDS、gaze target 和 Botified frame 行为是未来客户端侧约定，不是当前 server 实现范围。
 
+DDS contract entrypoints:
+
+- `common/schema/dds/camera_jpeg_contract.md`
+- `common/schema/dds/gaze_target_v1.md`
+- `common/schema/dds/head_state_v1.md`
+
 ## 1. 连接
 
 - URL：`ws://<host>:<port>/v1/stream`

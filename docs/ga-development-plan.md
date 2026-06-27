@@ -115,7 +115,7 @@ PC 本地 E2E 不使用默认真机网络。测试 runner 默认必须使用 `DD
 | 字段 | 说明 |
 | --- | --- |
 | topic | `/robot/head_state`，实现前需与运控 owner 固化最终名称 |
-| DDS type | `visual_events::msg::HeadStateV1` 或运控 owner 已有等价类型；Step 1 必须固化 |
+| DDS type | `visual_events::msg::dds_::HeadStateV1_` 或运控 owner 已有等价类型；Step 1 必须固化 |
 | QoS | best effort、volatile、keep last 1、deadline 150ms、lifespan 250ms、automatic liveliness lease 500ms |
 | timestamp | `timestamp_ms`，Unix epoch milliseconds；CLI 以本机 monotonic clock 判断 stale |
 | 角度单位 | radians |
@@ -132,7 +132,7 @@ GA 固化一个高频 DDS 输出，不发布完整 `visual_state` DDS：
 | 字段 | 值 |
 | --- | --- |
 | topic | `/visual_events/gaze_target` |
-| DDS type | `visual_events::msg::GazeTargetV1`，Step 1 必须产出 IDL 或等价权威类型定义 |
+| DDS type | `visual_events::msg::dds_::GazeTargetV1_`，Step 1 必须产出 IDL 或等价权威类型定义 |
 | QoS | best effort、volatile、keep last 1、deadline 150ms、lifespan 250ms、automatic liveliness lease 500ms |
 | 频率 | 有新鲜 `visual_state` 时每帧发布一条 sample，<=10Hz，目标 >=9Hz；valid 和 invalid sample 都计入 |
 | 消费方 | 运控/头控 owner |

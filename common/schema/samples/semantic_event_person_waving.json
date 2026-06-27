@@ -1,0 +1,10 @@
+{
+  "type": "semantic_event",
+  "event_id": "front:evt_000456",
+  "event": "person_waving",
+  "camera": "front",
+  "track_id": 7,
+  "confidence": 0.86,
+  "duration_ms": 900,
+  "text": "有人在机器人前方挥手"
+}

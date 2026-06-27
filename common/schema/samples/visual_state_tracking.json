@@ -1,0 +1,68 @@
+{
+  "type": "visual_state",
+  "schema_version": 1,
+  "camera": "front",
+  "frame_id": 1024,
+  "frame_timestamp_ms": 1710000000000,
+  "server_timestamp_ms": 1710000000082,
+  "image_size": [
+    1280,
+    720
+  ],
+  "tracks": [
+    {
+      "track_id": 7,
+      "class": "person",
+      "bbox_xyxy": [
+        320.0,
+        120.0,
+        520.0,
+        600.0
+      ],
+      "bbox_area_ratio": 0.1042,
+      "center_uv": [
+        420.0,
+        360.0
+      ],
+      "head_uv": [
+        421.0,
+        205.0
+      ],
+      "velocity_uv_s": [
+        35.0,
+        -4.0
+      ],
+      "age_ms": 2400,
+      "lost_ms": 0,
+      "confidence": 0.86,
+      "pose_confidence": 0.72
+    }
+  ],
+  "attention": {
+    "target_track_id": 7,
+    "target_uv": [
+      421.0,
+      205.0
+    ],
+    "reason": "largest_stable_person",
+    "confidence": 0.86
+  },
+  "scene_flags": {
+    "has_person": true,
+    "person_count": 1,
+    "largest_person_stable": true,
+    "someone_near_center": true
+  },
+  "semantic_events": [
+    {
+      "type": "semantic_event",
+      "event_id": "front:evt_000456",
+      "event": "person_waving",
+      "camera": "front",
+      "track_id": 7,
+      "confidence": 0.86,
+      "duration_ms": 900,
+      "text": "有人在机器人前方挥手"
+    }
+  ]
+}

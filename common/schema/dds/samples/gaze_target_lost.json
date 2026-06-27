@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "camera": "front",
+  "frame_id": 4242,
+  "frame_timestamp_ms": 1710000000123,
+  "publish_timestamp_ms": 1710000000140,
+  "valid": false,
+  "state": "lost",
+  "target_track_id": -1,
+  "target_u": 0.0,
+  "target_v": 0.0,
+  "target_norm_x": 0.0,
+  "target_norm_y": 0.0,
+  "image_width": 1280,
+  "image_height": 720,
+  "confidence": 0.0,
+  "reason": "lost",
+  "stale_after_ms": 250
+}
