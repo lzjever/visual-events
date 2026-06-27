@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -12,11 +13,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PINNED_CYCLONEDDS_VERSION = "0.10.2"
 PINNED_CYCLONEDDS_CXX_VERSION = "0.10.2"
+PINNED_CYCLONEDDS_COMMIT = "9995905bce6c4cf9f740d6438bbf7fcfd1c83dfd"
+PINNED_CYCLONEDDS_CXX_COMMIT = "2a372d2c4597faea54543b925755fa2d7cdd4232"
+CYCLONEDDS_REPO = "https://github.com/eclipse-cyclonedds/cyclonedds.git"
+CYCLONEDDS_CXX_REPO = "https://github.com/eclipse-cyclonedds/cyclonedds-cxx.git"
 DEFAULT_TOOLCHAIN_DIR = (
     REPO_ROOT / "build" / "tools" / f"cyclonedds-cxx-idlc-{PINNED_CYCLONEDDS_VERSION}"
 )
 DEFAULT_PROBE_IDL = Path("/home/galbot/works/video_dds_publisher/idl/CameraFrame_.idl")
 DEFAULT_PROBE_OUTPUT_DIR = DEFAULT_TOOLCHAIN_DIR / "codegen_probe"
+REQUIRED_PREPARE_TOOLS = ("git", "cmake", "make", "gcc", "g++")
+OPTIONAL_PREPARE_TOOLS = ("ninja", "bison", "flex")
 CANNOT_LOAD_GENERATOR_RE = re.compile(
     r"cannot load generator(?:\s+cxx)?|libcycloneddsidlcxx",
     re.I,
@@ -85,6 +92,11 @@ def _has_cxx_backend(output: str) -> bool:
 
 def _compact_output(output: str) -> str:
     return " ".join(output.strip().split())
+
+
+def _shell_single_quote(value: Path | str) -> str:
+    text = os.fspath(value)
+    return "'" + text.replace("'", "'\"'\"'") + "'"
 
 
 def _read_idlc_version(idlc: Path) -> tuple[str, dict[str, object]]:
@@ -349,6 +361,496 @@ def check_idlc_codegen_toolchain(
     return report
 
 
+def _prepare_tool_layout(toolchain_dir: Path) -> dict[str, Path]:
+    resolved_toolchain_dir = _require_repo_build_path(toolchain_dir, "toolchain dir")
+    source_dir = resolved_toolchain_dir / "src"
+    build_dir = resolved_toolchain_dir / "build"
+    install_dir = resolved_toolchain_dir / "install"
+    return {
+        "toolchain_dir": resolved_toolchain_dir,
+        "source_dir": source_dir,
+        "cyclonedds_source_dir": source_dir / "cyclonedds",
+        "cyclonedds_cxx_source_dir": source_dir / "cyclonedds-cxx",
+        "build_dir": build_dir,
+        "cyclonedds_build_dir": build_dir / "cyclonedds",
+        "cyclonedds_cxx_build_dir": build_dir / "cyclonedds-cxx",
+        "install_dir": install_dir,
+        "wrapper_idlc": resolved_toolchain_dir / "bin" / "idlc-cxx",
+        "probe_output_dir": resolved_toolchain_dir / "codegen_probe",
+    }
+
+
+def _path_report(path: Path | None) -> dict[str, object]:
+    return {
+        "found": path is not None,
+        "path": os.fspath(path) if path is not None else None,
+    }
+
+
+def _inspect_prepare_tools() -> tuple[dict[str, object], dict[str, object]]:
+    required = {
+        name: {**_path_report(Path(found) if found else None), "required": True}
+        for name in REQUIRED_PREPARE_TOOLS
+        for found in [shutil.which(name)]
+    }
+    optional = {
+        name: {**_path_report(Path(found) if found else None), "required": False}
+        for name in OPTIONAL_PREPARE_TOOLS
+        for found in [shutil.which(name)]
+    }
+    return required, optional
+
+
+def _require_prepare_tools() -> tuple[dict[str, object], dict[str, object]]:
+    required, optional = _inspect_prepare_tools()
+    missing = [name for name, details in required.items() if not details["found"]]
+    optional_warnings = [
+        f"optional tool not found: {name}"
+        for name, details in optional.items()
+        if not details["found"]
+    ]
+    if missing:
+        raise CodegenToolchainError(
+            "missing required tools: " + ", ".join(missing),
+            report={
+                "failed_step": "preflight_required_tools",
+                "required_tools": required,
+                "optional_tools": optional,
+                "optional_tool_warnings": optional_warnings,
+            },
+        )
+    return required, optional
+
+
+def _command_record(
+    *,
+    step: str,
+    argv: list[str],
+    cwd: Path,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> dict[str, object]:
+    return {
+        "step": step,
+        "argv": argv,
+        "cwd": os.fspath(cwd),
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def _run_prepare_command(
+    commands: list[dict[str, object]],
+    *,
+    step: str,
+    argv: list[str],
+    cwd: Path = REPO_ROOT,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        commands.append(
+            _command_record(
+                step=step,
+                argv=argv,
+                cwd=cwd,
+                returncode=-1,
+                stdout="",
+                stderr=str(exc),
+            )
+        )
+        raise CodegenToolchainError(
+            f"{step} failed to execute: {exc}",
+            report={"failed_step": step, "commands": commands},
+        ) from exc
+
+    commands.append(
+        _command_record(
+            step=step,
+            argv=argv,
+            cwd=cwd,
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+    )
+    if result.returncode != 0:
+        raise CodegenToolchainError(
+            f"{step} failed with rc={result.returncode}: "
+            f"{_compact_output(result.stdout + result.stderr)}",
+            report={"failed_step": step, "commands": commands},
+        )
+    return result
+
+
+def _verify_ls_remote_tag(
+    commands: list[dict[str, object]],
+    *,
+    step: str,
+    repo: str,
+    expected_commit: str,
+) -> None:
+    result = _run_prepare_command(
+        commands,
+        step=step,
+        argv=[
+            "git",
+            "ls-remote",
+            "--exit-code",
+            "--tags",
+            repo,
+            f"refs/tags/{PINNED_CYCLONEDDS_VERSION}",
+        ],
+    )
+    actual_commit = result.stdout.strip().split()[0] if result.stdout.strip() else ""
+    if actual_commit != expected_commit:
+        raise CodegenToolchainError(
+            f"{step} expected tag {PINNED_CYCLONEDDS_VERSION} commit "
+            f"{expected_commit}, got {actual_commit or '<empty>'}",
+            report={"failed_step": step, "commands": commands},
+        )
+
+
+def _verify_existing_source_head(
+    commands: list[dict[str, object]],
+    *,
+    name: str,
+    source_dir: Path,
+    expected_commit: str,
+) -> str:
+    step = f"{name}_source_head"
+    result = _run_prepare_command(
+        commands,
+        step=step,
+        argv=["git", "-C", os.fspath(source_dir), "rev-parse", "HEAD"],
+    )
+    actual_commit = result.stdout.strip()
+    if actual_commit != expected_commit:
+        raise CodegenToolchainError(
+            f"{step} expected source HEAD {expected_commit}, got "
+            f"{actual_commit or '<empty>'}",
+            report={
+                "failed_step": step,
+                "commands": commands,
+                f"{name}_expected_commit": expected_commit,
+                f"{name}_commit": actual_commit,
+            },
+        )
+    return actual_commit
+
+
+def _clone_or_verify_source(
+    commands: list[dict[str, object]],
+    *,
+    name: str,
+    repo: str,
+    source_dir: Path,
+    expected_commit: str,
+) -> str:
+    if source_dir.exists():
+        return _verify_existing_source_head(
+            commands,
+            name=name,
+            source_dir=source_dir,
+            expected_commit=expected_commit,
+        )
+
+    source_dir.parent.mkdir(parents=True, exist_ok=True)
+    _run_prepare_command(
+        commands,
+        step=f"{name}_clone",
+        argv=[
+            "git",
+            "clone",
+            "--branch",
+            PINNED_CYCLONEDDS_VERSION,
+            "--depth",
+            "1",
+            repo,
+            os.fspath(source_dir),
+        ],
+    )
+    return _verify_existing_source_head(
+        commands,
+        name=name,
+        source_dir=source_dir,
+        expected_commit=expected_commit,
+    )
+
+
+def _cmake_build_args(build_dir: Path) -> list[str]:
+    jobs = str(os.cpu_count() or 2)
+    return [
+        "cmake",
+        "--build",
+        os.fspath(build_dir),
+        "--target",
+        "install",
+        "--",
+        "-j",
+        jobs,
+    ]
+
+
+def _configure_and_build_cyclonedds(
+    commands: list[dict[str, object]],
+    *,
+    source_dir: Path,
+    build_dir: Path,
+    install_dir: Path,
+) -> None:
+    _run_prepare_command(
+        commands,
+        step="cyclonedds_configure",
+        argv=[
+            "cmake",
+            "-S",
+            os.fspath(source_dir),
+            "-B",
+            os.fspath(build_dir),
+            "-G",
+            "Unix Makefiles",
+            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DBUILD_SHARED_LIBS=ON",
+            "-DBUILD_IDLC=ON",
+            "-DBUILD_DDSPERF=OFF",
+            "-DBUILD_TESTING=OFF",
+            "-DBUILD_IDLC_TESTING=OFF",
+            "-DBUILD_EXAMPLES=OFF",
+            "-DBUILD_DOCS=OFF",
+            "-DENABLE_SECURITY=OFF",
+            "-DENABLE_SSL=OFF",
+            "-DENABLE_SHM=OFF",
+            "-DENABLE_TYPE_DISCOVERY=ON",
+            "-DENABLE_TOPIC_DISCOVERY=ON",
+            "-DENABLE_LTO=OFF",
+            "-DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=OFF",
+            "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+            "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        ],
+    )
+    _run_prepare_command(
+        commands,
+        step="cyclonedds_build_install",
+        argv=_cmake_build_args(build_dir),
+    )
+
+
+def _configure_and_build_cyclonedds_cxx(
+    commands: list[dict[str, object]],
+    *,
+    source_dir: Path,
+    build_dir: Path,
+    install_dir: Path,
+) -> None:
+    _run_prepare_command(
+        commands,
+        step="cyclonedds_cxx_configure",
+        argv=[
+            "cmake",
+            "-S",
+            os.fspath(source_dir),
+            "-B",
+            os.fspath(build_dir),
+            "-G",
+            "Unix Makefiles",
+            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+            "-DCMAKE_BUILD_TYPE=Release",
+            f"-DCMAKE_PREFIX_PATH={install_dir}",
+            f"-DCycloneDDS_DIR={install_dir / 'lib' / 'cmake' / 'CycloneDDS'}",
+            "-DBUILD_SHARED_LIBS=ON",
+            "-DBUILD_IDLLIB=ON",
+            "-DBUILD_TESTING=OFF",
+            "-DBUILD_EXAMPLES=OFF",
+            "-DBUILD_DOCS=OFF",
+            "-DENABLE_SHM=OFF",
+            "-DENABLE_LEGACY=OFF",
+            "-DENABLE_TYPE_DISCOVERY=ON",
+            "-DENABLE_TOPIC_DISCOVERY=ON",
+            "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE",
+            "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",
+        ],
+    )
+    _run_prepare_command(
+        commands,
+        step="cyclonedds_cxx_build_install",
+        argv=_cmake_build_args(build_dir),
+    )
+
+
+def _write_idlc_wrapper(*, wrapper: Path, install_dir: Path) -> None:
+    install_lib = install_dir / "lib"
+    install_idlc = install_dir / "bin" / "idlc"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f"install_lib={_shell_single_quote(install_lib)}\n"
+        "if [ -n \"${LD_LIBRARY_PATH:-}\" ]; then\n"
+        "  export LD_LIBRARY_PATH=\"$install_lib:$LD_LIBRARY_PATH\"\n"
+        "else\n"
+        "  export LD_LIBRARY_PATH=\"$install_lib\"\n"
+        "fi\n"
+        f"exec {_shell_single_quote(install_idlc)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+
+def _require_prepare_artifacts(*, install_dir: Path, wrapper: Path) -> None:
+    required_files = [
+        install_dir / "bin" / "idlc",
+        install_dir / "lib" / "libcycloneddsidlcxx.so",
+        install_dir / "lib" / "libcycloneddsidl.so",
+        install_dir / "lib" / "libddsc.so",
+    ]
+    missing = [os.fspath(path) for path in required_files if not path.is_file()]
+    if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
+        missing.append(os.fspath(wrapper))
+    if missing:
+        raise CodegenToolchainError(
+            "missing required prepare artifacts: " + ", ".join(missing),
+            report={"failed_step": "require_artifacts"},
+        )
+
+
+def prepare_codegen_toolchain(
+    *,
+    cyclonedds_version: str,
+    cyclonedds_cxx_version: str,
+    toolchain_dir: Path,
+    probe_idl: Path | None,
+) -> dict[str, object]:
+    _require_pinned_version(
+        cyclonedds_version,
+        PINNED_CYCLONEDDS_VERSION,
+        "CycloneDDS version",
+    )
+    _require_pinned_version(
+        cyclonedds_cxx_version,
+        PINNED_CYCLONEDDS_CXX_VERSION,
+        "CycloneDDS-CXX version",
+    )
+    layout = _prepare_tool_layout(toolchain_dir)
+    commands: list[dict[str, object]] = []
+    report: dict[str, object] = {
+        "ok": True,
+        "mode": "prepare",
+        "prepare_toolchain": True,
+        "toolchain_ready": False,
+        "dry_run": False,
+        "will_write": True,
+        "repo_root": os.fspath(REPO_ROOT),
+        "toolchain_dir": os.fspath(layout["toolchain_dir"]),
+        "source_dir": os.fspath(layout["source_dir"]),
+        "cyclonedds_source_dir": os.fspath(layout["cyclonedds_source_dir"]),
+        "cyclonedds_cxx_source_dir": os.fspath(layout["cyclonedds_cxx_source_dir"]),
+        "build_dir": os.fspath(layout["build_dir"]),
+        "cyclonedds_build_dir": os.fspath(layout["cyclonedds_build_dir"]),
+        "cyclonedds_cxx_build_dir": os.fspath(layout["cyclonedds_cxx_build_dir"]),
+        "install_dir": os.fspath(layout["install_dir"]),
+        "wrapper_idlc": os.fspath(layout["wrapper_idlc"]),
+        "ld_library_path_prepend": os.fspath(layout["install_dir"] / "lib"),
+        "cyclonedds_version": cyclonedds_version,
+        "cyclonedds_cxx_version": cyclonedds_cxx_version,
+        "cyclonedds_expected_commit": PINNED_CYCLONEDDS_COMMIT,
+        "cyclonedds_cxx_expected_commit": PINNED_CYCLONEDDS_CXX_COMMIT,
+        "expected_idlc_version": PINNED_CYCLONEDDS_VERSION,
+        "probe_codegen": True,
+        "probe_output_dir": os.fspath(layout["probe_output_dir"]),
+        "commands": commands,
+    }
+
+    try:
+        required_tools, optional_tools = _require_prepare_tools()
+        report["required_tools"] = required_tools
+        report["optional_tools"] = optional_tools
+        report["optional_tool_warnings"] = [
+            f"optional tool not found: {name}"
+            for name, details in optional_tools.items()
+            if not details["found"]
+        ]
+
+        _verify_ls_remote_tag(
+            commands,
+            step="cyclonedds_ls_remote",
+            repo=CYCLONEDDS_REPO,
+            expected_commit=PINNED_CYCLONEDDS_COMMIT,
+        )
+        _verify_ls_remote_tag(
+            commands,
+            step="cyclonedds_cxx_ls_remote",
+            repo=CYCLONEDDS_CXX_REPO,
+            expected_commit=PINNED_CYCLONEDDS_CXX_COMMIT,
+        )
+        report["cyclonedds_commit"] = _clone_or_verify_source(
+            commands,
+            name="cyclonedds",
+            repo=CYCLONEDDS_REPO,
+            source_dir=layout["cyclonedds_source_dir"],
+            expected_commit=PINNED_CYCLONEDDS_COMMIT,
+        )
+        report["cyclonedds_cxx_commit"] = _clone_or_verify_source(
+            commands,
+            name="cyclonedds_cxx",
+            repo=CYCLONEDDS_CXX_REPO,
+            source_dir=layout["cyclonedds_cxx_source_dir"],
+            expected_commit=PINNED_CYCLONEDDS_CXX_COMMIT,
+        )
+        _configure_and_build_cyclonedds(
+            commands,
+            source_dir=layout["cyclonedds_source_dir"],
+            build_dir=layout["cyclonedds_build_dir"],
+            install_dir=layout["install_dir"],
+        )
+        _configure_and_build_cyclonedds_cxx(
+            commands,
+            source_dir=layout["cyclonedds_cxx_source_dir"],
+            build_dir=layout["cyclonedds_cxx_build_dir"],
+            install_dir=layout["install_dir"],
+        )
+        _write_idlc_wrapper(
+            wrapper=layout["wrapper_idlc"],
+            install_dir=layout["install_dir"],
+        )
+        _require_prepare_artifacts(
+            install_dir=layout["install_dir"],
+            wrapper=layout["wrapper_idlc"],
+        )
+    except CodegenToolchainError as exc:
+        raise CodegenToolchainError(
+            str(exc),
+            report={**report, **exc.report, "commands": commands},
+        ) from exc
+
+    try:
+        report.update(
+            check_idlc_codegen_toolchain(
+                layout["wrapper_idlc"],
+                expected_version=cyclonedds_version,
+                probe_codegen=True,
+                probe_idl=probe_idl,
+                probe_output_dir=layout["probe_output_dir"],
+            )
+        )
+    except CodegenToolchainError as exc:
+        raise CodegenToolchainError(
+            str(exc),
+            report={**report, **exc.report, "failed_step": "codegen_oracle"},
+        ) from exc
+
+    report["toolchain_ready"] = True
+    return report
+
+
 def build_plan(
     *,
     cyclonedds_version: str,
@@ -414,8 +916,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="pinned CycloneDDS-CXX version; only 0.10.2 is supported in this slice",
     )
     parser.add_argument("--toolchain-dir", type=Path, default=DEFAULT_TOOLCHAIN_DIR)
-    parser.add_argument("--idlc", type=Path, default=_env_path("VISUAL_EVENTS_IDLC"))
+    parser.add_argument("--idlc", type=Path, default=None)
     parser.add_argument("--check", action="store_true", help="validate the local idlc/toolchain plan")
+    parser.add_argument(
+        "--prepare",
+        action="store_true",
+        help="prepare the repo-local CycloneDDS/CycloneDDS-CXX 0.10.2 C++ idlc toolchain",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -443,13 +950,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    prepare = bool(args.prepare)
     probe_codegen = bool(args.probe_codegen)
-    dry_run = bool(args.dry_run or args.check)
+    dry_run = False if prepare else bool(args.dry_run or args.check)
     invalid_probe_dry_run = probe_codegen and dry_run
-    will_write = probe_codegen and not invalid_probe_dry_run
+    will_write = prepare or (probe_codegen and not invalid_probe_dry_run)
+    selected_idlc = None if prepare else (args.idlc or _env_path("VISUAL_EVENTS_IDLC"))
 
     report: dict[str, object] = {
         "ok": False,
+        "mode": "prepare" if prepare else ("probe-codegen" if probe_codegen else "check"),
+        "prepare_toolchain": prepare,
         "dry_run": dry_run,
         "will_write": will_write,
         "repo_root": os.fspath(REPO_ROOT),
@@ -459,8 +970,8 @@ def main(argv: list[str] | None = None) -> int:
         "expected_idlc_version": PINNED_CYCLONEDDS_VERSION,
         "probe_codegen": probe_codegen,
     }
-    if args.idlc is not None:
-        report["idlc"] = os.fspath(_resolve_path(args.idlc))
+    if selected_idlc is not None:
+        report["idlc"] = os.fspath(_resolve_path(selected_idlc))
     if args.probe_output_dir is not None:
         report["probe_output_dir"] = os.fspath(_resolve_path(args.probe_output_dir))
     else:
@@ -469,6 +980,23 @@ def main(argv: list[str] | None = None) -> int:
         report["probe_idl"] = os.fspath(_resolve_path(args.probe_idl))
 
     try:
+        if prepare:
+            if args.check or args.dry_run or args.probe_codegen:
+                raise CodegenToolchainError(
+                    "--prepare cannot be combined with --check, --dry-run, or --probe-codegen"
+                )
+            if args.idlc is not None:
+                raise CodegenToolchainError("--prepare does not accept explicit --idlc")
+            report.update(
+                prepare_codegen_toolchain(
+                    cyclonedds_version=args.cyclonedds_version,
+                    cyclonedds_cxx_version=args.cyclonedds_cxx_version,
+                    toolchain_dir=args.toolchain_dir,
+                    probe_idl=args.probe_idl,
+                )
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0
         if invalid_probe_dry_run:
             raise CodegenToolchainError(
                 "--probe-codegen cannot be combined with --check or --dry-run because it writes probe output"
@@ -482,7 +1010,7 @@ def main(argv: list[str] | None = None) -> int:
                 cyclonedds_version=args.cyclonedds_version,
                 cyclonedds_cxx_version=args.cyclonedds_cxx_version,
                 toolchain_dir=args.toolchain_dir,
-                idlc=args.idlc,
+                idlc=selected_idlc,
                 dry_run=dry_run,
                 probe_codegen=probe_codegen,
                 probe_idl=args.probe_idl,
@@ -493,6 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except CodegenToolchainError as exc:
         report.update(exc.report)
+        report["ok"] = False
         report["error"] = str(exc)
         print(json.dumps(report, indent=2, sort_keys=True))
         print(f"ERROR: {exc}", file=sys.stderr)

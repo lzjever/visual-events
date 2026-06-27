@@ -15,6 +15,8 @@ NATIVE_BRIDGE = REPO_ROOT / "native" / "dds_bridge"
 TOOLS_BUILD = REPO_ROOT / "tools" / "build_dds_bridge.py"
 TOOLS_PREPARE_CODEGEN = REPO_ROOT / "tools" / "prepare_dds_codegen_toolchain.py"
 GITIGNORE = REPO_ROOT / ".gitignore"
+CYCLONEDDS_COMMIT = "9995905bce6c4cf9f740d6438bbf7fcfd1c83dfd"
+CYCLONEDDS_CXX_COMMIT = "2a372d2c4597faea54543b925755fa2d7cdd4232"
 
 ALLOWED_TOPICS = {
     "/camera/image/jpeg",
@@ -200,6 +202,143 @@ def _repo_build_probe_dir(tmp_path: Path, name: str) -> Path:
     probe_dir = REPO_ROOT / "build" / "test-dds-codegen" / f"{tmp_path.name}-{name}"
     shutil.rmtree(probe_dir, ignore_errors=True)
     return probe_dir
+
+
+def _repo_build_toolchain_dir(tmp_path: Path, name: str) -> Path:
+    toolchain_dir = REPO_ROOT / "build" / "test-dds-codegen" / f"{tmp_path.name}-{name}"
+    shutil.rmtree(toolchain_dir, ignore_errors=True)
+    return toolchain_dir
+
+
+def _write_executable(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _make_fake_prepare_tool_path(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "fake-prepare-bin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "git",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "log=${FAKE_TOOL_LOG:-}\n"
+        "if [ -n \"$log\" ]; then printf '%s\\n' \"git $*\" >> \"$log\"; fi\n"
+        f"cyclonedds_hash='{CYCLONEDDS_COMMIT}'\n"
+        f"cyclonedds_cxx_hash='{CYCLONEDDS_CXX_COMMIT}'\n"
+        "repo='cyclonedds'\n"
+        "expected=\"$cyclonedds_hash\"\n"
+        "case \"$*\" in\n"
+        "  *cyclonedds-cxx*) repo='cyclonedds_cxx'; expected=\"$cyclonedds_cxx_hash\" ;;\n"
+        "esac\n"
+        "if [ \"$1\" = 'ls-remote' ]; then\n"
+        "  if [ \"${FAKE_LS_REMOTE_BAD:-}\" = \"$repo\" ] || [ \"${FAKE_LS_REMOTE_BAD:-}\" = '1' ]; then\n"
+        "    expected='0000000000000000000000000000000000000000'\n"
+        "  fi\n"
+        "  printf '%s\\trefs/tags/0.10.2\\n' \"$expected\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = 'clone' ]; then\n"
+        "  if [ \"${FAKE_GIT_CLONE_FAIL:-}\" = \"$repo\" ] || [ \"${FAKE_GIT_CLONE_FAIL:-}\" = '1' ]; then\n"
+        "    printf '%s\\n' 'fake clone failure' >&2\n"
+        "    exit 42\n"
+        "  fi\n"
+        "  target=''\n"
+        "  for arg in \"$@\"; do target=\"$arg\"; done\n"
+        "  /bin/mkdir -p \"$target\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = '-C' ] && [ \"$3\" = 'rev-parse' ]; then\n"
+        "  if [ \"${FAKE_REV_PARSE_BAD:-}\" = \"$repo\" ] || [ \"${FAKE_REV_PARSE_BAD:-}\" = '1' ]; then\n"
+        "    printf '%s\\n' '1111111111111111111111111111111111111111'\n"
+        "    exit 0\n"
+        "  fi\n"
+        "  case \"$2\" in\n"
+        "    *cyclonedds-cxx*) printf '%s\\n' \"$cyclonedds_cxx_hash\" ;;\n"
+        "    *) printf '%s\\n' \"$cyclonedds_hash\" ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        "printf '%s\\n' \"unexpected fake git invocation: $*\" >&2\n"
+        "exit 64\n",
+    )
+    _write_executable(
+        bin_dir / "cmake",
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "log=${FAKE_TOOL_LOG:-}\n"
+        "if [ -n \"$log\" ]; then printf '%s\\n' \"cmake $*\" >> \"$log\"; fi\n"
+        "install=${FAKE_INSTALL_DIR:?}\n"
+        "if [ \"$1\" = '--build' ]; then\n"
+        "  build_dir=\"$2\"\n"
+        "  /bin/mkdir -p \"$install/bin\" \"$install/lib\"\n"
+        "  case \"$build_dir\" in\n"
+        "    */build/cyclonedds)\n"
+        "      /usr/bin/touch \"$install/lib/libcycloneddsidl.so\" \"$install/lib/libddsc.so\"\n"
+        "      /bin/cat > \"$install/bin/idlc\" <<'IDLC'\n"
+        "#!/bin/sh\n"
+        "if [ \"$1\" = '--version' ] || [ \"$1\" = '-v' ]; then\n"
+        "  printf '%s\\n' 'CycloneDDS idlc 0.10.2'\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = '--help' ] || { [ \"$1\" = '-l' ] && [ \"$#\" -eq 1 ]; }; then\n"
+        "  printf '%s\\n' 'available backends: c cxx'\n"
+        "  exit 0\n"
+        "fi\n"
+        "lang=''\n"
+        "out_dir=''\n"
+        "idl=''\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -l) shift; lang=\"$1\" ;;\n"
+        "    -o) shift; out_dir=\"$1\" ;;\n"
+        "    *.idl) idl=\"$1\" ;;\n"
+        "  esac\n"
+        "  shift\n"
+        "done\n"
+        "if [ \"$lang\" != 'cxx' ] || [ -z \"$out_dir\" ] || [ -z \"$idl\" ]; then\n"
+        "  printf '%s\\n' 'fake installed idlc unsupported args' >&2\n"
+        "  exit 64\n"
+        "fi\n"
+        "base=${idl##*/}\n"
+        "base=${base%.idl}\n"
+        "case \"${FAKE_INSTALLED_IDLC_CODEGEN:-success}\" in\n"
+        "  success)\n"
+        "    printf '%s\\n' '// fake generated header' > \"$out_dir/$base.hpp\"\n"
+        "    printf '%s\\n' '// fake generated source' > \"$out_dir/$base.cpp\"\n"
+        "    ;;\n"
+        "  hpp_only)\n"
+        "    printf '%s\\n' '// fake generated header' > \"$out_dir/$base.hpp\"\n"
+        "    ;;\n"
+        "  missing_cxx_rc0)\n"
+        "    printf '%s\\n' 'idlc: cannot load generator cxx' >&2\n"
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n"
+        "IDLC\n"
+        "      /bin/chmod +x \"$install/bin/idlc\"\n"
+        "      ;;\n"
+        "    */build/cyclonedds-cxx)\n"
+        "      if [ \"${FAKE_SKIP_IDLCXX:-}\" != '1' ]; then\n"
+        "        /usr/bin/touch \"$install/lib/libcycloneddsidlcxx.so\"\n"
+        "      fi\n"
+        "      ;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  if [ \"$1\" = '-B' ]; then\n"
+        "    shift\n"
+        "    /bin/mkdir -p \"$1\"\n"
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+        "exit 0\n",
+    )
+    for name in ["make", "gcc", "g++"]:
+        _write_executable(bin_dir / name, "#!/bin/sh\nexit 0\n")
+    return bin_dir
 
 
 @pytest.fixture
@@ -686,6 +825,379 @@ def test_prepare_dds_codegen_toolchain_rejects_probe_output_paths_outside_repo_b
 
     assert result.returncode != 0
     assert "probe output dir must be under repo build/" in result.stderr
+
+
+def test_prepare_dds_codegen_toolchain_prepare_success_uses_repo_local_wrapper_and_oracle(
+    tmp_path,
+):
+    toolchain_dir = _repo_build_toolchain_dir(tmp_path, "prepare-success")
+    fake_bin = _make_fake_prepare_tool_path(tmp_path)
+    probe_idl = _make_probe_idl(tmp_path)
+    command_log = tmp_path / "prepare-success.log"
+    env = os.environ.copy()
+    env["PATH"] = os.fspath(fake_bin)
+    env["FAKE_INSTALL_DIR"] = os.fspath(toolchain_dir / "install")
+    env["FAKE_TOOL_LOG"] = os.fspath(command_log)
+    env["VISUAL_EVENTS_IDLC"] = os.fspath(tmp_path / "poison-env-idlc")
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--prepare",
+                "--toolchain-dir",
+                os.fspath(toolchain_dir),
+                "--probe-idl",
+                os.fspath(probe_idl),
+            ],
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stderr == ""
+        report = json.loads(result.stdout)
+        install_dir = toolchain_dir / "install"
+        wrapper = toolchain_dir / "bin" / "idlc-cxx"
+        assert report["ok"] is True
+        assert report["mode"] == "prepare"
+        assert report["prepare_toolchain"] is True
+        assert report["toolchain_ready"] is True
+        assert report["source_dir"] == os.fspath((toolchain_dir / "src").resolve())
+        assert report["cyclonedds_source_dir"] == os.fspath((toolchain_dir / "src" / "cyclonedds").resolve())
+        assert report["cyclonedds_cxx_source_dir"] == os.fspath((toolchain_dir / "src" / "cyclonedds-cxx").resolve())
+        assert report["build_dir"] == os.fspath((toolchain_dir / "build").resolve())
+        assert report["cyclonedds_build_dir"] == os.fspath((toolchain_dir / "build" / "cyclonedds").resolve())
+        assert report["cyclonedds_cxx_build_dir"] == os.fspath((toolchain_dir / "build" / "cyclonedds-cxx").resolve())
+        assert report["install_dir"] == os.fspath(install_dir.resolve())
+        assert report["wrapper_idlc"] == os.fspath(wrapper.resolve())
+        assert report["idlc"] == os.fspath(wrapper.resolve())
+        assert report["ld_library_path_prepend"] == os.fspath((install_dir / "lib").resolve())
+        assert report["probe_output_dir"] == os.fspath((toolchain_dir / "codegen_probe").resolve())
+        assert report["oracle_ok"] is True
+        assert set(report["generated_files"]) == {"CameraFrame_.hpp", "CameraFrame_.cpp"}
+        assert report["required_tools"]["git"]["found"] is True
+        assert report["required_tools"]["g++"]["found"] is True
+        assert report["optional_tools"]["ninja"]["required"] is False
+        assert report["optional_tools"]["bison"]["required"] is False
+        assert report["optional_tools"]["flex"]["required"] is False
+        assert (install_dir / "bin" / "idlc").is_file()
+        assert (install_dir / "lib" / "libcycloneddsidlcxx.so").is_file()
+        assert (install_dir / "lib" / "libcycloneddsidl.so").is_file()
+        assert (install_dir / "lib" / "libddsc.so").is_file()
+        assert wrapper.is_file()
+        assert os.access(wrapper, os.X_OK)
+        steps = [command["step"] for command in report["commands"]]
+        assert steps == [
+            "cyclonedds_ls_remote",
+            "cyclonedds_cxx_ls_remote",
+            "cyclonedds_clone",
+            "cyclonedds_source_head",
+            "cyclonedds_cxx_clone",
+            "cyclonedds_cxx_source_head",
+            "cyclonedds_configure",
+            "cyclonedds_build_install",
+            "cyclonedds_cxx_configure",
+            "cyclonedds_cxx_build_install",
+        ]
+        assert report["cyclonedds_expected_commit"] == CYCLONEDDS_COMMIT
+        assert report["cyclonedds_cxx_expected_commit"] == CYCLONEDDS_CXX_COMMIT
+        assert report["cyclonedds_commit"] == CYCLONEDDS_COMMIT
+        assert report["cyclonedds_cxx_commit"] == CYCLONEDDS_CXX_COMMIT
+        assert "cmake --build" in command_log.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--check"],
+        ["--dry-run"],
+        ["--probe-codegen"],
+        ["--idlc", "fake-idlc"],
+    ],
+)
+def test_prepare_dds_codegen_toolchain_prepare_mutual_exclusions_fail_before_writing(
+    tmp_path,
+    extra_args: list[str],
+):
+    toolchain_dir = _repo_build_toolchain_dir(tmp_path, "prepare-mutual")
+    fake_bin = _make_fake_prepare_tool_path(tmp_path)
+    probe_idl = _make_probe_idl(tmp_path)
+    command_log = tmp_path / "prepare-mutual.log"
+    env = os.environ.copy()
+    env["PATH"] = os.fspath(fake_bin)
+    env["FAKE_INSTALL_DIR"] = os.fspath(toolchain_dir / "install")
+    env["FAKE_TOOL_LOG"] = os.fspath(command_log)
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--prepare",
+                *extra_args,
+                "--toolchain-dir",
+                os.fspath(toolchain_dir),
+                "--probe-idl",
+                os.fspath(probe_idl),
+            ],
+            env=env,
+        )
+
+        assert result.returncode != 0
+        assert not toolchain_dir.exists()
+        assert not command_log.exists()
+        report = json.loads(result.stdout)
+        assert report["ok"] is False
+        assert report["mode"] == "prepare"
+    finally:
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
+
+
+def test_prepare_dds_codegen_toolchain_prepare_rejects_toolchain_dir_outside_repo_build_before_commands(
+    tmp_path,
+):
+    outside_toolchain_dir = tmp_path / "outside-toolchain"
+    fake_bin = _make_fake_prepare_tool_path(tmp_path)
+    probe_idl = _make_probe_idl(tmp_path)
+    command_log = tmp_path / "prepare-outside.log"
+    env = os.environ.copy()
+    env["PATH"] = os.fspath(fake_bin)
+    env["FAKE_INSTALL_DIR"] = os.fspath(outside_toolchain_dir / "install")
+    env["FAKE_TOOL_LOG"] = os.fspath(command_log)
+
+    result = _run_prepare_codegen_tool(
+        [
+            "--prepare",
+            "--toolchain-dir",
+            os.fspath(outside_toolchain_dir),
+            "--probe-idl",
+            os.fspath(probe_idl),
+        ],
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "toolchain dir must be under repo build/" in result.stderr
+    assert not outside_toolchain_dir.exists()
+    assert not command_log.exists()
+
+
+def test_prepare_dds_codegen_toolchain_prepare_missing_required_tool_fails_before_clone(
+    tmp_path,
+):
+    toolchain_dir = _repo_build_toolchain_dir(tmp_path, "prepare-missing-tool")
+    fake_bin = _make_fake_prepare_tool_path(tmp_path)
+    (fake_bin / "g++").unlink()
+    probe_idl = _make_probe_idl(tmp_path)
+    command_log = tmp_path / "prepare-missing-tool.log"
+    env = os.environ.copy()
+    env["PATH"] = os.fspath(fake_bin)
+    env["FAKE_INSTALL_DIR"] = os.fspath(toolchain_dir / "install")
+    env["FAKE_TOOL_LOG"] = os.fspath(command_log)
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--prepare",
+                "--toolchain-dir",
+                os.fspath(toolchain_dir),
+                "--probe-idl",
+                os.fspath(probe_idl),
+            ],
+            env=env,
+        )
+
+        assert result.returncode != 0
+        report = json.loads(result.stdout)
+        assert report["failed_step"] == "preflight_required_tools"
+        assert report["required_tools"]["g++"]["found"] is False
+        assert "missing required tools: g++" in report["error"]
+        assert not toolchain_dir.exists()
+        assert not command_log.exists()
+    finally:
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
+
+
+def test_prepare_dds_codegen_toolchain_prepare_wrong_ls_remote_hash_fails_before_clone_or_configure(
+    tmp_path,
+):
+    toolchain_dir = _repo_build_toolchain_dir(tmp_path, "prepare-wrong-hash")
+    fake_bin = _make_fake_prepare_tool_path(tmp_path)
+    probe_idl = _make_probe_idl(tmp_path)
+    env = os.environ.copy()
+    env["PATH"] = os.fspath(fake_bin)
+    env["FAKE_INSTALL_DIR"] = os.fspath(toolchain_dir / "install")
+    env["FAKE_LS_REMOTE_BAD"] = "cyclonedds"
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--prepare",
+                "--toolchain-dir",
+                os.fspath(toolchain_dir),
+                "--probe-idl",
+                os.fspath(probe_idl),
+            ],
+            env=env,
+        )
+
+        assert result.returncode != 0
+        report = json.loads(result.stdout)
+        assert report["failed_step"] == "cyclonedds_ls_remote"
+        assert CYCLONEDDS_COMMIT in report["error"]
+        steps = [command["step"] for command in report["commands"]]
+        assert steps == ["cyclonedds_ls_remote"]
+        assert not (toolchain_dir / "src" / "cyclonedds").exists()
+        assert not (toolchain_dir / "build").exists()
+    finally:
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
+
+
+def test_prepare_dds_codegen_toolchain_prepare_git_clone_failure_stops_before_cmake(
+    tmp_path,
+):
+    toolchain_dir = _repo_build_toolchain_dir(tmp_path, "prepare-clone-fail")
+    fake_bin = _make_fake_prepare_tool_path(tmp_path)
+    probe_idl = _make_probe_idl(tmp_path)
+    env = os.environ.copy()
+    env["PATH"] = os.fspath(fake_bin)
+    env["FAKE_INSTALL_DIR"] = os.fspath(toolchain_dir / "install")
+    env["FAKE_GIT_CLONE_FAIL"] = "cyclonedds"
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--prepare",
+                "--toolchain-dir",
+                os.fspath(toolchain_dir),
+                "--probe-idl",
+                os.fspath(probe_idl),
+            ],
+            env=env,
+        )
+
+        assert result.returncode != 0
+        report = json.loads(result.stdout)
+        assert report["failed_step"] == "cyclonedds_clone"
+        steps = [command["step"] for command in report["commands"]]
+        assert steps == [
+            "cyclonedds_ls_remote",
+            "cyclonedds_cxx_ls_remote",
+            "cyclonedds_clone",
+        ]
+        assert report["commands"][-1]["returncode"] == 42
+        assert not any("configure" in step for step in steps)
+    finally:
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
+
+
+def test_prepare_dds_codegen_toolchain_prepare_bad_cloned_head_stops_before_cmake(
+    tmp_path,
+):
+    toolchain_dir = _repo_build_toolchain_dir(tmp_path, "prepare-bad-cloned-head")
+    fake_bin = _make_fake_prepare_tool_path(tmp_path)
+    probe_idl = _make_probe_idl(tmp_path)
+    env = os.environ.copy()
+    env["PATH"] = os.fspath(fake_bin)
+    env["FAKE_INSTALL_DIR"] = os.fspath(toolchain_dir / "install")
+    env["FAKE_REV_PARSE_BAD"] = "cyclonedds"
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--prepare",
+                "--toolchain-dir",
+                os.fspath(toolchain_dir),
+                "--probe-idl",
+                os.fspath(probe_idl),
+            ],
+            env=env,
+        )
+
+        assert result.returncode != 0
+        report = json.loads(result.stdout)
+        assert report["failed_step"] == "cyclonedds_source_head"
+        assert report["cyclonedds_expected_commit"] == CYCLONEDDS_COMMIT
+        assert report["cyclonedds_commit"] == "1111111111111111111111111111111111111111"
+        steps = [command["step"] for command in report["commands"]]
+        assert steps == [
+            "cyclonedds_ls_remote",
+            "cyclonedds_cxx_ls_remote",
+            "cyclonedds_clone",
+            "cyclonedds_source_head",
+        ]
+        assert not any("configure" in step for step in steps)
+    finally:
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
+
+
+def test_prepare_dds_codegen_toolchain_prepare_missing_idlcxx_artifact_fails_before_oracle(
+    tmp_path,
+):
+    toolchain_dir = _repo_build_toolchain_dir(tmp_path, "prepare-missing-idlcxx")
+    fake_bin = _make_fake_prepare_tool_path(tmp_path)
+    probe_idl = _make_probe_idl(tmp_path)
+    env = os.environ.copy()
+    env["PATH"] = os.fspath(fake_bin)
+    env["FAKE_INSTALL_DIR"] = os.fspath(toolchain_dir / "install")
+    env["FAKE_SKIP_IDLCXX"] = "1"
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--prepare",
+                "--toolchain-dir",
+                os.fspath(toolchain_dir),
+                "--probe-idl",
+                os.fspath(probe_idl),
+            ],
+            env=env,
+        )
+
+        assert result.returncode != 0
+        report = json.loads(result.stdout)
+        assert report["failed_step"] == "require_artifacts"
+        assert "libcycloneddsidlcxx.so" in report["error"]
+        assert "idlc_codegen_returncode" not in report
+        assert not (toolchain_dir / "codegen_probe").exists()
+    finally:
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
+
+
+def test_prepare_dds_codegen_toolchain_prepare_installed_idlc_oracle_failure_propagates(
+    tmp_path,
+):
+    toolchain_dir = _repo_build_toolchain_dir(tmp_path, "prepare-oracle-fail")
+    fake_bin = _make_fake_prepare_tool_path(tmp_path)
+    probe_idl = _make_probe_idl(tmp_path)
+    env = os.environ.copy()
+    env["PATH"] = os.fspath(fake_bin)
+    env["FAKE_INSTALL_DIR"] = os.fspath(toolchain_dir / "install")
+    env["FAKE_INSTALLED_IDLC_CODEGEN"] = "hpp_only"
+
+    try:
+        result = _run_prepare_codegen_tool(
+            [
+                "--prepare",
+                "--toolchain-dir",
+                os.fspath(toolchain_dir),
+                "--probe-idl",
+                os.fspath(probe_idl),
+            ],
+            env=env,
+        )
+
+        assert result.returncode != 0
+        assert "missing expected generated files: CameraFrame_.cpp" in result.stderr
+        report = json.loads(result.stdout)
+        assert report["failed_step"] == "codegen_oracle"
+        assert report["oracle_ok"] is False
+        assert report["generated_files"] == ["CameraFrame_.hpp"]
+        assert report["expected_generated_file_presence"] == {
+            "CameraFrame_.hpp": True,
+            "CameraFrame_.cpp": False,
+        }
+    finally:
+        shutil.rmtree(toolchain_dir, ignore_errors=True)
 
 
 def test_build_tool_missing_root_and_full_bridge_missing_generator_fail_fast(
