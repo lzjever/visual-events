@@ -1,0 +1,542 @@
+from __future__ import annotations
+
+import ast
+import importlib
+import json
+import os
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TOOL_PATH = REPO_ROOT / "tools" / "run_cli_local_e2e.py"
+
+
+@dataclass
+class FakeResult:
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+
+
+@dataclass
+class FakeHealth:
+    passed: bool
+    failure_reason: str | None = None
+    healthz_pid: int | None = None
+    healthz_identity_verified: bool = False
+
+
+class FakeProcess:
+    def __init__(self, name: str, pid: int) -> None:
+        self.name = name
+        self.pid = pid
+        self.returncode: int | None = None
+        self.stopped = False
+        self.stdout_tail = f"{name} stdout tail"
+        self.stderr_tail = f"{name} stderr tail"
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.stopped = True
+        if self.returncode is None:
+            self.returncode = -15
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+    def kill(self) -> None:
+        self.stopped = True
+        self.returncode = -9
+
+
+class FakeRunner:
+    def __init__(
+        self,
+        *,
+        health: FakeHealth | None = None,
+        sync_results: dict[str, FakeResult] | None = None,
+    ) -> None:
+        self.health = health or FakeHealth(
+            passed=True,
+            healthz_pid=1001,
+            healthz_identity_verified=True,
+        )
+        self.sync_results = sync_results or {}
+        self.events: list[tuple[str, str]] = []
+        self.started: dict[str, FakeProcess] = {}
+        self.commands: dict[str, list[str]] = {}
+        self.health_urls: list[str] = []
+        self._next_pid = 1001
+
+    def start_process(
+        self,
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        name: str,
+    ) -> FakeProcess:
+        del cwd, env
+        process = FakeProcess(name, self._next_pid)
+        self._next_pid += 1
+        self.started[name] = process
+        self.commands[name] = command
+        self.events.append(("start", name))
+        return process
+
+    def run_sync(
+        self,
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        name: str,
+        timeout_s: float | None = None,
+    ) -> FakeResult:
+        del cwd, env, timeout_s
+        self.commands[name] = command
+        self.events.append(("run_sync", name))
+        return self.sync_results.get(name, FakeResult(0))
+
+    def wait_healthz(
+        self,
+        url: str,
+        process: FakeProcess,
+        *,
+        timeout_s: float,
+        interval_s: float,
+    ) -> FakeHealth:
+        del process, timeout_s, interval_s
+        self.health_urls.append(url)
+        self.events.append(("healthz", "server"))
+        return self.health
+
+    def wait_process(
+        self,
+        process: FakeProcess,
+        *,
+        name: str,
+        timeout_s: float | None = None,
+    ) -> FakeResult:
+        del timeout_s
+        self.events.append(("wait", name))
+        result = self.sync_results.get(name, FakeResult(0))
+        process.returncode = result.returncode
+        return result
+
+    def sleep(self, seconds: float) -> None:
+        self.events.append(("sleep", str(seconds)))
+
+    def stop_process(self, process: FakeProcess) -> None:
+        self.events.append(("stop", process.name))
+        process.terminate()
+
+
+def import_runner_module() -> Any:
+    try:
+        return importlib.import_module("tools.run_cli_local_e2e")
+    except ModuleNotFoundError as exc:
+        pytest.fail(f"expected tools.run_cli_local_e2e module: {exc}")
+
+
+def write_frame(path: Path, payload: bytes = b"jpeg") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
+def make_executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path
+
+
+def make_case(tmp_path: Path) -> dict[str, Path]:
+    data_dir = tmp_path / "val-data"
+    write_frame(data_dir / "scene-a" / "001.jpg")
+    write_frame(data_dir / "scene-b" / "001.jpeg")
+    out = tmp_path / "artifacts" / "cli-local-e2e.json"
+    server_bin = make_executable(tmp_path / "bin" / "server")
+    cli_bin = make_executable(tmp_path / "bin" / "visual-events-cli")
+    build_dir = tmp_path / "build"
+    dds_bridge = make_executable(build_dir / "visual_events_dds_bridge")
+    return {
+        "data_dir": data_dir,
+        "out": out,
+        "server_bin": server_bin,
+        "cli_bin": cli_bin,
+        "build_dir": build_dir,
+        "dds_bridge": dds_bridge,
+    }
+
+
+def base_argv(paths: dict[str, Path], *extra: str) -> list[str]:
+    return [
+        "--data-dir",
+        os.fspath(paths["data_dir"]),
+        "--out",
+        os.fspath(paths["out"]),
+        "--server-bin",
+        os.fspath(paths["server_bin"]),
+        "--cli-bin",
+        os.fspath(paths["cli_bin"]),
+        "--build-dir",
+        os.fspath(paths["build_dir"]),
+        "--dds-domain",
+        "57",
+        "--dds-network",
+        "lo",
+        *extra,
+    ]
+
+
+def load_report(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def assert_explicit_partial_smoke_fields(report: dict[str, Any], paths: dict[str, Path]) -> None:
+    assert report["server_bin"] == os.fspath(paths["server_bin"])
+    assert report["cli_bin"] == os.fspath(paths["cli_bin"])
+    assert report["build_dir"] == os.fspath(paths["build_dir"])
+    assert report["dds_bridge_bin"] == os.fspath(paths["dds_bridge"])
+    assert report["head_state"]["required"] is True
+    assert report["head_state"]["publisher_mode"] == "required"
+
+
+def test_importable_and_source_audit_for_forbidden_imports() -> None:
+    module = import_runner_module()
+    assert callable(module.main)
+
+    tree = ast.parse(TOOL_PATH.read_text(encoding="utf-8"))
+    imported_roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_roots.add(node.module.split(".")[0])
+
+    denied = {
+        "visual_events_cli",
+        "visual_events_server",
+        "unitree",
+        "cyclonedds",
+        "fastdds",
+        "rti",
+        "rclpy",
+        "torch",
+        "ultralytics",
+    }
+    assert imported_roots.isdisjoint(denied)
+
+
+def test_argparse_rejects_missing_required_domain_or_network(capsys: pytest.CaptureFixture[str]) -> None:
+    module = import_runner_module()
+
+    with pytest.raises(SystemExit) as exc:
+        module.parse_args(
+            [
+                "--data-dir",
+                "/tmp/val-data",
+                "--out",
+                "/tmp/out.json",
+                "--server-bin",
+                "/tmp/server",
+                "--cli-bin",
+                "/tmp/cli",
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert "--dds-domain" in captured.err
+    assert "--dds-network" in captured.err
+
+
+def test_preflight_rejects_non_loopback_without_allow_and_writes_report(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+
+    rc = module.main(base_argv(paths, "--dds-network", "eth0"), runner=FakeRunner())
+
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert captured.out == ""
+    assert paths["out"].exists()
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert any("--allow-non-loopback-dds" in reason for reason in report["failure_reasons"])
+
+
+def test_preflight_rejects_out_under_data_dir_without_writing(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    paths["out"] = paths["data_dir"] / "reports" / "bad.json"
+
+    rc = module.main(base_argv(paths), runner=FakeRunner())
+
+    assert rc != 0
+    assert not paths["out"].exists()
+
+
+def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=(
+                    '{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n'
+                ),
+            )
+        }
+    )
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--server",
+            "ws://127.0.0.1:8877/v1/stream",
+            "--scene",
+            "scene-b",
+            "--frame-count",
+            "7",
+            "--image-hz",
+            "12.5",
+            "--head-state",
+            "moving",
+            "--head-state-hz",
+            "8.5",
+            "--gaze-count",
+            "1",
+            "--gaze-timeout-ms",
+            "1234",
+        ),
+        runner=runner,
+    )
+
+    assert rc == 0
+    tools_dir = REPO_ROOT / "tools"
+    assert runner.commands["server"] == [
+        os.fspath(paths["server_bin"]),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8877",
+    ]
+    assert runner.commands["cli"] == [
+        os.fspath(paths["cli_bin"]),
+        "--dds-runtime",
+        "bridge",
+        "--dds-bridge-bin",
+        os.fspath(paths["dds_bridge"]),
+        "--server",
+        "ws://127.0.0.1:8877/v1/stream",
+        "--camera",
+        "front",
+        "--dds-domain",
+        "57",
+        "--dds-network",
+        "lo",
+        "--image-topic",
+        "/camera/image/jpeg",
+        "--head-state-topic",
+        "/robot/head_state",
+        "--gaze-topic",
+        "/visual_events/gaze_target",
+    ]
+    assert runner.commands["gaze_subscriber"] == [
+        os.fspath(module.sys.executable),
+        os.fspath(tools_dir / "subscribe_test_gaze_targets.py"),
+        "--build-dir",
+        os.fspath(paths["build_dir"]),
+        "--dds-domain",
+        "57",
+        "--dds-network",
+        "lo",
+        "--count",
+        "1",
+        "--timeout-ms",
+        "1234",
+        "--gaze-topic",
+        "/visual_events/gaze_target",
+    ]
+    assert runner.commands["image_publisher"] == [
+        os.fspath(module.sys.executable),
+        os.fspath(tools_dir / "publish_test_dds_images.py"),
+        "--build-dir",
+        os.fspath(paths["build_dir"]),
+        "--dds-domain",
+        "57",
+        "--dds-network",
+        "lo",
+        "--input",
+        os.fspath(paths["data_dir"] / "scene-b"),
+        "--count",
+        "7",
+        "--hz",
+        "12.5",
+        "--camera-name",
+        "image",
+        "--camera-topic",
+        "/camera/image/jpeg",
+    ]
+    assert runner.commands["head_publisher"] == [
+        os.fspath(module.sys.executable),
+        os.fspath(tools_dir / "publish_test_head_state.py"),
+        "--build-dir",
+        os.fspath(paths["build_dir"]),
+        "--dds-domain",
+        "57",
+        "--dds-network",
+        "lo",
+        "--state",
+        "moving",
+        "--count",
+        "7",
+        "--hz",
+        "8.5",
+        "--head-state-topic",
+        "/robot/head_state",
+    ]
+
+
+def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=(
+                    '{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n'
+                    '{"type":"gaze_target","camera":"front","state":"lost","valid":false}\n'
+                    '{"type":"other","camera":"front","state":"tracking"}\n'
+                ),
+            )
+        }
+    )
+
+    rc = module.main(base_argv(paths, "--gaze-count", "2"), runner=runner)
+
+    assert rc == 0
+    assert runner.events == [
+        ("start", "server"),
+        ("healthz", "server"),
+        ("start", "gaze_subscriber"),
+        ("start", "cli"),
+        ("sleep", "0.5"),
+        ("run_sync", "head_publisher"),
+        ("run_sync", "image_publisher"),
+        ("wait", "gaze_subscriber"),
+        ("stop", "cli"),
+        ("stop", "server"),
+    ]
+    assert runner.started["cli"].stopped is True
+    assert runner.started["server"].stopped is True
+    report = load_report(paths["out"])
+    assert report["report_type"] == "cli_local_e2e_smoke_v1"
+    assert report["slice_pass"] is True
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
+    assert report["failure_reasons"] == []
+    assert report["manifest_source"] == "generated"
+    assert report["scene_count"] == 2
+    assert report["selected_scene"] == "scene-a"
+    assert_explicit_partial_smoke_fields(report, paths)
+    assert report["gaze"]["expected_count"] == 2
+    assert report["gaze"]["received_lines"] == 3
+    assert report["gaze"]["accepted_count"] == 2
+    assert report["gaze"]["rejected_count"] == 1
+    assert report["gaze"]["valid_count"] == 1
+    assert report["gaze"]["invalid_count"] == 1
+    assert report["gaze"]["state_counts"] == {"lost": 1, "tracking": 1}
+    assert report["gaze"]["first_sample"]["state"] == "tracking"
+    assert report["gaze"]["last_sample"]["state"] == "lost"
+    assert "full_scene_matrix" in report["not_covered"]
+
+
+@pytest.mark.parametrize(
+    ("health", "sync_results", "expected_reason"),
+    [
+        (
+            FakeHealth(False, failure_reason="healthz_timeout"),
+            {},
+            "healthz_timeout",
+        ),
+        (
+            None,
+            {"image_publisher": FakeResult(9, stderr="image failed")},
+            "image_publisher_failed",
+        ),
+        (
+            None,
+            {"gaze_subscriber": FakeResult(0, stdout="{not-json}\n")},
+            "gaze_target_count_shortfall",
+        ),
+    ],
+)
+def test_fake_runner_failures_write_nonzero_report_and_cleanup(
+    tmp_path: Path,
+    health: FakeHealth | None,
+    sync_results: dict[str, FakeResult],
+    expected_reason: str,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(health=health, sync_results=sync_results)
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is False
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+    assert_explicit_partial_smoke_fields(report, paths)
+    assert expected_reason in report["failure_reasons"]
+    if "cli" in runner.started:
+        assert runner.started["cli"].stopped is True
+    if "server" in runner.started:
+        assert runner.started["server"].stopped is True
+    if "gaze_subscriber" in runner.started and runner.started["gaze_subscriber"].poll() is None:
+        assert runner.started["gaze_subscriber"].stopped is True
+
+
+def test_report_never_claims_full_ga_pass(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+            )
+        }
+    )
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    serialized = json.dumps(report, sort_keys=True).lower()
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert '"passed": true' not in serialized
+    assert '"full_pass": true' not in serialized
+    assert '"ga_gate_pass": true' not in serialized
+    assert '"overall_pass": true' not in serialized

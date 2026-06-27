@@ -33,6 +33,13 @@ def paragraph_containing(text: str, marker: str) -> str:
     raise AssertionError(f"missing paragraph containing {marker!r}")
 
 
+def line_containing(text: str, marker: str) -> str:
+    for line in text.splitlines():
+        if marker in line:
+            return line
+    raise AssertionError(f"missing line containing {marker!r}")
+
+
 def test_dds_stack_decision_record_freezes_ga_handoff_fields():
     assert DDS_STACK_DECISION.exists()
     text = read_text(DDS_STACK_DECISION)
@@ -607,12 +614,38 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "first/last frame",
             "aggregate `scene_count` / `frame_count`",
             "`manifest_sha256`",
-            "`overall_pass=false`",
+            "manifest skeleton report 固定 `overall_pass=false`",
             "`pc_local_e2e_status=not_run`",
+            "只针对 `tools/cli_local_e2e_manifest.py` 的报告骨架",
             "只做数据集身份和报告骨架",
             "不能替代 full E2E",
             "`--out` 不能写入 data dir",
             "本机 ignored `val-data` 当前可识别 7 scene / 576 frames",
+            "Step 5 run_cli_local_e2e partial smoke runner slice 已完成",
+            "`tools/run_cli_local_e2e.py`",
+            "复用 manifest skeleton",
+            "启动正式 server binary",
+            "正式 CLI binary with bridge runtime",
+            "gaze subscriber wrapper",
+            "head/image publisher wrappers",
+            "partial smoke report",
+            "`ga_gate_pass=false`",
+            "`pc_local_e2e_status` 只能是 `partial_smoke_pass|partial_smoke_failed|preflight_failed`",
+            "不能声明 full PC gate pass",
+            "fake-runner 单测覆盖 command construction、preflight、cleanup、gaze JSON summary、failure report",
+            "`pc_local_e2e_status=partial_smoke_pass`",
+            "`slice_pass=true`",
+            "`overall_pass=false`",
+            "`ga_gate_pass=false`",
+            "数据 manifest generated 7 scene / 576 frames",
+            "scene `pci_stand`",
+            "收到 1 条 DDS gaze target sample",
+            "`state=lost`",
+            "payload `valid=false`",
+            "publisher/subscriber returncodes 0",
+            "只证明 real server + CLI bridge runtime + DDS participant plumbing",
+            "默认 server mock backend 产生 lost gaze",
+            "不证明 attention/event oracle/Botified/full matrix/latency/soak/fault/release",
             "PC E2E",
             "release report",
             "真机 smoke",
@@ -627,7 +660,13 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "不启动 DDS participant",
             "不读取 val-data",
             "不做 runner/report",
-            "剩余是正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff",
+            "剩余是正式 full CLI+real server 编排的完整 PC local E2E GA gate",
+            "全量 `val-data` scene matrix",
+            "manifest/oracle",
+            "fault matrix",
+            "release report",
+            "RK/board probe",
+            "真机 smoke 和 closed-loop handoff",
             "DDS contract/schema Step 1 主要产物已完成",
             "完整 DDS PC E2E/over-wire GA gate 和板端 compatibility probe 仍必须补齐",
             "native runtime loop core 和 full-bridge wiring 已完成",
@@ -683,6 +722,8 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     assert "Visual Events `HeadStateV1_`/`GazeTargetV1_` generated C++ type support 接入、full bridge runtime" not in text
     assert "CLI 必须有 unit、integration、PC local E2E、fault matrix、真机 smoke" not in text
     assert "PC E2E 已完成" not in text
+    assert "`ga_gate_pass=true`" not in text
+    assert "`overall_pass=true`" not in text
     assert "RK/board probe 已完成" not in text
     assert "真机 smoke 已完成" not in text
     assert "Fake DDS adapters started/closed lifecycle unit core" not in text
@@ -778,20 +819,25 @@ def test_ga_plan_keeps_native_runtime_loop_done_and_one_remaining_boundary():
     assert_contains_all(
         remaining_gap,
         [
-            "native PC DDS over-wire test participants、Python native participant wrappers、Step 5 manifest reader/report skeleton slice 和 mock visual_state server slice 已完成",
+            "native PC DDS over-wire test participants、Python native participant wrappers、Step 5 manifest reader/report skeleton slice、mock visual_state server slice 和 run_cli_local_e2e partial smoke runner slice 已完成",
             "完整 PC 本地 DDS E2E GA gate 仍未完成",
-            "正式 CLI+real server 编排",
-            "真实 runtime server/CLI",
-            "stdout collector",
+            "正式 full CLI+real server 编排覆盖 stdout/Botified",
+            "全量 `val-data` scene matrix",
+            "manifest/oracle",
+            "latency",
+            "soak",
+            "fault matrix",
+            "release report",
             "`/camera/image/jpeg` -> bridge/CLI -> server -> `/visual_events/gaze_target` over wire",
             "manifest skeleton 只做数据集身份和报告骨架",
+            "partial smoke runner 只证明 real server + CLI bridge runtime + DDS participant plumbing",
             "mock visual_state server 只覆盖 CLI deterministic/failure-path",
             "native runtime loop core 和 full-bridge wiring 已完成",
             "不能替代这个端到端 gate",
             "DDS discovery/real serialization over wire/QoS behavior 的完整测试矩阵",
             "real serialization/QoS tests",
             "release report 仍未完成",
-            "正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
+            "正式 full CLI+real server 编排的完整 PC local E2E GA gate、全量 `val-data` scene matrix、manifest/oracle、fault matrix、release report、RK/board probe、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
 
@@ -862,8 +908,9 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "first/last frame",
             "aggregate `scene_count` / `frame_count`",
             "`manifest_sha256`",
-            "report skeleton 固定 `overall_pass=false`",
+            "manifest skeleton report 固定 `overall_pass=false`",
             "`pc_local_e2e_status=not_run`",
+            "只针对 `tools/cli_local_e2e_manifest.py` 的报告骨架",
             "只做数据集身份和报告骨架",
             "不能替代 full E2E",
             "`--out` 不能写入 data dir",
@@ -879,9 +926,36 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "不读取 val-data",
             "不做 runner/report",
             "不能替代 full E2E 或正式 CLI + real server + `val-data` GA gate",
+            "Step 5 run_cli_local_e2e partial smoke runner slice 已完成",
+            "`tools/run_cli_local_e2e.py`",
+            "复用 manifest skeleton",
+            "启动正式 server binary",
+            "正式 CLI binary with bridge runtime",
+            "gaze subscriber wrapper",
+            "head/image publisher wrappers",
+            "partial smoke report",
+            "report 固定 `overall_pass=false`",
+            "`ga_gate_pass=false`",
+            "`pc_local_e2e_status` 只能是 `partial_smoke_pass|partial_smoke_failed|preflight_failed`",
+            "不能声明 full PC gate pass",
+            "fake-runner 单测覆盖 command construction、preflight、cleanup、gaze JSON summary、failure report",
+            "本机真实 partial smoke 已通过",
+            "`pc_local_e2e_status=partial_smoke_pass`",
+            "`slice_pass=true`",
+            "数据 manifest generated 7 scene / 576 frames",
+            "scene `pci_stand`",
+            "收到 1 条 DDS gaze target sample",
+            "`state=lost`",
+            "payload `valid=false`",
+            "publisher/subscriber returncodes 0",
+            "只证明 real server + CLI bridge runtime + DDS participant plumbing",
+            "默认 server mock backend 产生 lost gaze",
+            "不证明 attention/event oracle/Botified/full matrix/latency/soak/fault/release",
             "完整 PC local E2E 的 manifest/oracle 仍需列出",
             "mock visual_state server",
-            "正式 CLI+real server 编排",
+            "正式 full CLI+real server 编排的完整 PC local E2E GA gate",
+            "全量 `val-data` scene matrix",
+            "manifest/oracle",
             "完整 PC local E2E GA gate",
             "fault matrix",
             "release report",
@@ -899,14 +973,37 @@ def test_ga_plan_records_step5_native_participants_and_wrappers_without_claiming
             "loopback over-wire smoke",
             "Step 5 Python native participant wrappers slice 已完成",
             "Step 5 manifest reader/report skeleton slice 已完成",
+            "`pc_local_e2e_status=not_run`",
+            "Step 5 run_cli_local_e2e partial smoke runner slice 已完成",
+            "`tools/run_cli_local_e2e.py`",
+            "`pc_local_e2e_status=partial_smoke_pass`",
+            "`slice_pass=true`",
+            "`ga_gate_pass=false`",
             "Step 5 mock visual_state server slice 已完成",
             "`tools/cli_local_e2e_manifest.py`",
             "本机 ignored `val-data` 当前可识别 7 scene / 576 frames",
-            "剩余是正式 CLI+real server 编排、完整 PC local E2E GA gate、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff 仍未完成",
+            "剩余是正式 full CLI+real server 编排的完整 PC local E2E GA gate、全量 `val-data` scene matrix、manifest/oracle、fault matrix、release report、RK/board probe、真机 smoke 和 closed-loop handoff 仍未完成",
         ],
     )
 
+    manifest_skeleton = line_containing(step5, "Step 5 manifest reader/report skeleton slice 已完成")
+    assert_contains_all(
+        manifest_skeleton,
+        [
+            "`tools/cli_local_e2e_manifest.py`",
+            "manifest skeleton report 固定 `overall_pass=false`",
+            "`pc_local_e2e_status=not_run`",
+            "只针对 `tools/cli_local_e2e_manifest.py` 的报告骨架",
+        ],
+    )
+    partial_smoke_runner = line_containing(
+        step5, "Step 5 run_cli_local_e2e partial smoke runner slice 已完成"
+    )
+    assert "`pc_local_e2e_status=not_run`" not in partial_smoke_runner
+
     assert "完整 PC local E2E GA gate 已完成" not in text
+    assert "`ga_gate_pass=true`" not in text
+    assert "`overall_pass=true`" not in text
     assert "manifest reader/report 已完成" not in text
     assert "mock visual_state server 仍未完成" not in text
     assert "正式 CLI+real server 编排已完成" not in text
