@@ -12,10 +12,13 @@ def import_main():
         pytest.fail(f"expected visual_events_cli.main module: {exc}")
 
 
-def test_check_config_returns_zero_and_writes_no_stdout(capsys):
+def test_check_config_returns_zero_writes_no_output_and_skips_runtime(capsys):
     main = import_main()
 
-    result = main(["--check-config"])
+    def fake_runtime_runner(_config):
+        raise AssertionError("--check-config must not start runtime")
+
+    result = main(["--check-config"], runtime_runner=fake_runtime_runner)
 
     captured = capsys.readouterr()
     assert isinstance(result, int)
@@ -74,12 +77,52 @@ response_timeout_ms = 0
     assert "response_timeout_ms" in captured.err
 
 
-def test_runtime_without_check_config_is_explicit_until_loop_exists(capsys):
+def test_runtime_without_check_config_calls_runtime_runner_and_returns_exit_code(capsys):
     main = import_main()
+    received_configs = []
 
-    result = main([])
+    def fake_runtime_runner(config):
+        received_configs.append(config)
+        return 37
+
+    result = main([], runtime_runner=fake_runtime_runner)
 
     captured = capsys.readouterr()
-    assert result == 2
+    assert result == 37
+    assert len(received_configs) == 1
     assert captured.out == ""
-    assert "--check-config" in captured.err or "runtime" in captured.err.lower()
+    assert captured.err == ""
+
+
+def test_runtime_runner_receives_config_after_cli_overrides(capsys):
+    main = import_main()
+    received_configs = []
+
+    def fake_runtime_runner(config):
+        received_configs.append(config)
+        return 0
+
+    result = main(
+        [
+            "--server",
+            "ws://10.0.0.1:8765/v1/stream",
+            "--camera",
+            "rear",
+            "--dds-domain",
+            "57",
+            "--dds-network",
+            "lo",
+        ],
+        runtime_runner=fake_runtime_runner,
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == ""
+    assert captured.err == ""
+    assert len(received_configs) == 1
+    config = received_configs[0]
+    assert config.service.url == "ws://10.0.0.1:8765/v1/stream"
+    assert config.camera.name == "rear"
+    assert config.dds.domain == 57
+    assert config.dds.network == "lo"

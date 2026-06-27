@@ -121,7 +121,7 @@ class FramePump:
             stale_reference_ms = self._last_sent_timestamp_ms
         if stale_reference_ms is None:
             return False
-        if now_ms - stale_reference_ms <= self._stale_after_ms:
+        if now_ms - stale_reference_ms < self._stale_after_ms:
             return False
         return self.publish_stale_now(publish_timestamp_ms=now_ms)
 

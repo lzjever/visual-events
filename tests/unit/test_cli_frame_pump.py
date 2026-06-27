@@ -377,6 +377,41 @@ async def test_publish_stale_now_uses_last_metadata_and_does_not_duplicate_until
 
 
 @pytest.mark.asyncio
+async def test_stale_deadline_publishes_at_exact_boundary_after_fresh_target():
+    module = import_frame_pump()
+    slot = module.LatestFrameSlot()
+    gaze = FakeGazePublisher()
+    fresh_publish_ms = 1710000000082
+    state = load_visual_state_tracking(
+        frame_id=1,
+        frame_timestamp_ms=1710000000000,
+    )
+    service = FakeServiceClient([service_result(state)])
+    pump = make_pump(
+        module,
+        slot=slot,
+        service=service,
+        gaze=gaze,
+        stale_after_ms=250,
+        clock_ms=lambda: fresh_publish_ms,
+    )
+
+    slot.push(make_frame(module, timestamp_ms=1710000000000))
+    await pump.process_one(now_ms=1710000000000)
+
+    assert pump.check_stale_deadline(now_ms=fresh_publish_ms + 250) is True
+    assert gaze.dicts()[-1] == make_invalid_gaze_target(
+        "stale",
+        camera="front",
+        frame_id=1,
+        frame_timestamp_ms=1710000000000,
+        image_size=(1280, 720),
+        publish_timestamp_ms=fresh_publish_ms + 250,
+        stale_after_ms=250,
+    ).to_dict()
+
+
+@pytest.mark.asyncio
 async def test_first_pending_frame_can_publish_stale_from_sent_frame_metadata():
     module = import_frame_pump()
     slot = module.LatestFrameSlot()

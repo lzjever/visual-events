@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import Callable
 
 from visual_events_cli.config import ConfigError, apply_overrides, load_config
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    runtime_runner: Callable[[object], int] | None = None,
+) -> int:
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
@@ -15,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_config(args.config)
-        apply_overrides(config, _overrides_from_args(args))
+        config = apply_overrides(config, _overrides_from_args(args))
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
@@ -23,12 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_config:
         return 0
 
-    print(
-        "visual-events-cli runtime is not implemented yet; use --check-config "
-        "to validate configuration.",
-        file=sys.stderr,
-    )
-    return 2
+    runner = runtime_runner or _default_runtime_runner
+    return int(runner(config))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -57,6 +58,11 @@ def _overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
         "gaze_topic": args.gaze_topic,
         "log_path": args.log_jsonl,
     }
+
+
+def _default_runtime_runner(_config: object) -> int:
+    print("Step 4 DDS adapters not implemented", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
