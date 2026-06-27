@@ -360,6 +360,13 @@ class DdsBridgeProcess:
                 returncode = process.poll()
             except Exception:
                 returncode = None
+            if returncode is None and self._close_timeout_seconds > 0:
+                try:
+                    returncode = process.wait(timeout=self._close_timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    returncode = None
+                except Exception:
+                    returncode = None
 
         if returncode is None:
             message = "DDS bridge stdout closed unexpectedly"

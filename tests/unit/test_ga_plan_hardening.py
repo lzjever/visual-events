@@ -398,6 +398,13 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "JSONL protocol/base64/canonical gaze fields",
             "subprocess lifecycle",
             "no DDS/native import audit tests",
+            "Step 4 Python JSONL bridge runtime integration slice 已完成",
+            "真实 subprocess fake JSONL child + `bridge_runtime_factories()`/`run_runtime`",
+            "camera/head -> service -> gaze stdin",
+            "logical camera",
+            "stale/cleanup",
+            "child nonzero/fatal",
+            "不代表真实 DDS/C++ bridge/PC E2E/RK probe 完成",
             "`service_client`：WebSocket wire/pack-unpack、连接复用/关闭、timeout、invalid response、frame_id mismatch、retryable/non-retryable error handling 的单元核心",
             "`frame_pump`：one in-flight coordination、keep-latest frame slot/backpressure、gaze stale watchdog、Botified enqueue 的 deterministic unit core",
             "main runtime_runner 注入和默认 DDS factories fail-fast",
@@ -427,7 +434,7 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "剩余是 Step 4 真实 DDS factories/adapters",
             "DDS contract/schema Step 1 主要产物已完成",
             "DDS runtime stack 和板端 compatibility probe 仍必须补齐",
-            "真实 DDS factories/adapters、C++ native bridge binary、IDL codegen/toolchain implementation、native bridge ABI implementation、real serialization/QoS tests / construction tests、板端 compatibility probe、PC E2E tools、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
+            "真实 DDS factories/adapters、C++ native bridge binary、IDL codegen/toolchain implementation、native bridge ABI implementation、real serialization/QoS tests / construction tests、板端 compatibility probe、PC E2E tools、board/RK probe、release/runtime 真跑、真机 smoke/closed-loop handoff 仍未完成",
         ],
     )
     assert "Step 1 仍未完成 DDS stack decision record" not in text
@@ -447,6 +454,9 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     assert "真实 DDS adapters 全部未开始" not in text
     assert "真实 DDS factories/adapters 已完成" not in text
     assert "Step 4 完全完成" not in text
+    assert "Step 4 Python JSONL bridge runtime integration slice 仍未完成" not in text
+    assert "真实 DDS/C++ bridge/PC E2E/RK probe 已完成" not in text
+    assert "Step 4 Python JSONL bridge runtime integration slice 完成代表真实 DDS" not in text
     assert "Fake DDS adapters started/closed lifecycle unit core" not in text
     assert "可重复 start/stop" not in text
 
