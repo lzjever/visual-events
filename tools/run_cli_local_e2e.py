@@ -70,6 +70,7 @@ PROCESS_COLLECTED_LINE_LIMIT = 4096
 PROCESS_READER_JOIN_TIMEOUT_S = 1.0
 BOTIFIED_OPEN = "<botified>"
 BOTIFIED_CLOSE = "</botified>"
+BOTIFIED_VISUAL_CONTEXT_MARKER = "visual_context="
 BOTIFIED_ALLOWED_EVENTS = {
     "person_appeared",
     "person_left",
@@ -3722,6 +3723,11 @@ def _summarize_botified_stdout(
             parse_error_count += 1
             contract_violations.append(f"line {line_number}: invalid Botified contract")
             continue
+        visual_context_present, visual_context_error = _botified_visual_context(payload)
+        if visual_context_error is not None:
+            parse_error_count += 1
+            contract_violations.append(f"line {line_number}: {visual_context_error}")
+            continue
 
         frame_count += 1
         frame = {
@@ -3747,6 +3753,8 @@ def _summarize_botified_stdout(
         track_id = _botified_track_id(payload)
         if track_id is not None:
             sequence_item["track_id"] = track_id
+        if visual_context_present:
+            sequence_item["visual_context_present"] = True
         received_monotonic_ms = _botified_line_timestamp_ms(
             line_timestamps_ms,
             line_number,
@@ -4008,6 +4016,75 @@ def _botified_track_id(payload: dict[str, Any]) -> int | None:
     if match is None:
         return None
     return int(match.group(1))
+
+
+def _botified_visual_context(payload: dict[str, Any]) -> tuple[bool, str | None]:
+    request = payload.get("request")
+    if not isinstance(request, str):
+        return False, None
+
+    context_json, error = _extract_botified_visual_context_json(request)
+    if error is not None:
+        return False, error
+    if context_json is None:
+        return False, None
+
+    try:
+        wrapper = json.loads(context_json)
+    except json.JSONDecodeError:
+        return False, "invalid Botified visual_context JSON"
+    if (
+        not isinstance(wrapper, dict)
+        or set(wrapper) != {"visual_context"}
+        or not isinstance(wrapper.get("visual_context"), dict)
+    ):
+        return False, "invalid Botified visual_context contract"
+    return True, None
+
+
+def _extract_botified_visual_context_json(request: str) -> tuple[str | None, str | None]:
+    marker_index = request.rfind(BOTIFIED_VISUAL_CONTEXT_MARKER)
+    if marker_index < 0:
+        return None, None
+
+    start = marker_index + len(BOTIFIED_VISUAL_CONTEXT_MARKER)
+    if start >= len(request) or request[start] != "{":
+        return None, "malformed Botified visual_context JSON"
+
+    end = _balanced_json_object_end(request, start)
+    if end is None:
+        return None, "malformed Botified visual_context JSON"
+    if request[end:].strip():
+        return None, "unexpected text after Botified visual_context"
+    return request[start:end], None
+
+
+def _balanced_json_object_end(text: str, start: int) -> int | None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+            if depth < 0:
+                return None
+    return None
 
 
 def _botified_stdout_failure_reasons(summary: dict[str, Any]) -> list[str]:

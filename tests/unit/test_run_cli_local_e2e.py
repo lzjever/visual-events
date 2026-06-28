@@ -662,6 +662,46 @@ def botified_frame(
     return f"<botified>{inner}</botified>\n"
 
 
+def botified_formatter_frame_with_visual_context() -> str:
+    formatter = importlib.import_module("visual_events_cli.botified_output")
+    event = {
+        "type": "semantic_event",
+        "event_id": "front:evt_formatter",
+        "event": "person_waving",
+        "camera": "front",
+        "track_id": 7,
+        "confidence": 0.86,
+        "duration_ms": 900,
+        "evidence": {
+            "runtime_person_slot": 3,
+            "wrist_x_span_px": 84.0,
+            "wrist_x_span_bbox_ratio": 0.42,
+            "wrist_y_relative_to_shoulder_px": 18.0,
+            "wave_duration_ms": 900,
+            "keypoint_min_confidence": 0.72,
+        },
+        "text": "person waving",
+    }
+    visual_context = {
+        "event_target": {
+            "track_id": 7,
+            "visible_now": True,
+            "note": "brace characters inside a string: } {",
+        },
+        "trigger_evidence": {
+            "runtime_person_slot": 3,
+            "nested": {"text": "quoted brace: }"},
+        },
+        "current_scene": {
+            "camera": "front",
+            "person_count": 1,
+        },
+    }
+    frame = formatter.format_botified_frame(event, visual_context=visual_context)
+    assert frame is not None
+    return frame + "\n"
+
+
 def unavailable_botified_output_limits(module: Any) -> dict[str, Any]:
     return {
         "per_track_event_60s": {
@@ -5434,6 +5474,40 @@ def test_botified_stdout_valid_frame_is_reported_without_required_count(tmp_path
     assert botified["last_frame"] == botified["first_frame"]
 
 
+def test_botified_stdout_parses_visual_context_from_cli_formatter_output(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner(cli_stdout=botified_formatter_frame_with_visual_context())
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is True
+    botified = report["botified_stdout"]
+    assert botified["parse_error_count"] == 0
+    assert botified["contract_violations"] == []
+    assert botified["event_sequence"] == [
+        {
+            "line": 1,
+            "event": "person_waving",
+            "event_id": "front:evt_formatter",
+            "track_id": 7,
+            "visual_context_present": True,
+        }
+    ]
+    assert set(botified["first_frame"]["payload"]) == {
+        "id",
+        "urgency",
+        "timeout_secs",
+        "request",
+        "expect",
+    }
+    assert "visual_context=" in botified["first_frame"]["payload"]["request"]
+
+
 @pytest.mark.parametrize(
     "cli_stdout",
     [
@@ -5476,6 +5550,39 @@ def test_botified_stdout_malformed_frame_fails_partial_slice(tmp_path: Path) -> 
     assert "botified_stdout_parse_errors" in report["failure_reasons"]
     assert report["botified_stdout"]["parse_error_count"] == 1
     assert report["botified_stdout"]["pollution_count"] == 0
+
+
+def test_botified_stdout_malformed_visual_context_fails_partial_slice(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    payload = {
+        "id": "visual:front:evt_000456",
+        "urgency": "normal",
+        "timeout_secs": 8,
+        "request": (
+            "event=person_waving camera=front track_id=7 confidence=0.86 "
+            'visual_context={"visual_context":{"event_target":{"track_id":7}'
+        ),
+        "expect": "ack",
+    }
+    inner = json.dumps(payload, separators=(",", ":"))
+    runner = successful_runner(cli_stdout=f"<botified>{inner}</botified>\n")
+
+    rc = module.main(base_argv(paths), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is False
+    assert "botified_stdout_parse_errors" in report["failure_reasons"]
+    botified = report["botified_stdout"]
+    assert botified["parse_error_count"] == 1
+    assert botified["frame_count"] == 0
+    assert botified["event_sequence"] == []
+    assert botified["contract_violations"] == [
+        "line 1: malformed Botified visual_context JSON"
+    ]
 
 
 @pytest.mark.parametrize(
