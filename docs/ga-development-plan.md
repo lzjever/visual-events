@@ -15,8 +15,8 @@
 - `visual-events-cli` 不直接操纵运控，不调用头部速度/位置/`look_at` API，不链接运动控制 SDK。
 - 运控/头控模块订阅 DDS gaze target，并在自己的安全边界内执行真实头部动作；该模块不在本 repo 实现。
 - Botified agent 只接收低频语义事件并决定后续响应，不参与 10Hz 注视闭环。
-- PC 本地 DDS 仿真是当前 PC 本地核心功能门禁；pass/fail authority 是 `tools/run_cli_local_e2e.py --full-scene --all-scenes --head-state stationary --server-config configs/pc-ga-server.toml`：本地开发 PC 模拟 robot 发送 DDS camera/head-state，真实 runtime server/CLI 跑通，DDS gaze subscriber/Botified stdout collector 收到预期输出，并用 `val-data` full-scene matrix + Botified event oracle 做当前 PC 模拟核心功能判定。report 可记录 `overall_scope=current_pc_core_gate` 和 `current_pc_core_gate_pass`。
-- RK3588/board/real robot/field validation 是 GA 之后的硬件适配/现场验证，不是 deferred current PC core gate，也不阻塞当前 PC 本地核心功能门禁；PC evidence 只能声称 PC-simulated GA passed，不得声称 `real robot validated`、`board compatible`、`RK supported`、`field GA passed` 或 release audit passed。
+- PC 本地 DDS 仿真是当前 PC 本地核心功能门禁；GA pass/fail authority 只要求 `tools/run_cli_local_e2e.py --full-scene --all-scenes --head-state stationary --server-config configs/pc-ga-server.toml` 在 PC 本地模拟完整 E2E 跑通：本地开发 PC 模拟 robot 发送 DDS camera/head-state，真实 runtime server/CLI 跑通，DDS gaze subscriber/Botified stdout collector 收到预期输出，并用 `val-data` full-scene matrix + Botified event oracle 做当前 PC 模拟核心功能判定。report 可记录 `overall_scope=current_pc_core_gate` 和 `current_pc_core_gate_pass`。
+- RK3588/board/real robot/field validation 是 GA 之后的硬件适配/现场验证，不是 deferred current PC core gate，也不阻塞当前 PC 本地核心功能门禁；GA 不要求真机实际运行、真机测试、现场测试、RK3588/board 验证或真实头部闭环。PC evidence 只能声称 PC-simulated GA passed，不得声称 `real robot validated`、`board compatible`、`RK supported`、`field GA passed` 或 release audit passed。
 - 当前阶段 PC gate 必须有可用、新鲜的 head state；缺失 head state 只能算 degraded 运行，不能算 current phase pass / PC gate pass。
 - `attention_target_changed` 只保留在 `visual_state` 和诊断 artifact 中，不输出到 Botified stdout。
 
