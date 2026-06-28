@@ -76,6 +76,14 @@ NOT_COVERED = [
     "fault_matrix",
     "release_report",
 ]
+FULL_MATRIX_NON_BLOCKING_GAPS = [
+    "latency_p95_p99",
+    "soak",
+    "fault_matrix",
+    "release_report",
+]
+CURRENT_PC_CORE_GATE_SCOPE = "current_pc_core_gate"
+GA_GATE_STATUS = "not_evaluated_not_release_or_field_gate"
 MANIFEST_UNREADABLE_OR_INVALID = "manifest_unreadable_or_invalid"
 MANIFEST_REPORT_KEYS = [
     "data_dir",
@@ -1260,36 +1268,140 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
         failure_reasons.extend(oracle_failure_reasons)
     else:
         botified_event_oracle = _unevaluated_botified_event_oracle()
-    oracle_pass = (
-        True
-        if botified_event_oracle["passed"] is None
-        else bool(botified_event_oracle["passed"])
+    if not oracle_evaluated:
+        failure_reasons.append("botified_event_oracle_not_evaluated")
+    oracle_contracts_present = _botified_event_oracle_contracts_present(
+        botified_event_oracle
     )
-    matrix_pass = slice_matrix_pass and oracle_pass
+    oracle_pass = (
+        oracle_evaluated
+        and botified_event_oracle["passed"] is True
+        and oracle_contracts_present
+    )
+    current_pc_core_gate_pass = slice_matrix_pass and oracle_pass
     report = _base_report(
         manifest_report=config.manifest_report,
-        status="full_scene_matrix_pass" if matrix_pass else "full_scene_matrix_failed",
-        failure_reasons=[] if matrix_pass else _dedupe(failure_reasons),
+        status="full_scene_matrix_pass"
+        if current_pc_core_gate_pass
+        else "full_scene_matrix_failed",
+        failure_reasons=[]
+        if current_pc_core_gate_pass
+        else _dedupe(failure_reasons),
     )
     report.update(
         {
-            "slice_pass": matrix_pass,
+            "slice_pass": current_pc_core_gate_pass,
+            "slice_matrix_pass": slice_matrix_pass,
+            "overall_pass": current_pc_core_gate_pass,
+            "current_pc_core_gate_pass": current_pc_core_gate_pass,
+            "report_scope": CURRENT_PC_CORE_GATE_SCOPE,
+            "overall_scope": CURRENT_PC_CORE_GATE_SCOPE,
             "scene_replay_mode": "full_scene_matrix",
             "scene_results": scene_reports,
             "botified_event_oracle": botified_event_oracle,
             "oracle_evaluated": oracle_evaluated,
             "oracle_evaluation_passed": botified_event_oracle["passed"],
-            "not_covered": [
-                gap
-                for gap in NOT_COVERED
-                if gap != "full_scene_matrix"
-                and not (oracle_evaluated and gap == "oracle")
-            ],
+            "not_covered": _full_scene_matrix_not_covered(
+                slice_matrix_pass=slice_matrix_pass,
+                oracle_evaluated=oracle_evaluated,
+                oracle_contracts_present=oracle_contracts_present,
+            ),
+            "non_blocking_gaps": list(FULL_MATRIX_NON_BLOCKING_GAPS),
+            "gates": _full_scene_matrix_gates(
+                scene_reports=scene_reports,
+                current_pc_core_gate_pass=current_pc_core_gate_pass,
+                slice_matrix_pass=slice_matrix_pass,
+                oracle_evaluated=oracle_evaluated,
+                oracle_pass=oracle_pass,
+            ),
         }
     )
     _write_report(config.out, report)
     print(str(config.out))
-    return 0 if matrix_pass else 1
+    return 0 if current_pc_core_gate_pass else 1
+
+
+def _full_scene_matrix_not_covered(
+    *,
+    slice_matrix_pass: bool,
+    oracle_evaluated: bool,
+    oracle_contracts_present: bool,
+) -> list[str]:
+    gaps: list[str] = []
+    if not slice_matrix_pass:
+        gaps.append("full_scene_matrix")
+    if not oracle_evaluated or not oracle_contracts_present:
+        gaps.append("oracle")
+    return gaps
+
+
+def _full_scene_matrix_gates(
+    *,
+    scene_reports: list[dict[str, Any]],
+    current_pc_core_gate_pass: bool,
+    slice_matrix_pass: bool,
+    oracle_evaluated: bool,
+    oracle_pass: bool,
+) -> dict[str, Any]:
+    return {
+        "current_pc_core": {
+            "scope": "full_scene_all_scenes_stationary_oracle",
+            "pass": current_pc_core_gate_pass,
+            "scene_count": len(scene_reports),
+            "frame_count": _full_scene_matrix_frame_count(scene_reports),
+            "slice_matrix_pass": slice_matrix_pass,
+            "oracle_evaluated": oracle_evaluated,
+            "oracle_pass": oracle_pass,
+            "stdout_pollution_count": _full_scene_matrix_stdout_pollution_count(
+                scene_reports
+            ),
+            "fresh_gaze_hz_pass": _full_scene_matrix_fresh_gaze_hz_pass(
+                scene_reports
+            ),
+        },
+        "ga": {
+            "pass": False,
+            "status": GA_GATE_STATUS,
+        },
+    }
+
+
+def _full_scene_matrix_frame_count(scene_reports: list[dict[str, Any]]) -> int:
+    return sum(
+        _int_count(result.get("selected_scene_frame_count")) for result in scene_reports
+    )
+
+
+def _full_scene_matrix_stdout_pollution_count(
+    scene_reports: list[dict[str, Any]],
+) -> int:
+    total = 0
+    for result in scene_reports:
+        botified_stdout = result.get("botified_stdout")
+        if isinstance(botified_stdout, dict):
+            total += _int_count(botified_stdout.get("pollution_count"))
+    return total
+
+
+def _full_scene_matrix_fresh_gaze_hz_pass(
+    scene_reports: list[dict[str, Any]],
+) -> bool | None:
+    if not scene_reports:
+        return False
+
+    saw_rate = False
+    for result in scene_reports:
+        gaze = result.get("gaze")
+        if not isinstance(gaze, dict):
+            return None
+        fresh_hz = gaze.get("fresh_gaze_publish_hz")
+        if not isinstance(fresh_hz, dict):
+            return None
+        rate_pass = fresh_hz.get("pass")
+        if rate_pass is not True:
+            return False
+        saw_rate = True
+    return True if saw_rate else None
 
 
 def _config_for_full_scene(
@@ -1375,6 +1487,7 @@ def _evaluate_botified_event_oracle(
         required = list(facts["required_events"])
         forbidden = list(facts["forbidden_events"])
         order_requirements = list(facts["order_requirements"])
+        contract_present = bool(required or forbidden or order_requirements)
 
         missing = [event for event in required if observed.get(event, 0) <= 0]
         forbidden_present = {
@@ -1396,10 +1509,13 @@ def _evaluate_botified_event_oracle(
                 "botified_event_oracle_order:"
                 f"{scene}:{violation['before_event']}_before_{violation['after_event']}"
             )
+        if not contract_present:
+            failure_reasons.append(f"botified_event_oracle_missing_scene_contract:{scene}")
 
         scenes.append(
             {
                 "scene": scene,
+                "contract_present": contract_present,
                 "observed": observed,
                 "required": required,
                 "missing": missing,
@@ -1415,6 +1531,18 @@ def _evaluate_botified_event_oracle(
             "scenes": scenes,
         },
         failure_reasons,
+    )
+
+
+def _botified_event_oracle_contracts_present(
+    botified_event_oracle: dict[str, Any],
+) -> bool:
+    scenes = botified_event_oracle.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        return False
+    return all(
+        isinstance(scene, dict) and scene.get("contract_present") is True
+        for scene in scenes
     )
 
 
@@ -1797,7 +1925,8 @@ def _build_smoke_report(
                 "stale_count": head_state_stale_count,
                 "unknown_ratio": head_state_unknown_ratio,
                 "evidence_source": "synthetic_publisher_stdout",
-                "partial_smoke_only": True,
+                "evidence_scope": config.scene_replay_mode,
+                "partial_smoke_only": config.scene_replay_mode != "full_scene",
             },
             "head_state_publisher_mode": config.head_state_mode,
             "head_state_hz": config.head_state_hz,
@@ -2164,15 +2293,43 @@ def _base_report(
         "report_type": "cli_local_e2e_smoke_v1",
         "slice_pass": False,
         "overall_pass": False,
+        "overall_scope": _report_scope_for_status(status),
+        "current_pc_core_gate_pass": False,
         "ga_gate_pass": False,
+        "ga_gate_status": GA_GATE_STATUS,
+        "report_scope": _report_scope_for_status(status),
         "pc_local_e2e_status": status,
         "failure_reasons": failure_reasons,
-        "not_covered": NOT_COVERED,
+        "not_covered": list(NOT_COVERED),
+        "non_blocking_gaps": [],
         "botified_event_oracle": _unevaluated_botified_event_oracle(),
+        "gates": _default_gates(status),
     }
     for key in MANIFEST_REPORT_KEYS:
         report[key] = manifest_report.get(key)
     return report
+
+
+def _report_scope_for_status(status: str) -> str:
+    if status == "preflight_failed":
+        return "preflight"
+    if status.startswith("full_scene_matrix_"):
+        return CURRENT_PC_CORE_GATE_SCOPE
+    return "partial_smoke"
+
+
+def _default_gates(status: str) -> dict[str, Any]:
+    return {
+        "current_pc_core": {
+            "scope": CURRENT_PC_CORE_GATE_SCOPE,
+            "pass": False,
+            "status": "not_evaluated" if status != "preflight_failed" else "preflight_failed",
+        },
+        "ga": {
+            "pass": False,
+            "status": GA_GATE_STATUS,
+        },
+    }
 
 
 def _summarize_gaze_jsonl(

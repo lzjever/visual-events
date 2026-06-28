@@ -1104,7 +1104,7 @@ def test_full_scene_warmup_failure_fails_slice(tmp_path: Path) -> None:
     assert report["pc_local_e2e_status"] == "partial_smoke_failed"
 
 
-def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
+def test_all_scenes_full_scene_frame_counts_fail_core_without_scene_contracts(
     tmp_path: Path,
 ) -> None:
     module = import_runner_module()
@@ -1174,7 +1174,7 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
         runner=runner,
     )
 
-    assert rc == 0
+    assert rc == 1
     image_commands = [
         command
         for name, command in runner.command_history
@@ -1202,19 +1202,31 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
     assert [arg_value(command, "--min-count") for command in gaze_commands] == ["1", "1"]
 
     report = load_report(paths["out"])
-    assert report["pc_local_e2e_status"] == "full_scene_matrix_pass"
+    assert report["pc_local_e2e_status"] == "full_scene_matrix_failed"
     assert report["scene_replay_mode"] == "full_scene_matrix"
-    assert report["slice_pass"] is True
+    assert report["slice_pass"] is False
+    assert report["slice_matrix_pass"] is True
     assert report["overall_pass"] is False
+    assert report["current_pc_core_gate_pass"] is False
     assert report["ga_gate_pass"] is False
+    assert report["ga_gate_status"] == module.GA_GATE_STATUS
+    assert report["report_scope"] == "current_pc_core_gate"
+    assert report["overall_scope"] == "current_pc_core_gate"
     assert report["oracle_evaluated"] is True
-    assert report["oracle_evaluation_passed"] is True
+    assert report["oracle_evaluation_passed"] is False
+    assert "botified_event_oracle_missing_scene_contract:scene-a" in report[
+        "failure_reasons"
+    ]
+    assert "botified_event_oracle_missing_scene_contract:scene-b" in report[
+        "failure_reasons"
+    ]
     assert report["botified_event_oracle"] == {
         "evaluated": True,
-        "passed": True,
+        "passed": False,
         "scenes": [
             {
                 "scene": "scene-a",
+                "contract_present": False,
                 "observed": {},
                 "required": [],
                 "missing": [],
@@ -1223,6 +1235,7 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
             },
             {
                 "scene": "scene-b",
+                "contract_present": False,
                 "observed": {},
                 "required": [],
                 "missing": [],
@@ -1232,9 +1245,25 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
         ],
     }
     assert "full_scene_matrix" not in report["not_covered"]
-    assert "oracle" not in report["not_covered"]
+    assert "oracle" in report["not_covered"]
     for gap in ["latency_p95_p99", "fault_matrix", "soak", "release_report"]:
-        assert gap in report["not_covered"]
+        assert gap not in report["not_covered"]
+        assert gap in report["non_blocking_gaps"]
+    assert report["gates"]["current_pc_core"] == {
+        "scope": "full_scene_all_scenes_stationary_oracle",
+        "pass": False,
+        "scene_count": 2,
+        "frame_count": 5,
+        "slice_matrix_pass": True,
+        "oracle_evaluated": True,
+        "oracle_pass": False,
+        "stdout_pollution_count": 0,
+        "fresh_gaze_hz_pass": True,
+    }
+    assert report["gates"]["ga"] == {
+        "pass": False,
+        "status": module.GA_GATE_STATUS,
+    }
     assert [
         (
             result["scene"],
@@ -1244,13 +1273,43 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
             result["failure_reasons"],
             result["gaze"]["expected_count"],
             result["head_state"]["count"],
+            result["head_state"]["evidence_scope"],
+            result["head_state"]["partial_smoke_only"],
             result["botified_stdout"]["source"],
         )
         for result in report["scene_results"]
     ] == [
-        ("scene-a", 3, 3, True, [], 1, 3, "cli_stdout"),
-        ("scene-b", 2, 2, True, [], 1, 2, "cli_stdout"),
+        ("scene-a", 3, 3, True, [], 1, 3, "full_scene", False, "cli_stdout"),
+        ("scene-b", 2, 2, True, [], 1, 2, "full_scene", False, "cli_stdout"),
     ]
+
+
+def test_all_scenes_full_scene_requires_stationary_oracle_for_current_core(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_full_scene_matrix_runner(cli_stdout="")
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "moving"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "full_scene_matrix_failed"
+    assert report["slice_matrix_pass"] is True
+    assert report["slice_pass"] is False
+    assert report["overall_pass"] is False
+    assert report["current_pc_core_gate_pass"] is False
+    assert report["oracle_evaluated"] is False
+    assert report["oracle_evaluation_passed"] is None
+    assert "oracle" in report["not_covered"]
+    assert "botified_event_oracle_not_evaluated" in report["failure_reasons"]
+    assert report["gates"]["current_pc_core"]["slice_matrix_pass"] is True
+    assert report["gates"]["current_pc_core"]["oracle_evaluated"] is False
+    assert report["gates"]["current_pc_core"]["oracle_pass"] is False
 
 
 def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> None:
@@ -1266,13 +1325,18 @@ def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> N
 
     assert rc == 0
     report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "full_scene_matrix_pass"
     assert report["slice_pass"] is True
+    assert report["slice_matrix_pass"] is True
+    assert report["overall_pass"] is True
+    assert report["current_pc_core_gate_pass"] is True
     assert report["oracle_evaluated"] is True
     assert report["oracle_evaluation_passed"] is True
     assert "oracle" not in report["not_covered"]
     assert report["botified_event_oracle"]["scenes"] == [
         {
             "scene": "pic_hello",
+            "contract_present": True,
             "observed": {"person_waving": 1},
             "required": ["person_waving"],
             "missing": [],
@@ -1299,6 +1363,9 @@ def test_all_scenes_full_scene_botified_event_oracle_fails_missing_required(
     report = load_report(paths["out"])
     assert report["pc_local_e2e_status"] == "full_scene_matrix_failed"
     assert report["slice_pass"] is False
+    assert report["slice_matrix_pass"] is True
+    assert report["overall_pass"] is False
+    assert report["current_pc_core_gate_pass"] is False
     assert report["scene_results"][0]["slice_pass"] is True
     assert report["oracle_evaluated"] is True
     assert report["oracle_evaluation_passed"] is False
@@ -1306,6 +1373,7 @@ def test_all_scenes_full_scene_botified_event_oracle_fails_missing_required(
         "failure_reasons"
     ]
     scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["contract_present"] is True
     assert scene_oracle["missing"] == ["person_waving"]
     assert scene_oracle["forbidden_present"] == {}
     assert scene_oracle["order_violations"] == []
@@ -1334,6 +1402,7 @@ def test_all_scenes_full_scene_botified_event_oracle_fails_forbidden_present(
         "failure_reasons"
     ]
     scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["contract_present"] is True
     assert scene_oracle["missing"] == []
     assert scene_oracle["forbidden_present"] == {"person_waving": 1}
 
@@ -1363,6 +1432,7 @@ def test_all_scenes_full_scene_botified_event_oracle_fails_order_violation(
         in report["failure_reasons"]
     )
     scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["contract_present"] is True
     assert scene_oracle["missing"] == []
     assert scene_oracle["order_violations"] == [
         {
@@ -1462,6 +1532,9 @@ def test_all_scenes_matrix_failure_identifies_scene_and_keeps_other_results(
     assert report["pc_local_e2e_status"] == "full_scene_matrix_failed"
     assert report["scene_replay_mode"] == "full_scene_matrix"
     assert report["slice_pass"] is False
+    assert report["slice_matrix_pass"] is False
+    assert report["overall_pass"] is False
+    assert report["current_pc_core_gate_pass"] is False
     assert "scene_failed:scene-a" in report["failure_reasons"]
     assert [result["scene"] for result in report["scene_results"]] == [
         "scene-a",
@@ -3492,8 +3565,13 @@ def test_report_never_claims_full_ga_pass(tmp_path: Path) -> None:
     report = load_report(paths["out"])
     serialized = json.dumps(report, sort_keys=True).lower()
     assert report["overall_pass"] is False
+    assert report["current_pc_core_gate_pass"] is False
     assert report["ga_gate_pass"] is False
-    assert '"passed": true' not in serialized
+    assert report["ga_gate_status"] == module.GA_GATE_STATUS
+    assert report["report_scope"] == "partial_smoke"
+    assert report["overall_scope"] == "partial_smoke"
+    assert report["gates"]["current_pc_core"]["pass"] is False
+    assert report["gates"]["ga"]["pass"] is False
     assert '"full_pass": true' not in serialized
     assert '"ga_gate_pass": true' not in serialized
-    assert '"overall_pass": true' not in serialized
+    assert '"current_pc_core_gate_pass": true' not in serialized
