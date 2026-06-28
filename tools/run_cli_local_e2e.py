@@ -362,6 +362,8 @@ class CliLocalE2EConfig:
     logical_camera_name: str
     selected_scene: str
     scene_dir: Path
+    scene_replay_mode: str
+    selected_scene_frame_count: int
     frame_count: int
     image_hz: float
     head_state_mode: str
@@ -401,7 +403,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dds-source-camera-name", default="image")
     parser.add_argument("--logical-camera-name", default="front")
     parser.add_argument("--scene", default=None)
-    parser.add_argument("--frame-count", type=_positive_int, default=5)
+    parser.add_argument("--full-scene", action="store_true")
+    parser.add_argument("--frame-count", type=_positive_int, default=None)
     parser.add_argument("--image-hz", type=_positive_float, default=10.0)
     parser.add_argument(
         "--head-state",
@@ -412,7 +415,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--head-state-mode", choices=("required",), default="required")
     parser.add_argument("--head-state-segments", default=None)
     parser.add_argument("--head-state-hz", type=_positive_float, default=10.0)
-    parser.add_argument("--gaze-count", type=_positive_int, default=1)
+    parser.add_argument("--gaze-count", type=_positive_int, default=None)
     parser.add_argument("--gaze-timeout-ms", type=_positive_int, default=5000)
     parser.add_argument("--health-timeout-s", type=_positive_float, default=15.0)
     parser.add_argument("--health-interval-s", type=_positive_float, default=0.1)
@@ -731,8 +734,20 @@ def _build_config(
         raise PreflightError(f"scene directory not found: {scene_dir}")
     if not scene_dir.is_dir():
         raise PreflightError(f"scene is not a directory: {scene_dir}")
-    if not cli_local_e2e_manifest.jpeg_files(scene_dir):
+    selected_scene_frames = cli_local_e2e_manifest.jpeg_files(scene_dir)
+    if not selected_scene_frames:
         raise PreflightError(f"scene has no JPEG frames: {selected_scene}")
+    selected_scene_frame_count = len(selected_scene_frames)
+    if args.full_scene and args.frame_count is not None:
+        raise PreflightError("--full-scene cannot be combined with --frame-count")
+    scene_replay_mode = "full_scene" if args.full_scene else "partial"
+    if args.full_scene:
+        frame_count = selected_scene_frame_count
+        default_gaze_count = selected_scene_frame_count
+    else:
+        frame_count = args.frame_count or 5
+        default_gaze_count = 1
+    gaze_count = args.gaze_count if args.gaze_count is not None else default_gaze_count
     head_state_segment_names = _parse_head_state_segment_names(
         head_state=args.head_state,
         head_state_segments=args.head_state_segments,
@@ -759,19 +774,21 @@ def _build_config(
         logical_camera_name=args.logical_camera_name,
         selected_scene=selected_scene,
         scene_dir=scene_dir,
-        frame_count=args.frame_count,
+        scene_replay_mode=scene_replay_mode,
+        selected_scene_frame_count=selected_scene_frame_count,
+        frame_count=frame_count,
         image_hz=args.image_hz,
         head_state_mode=args.head_state_mode,
         head_state_segments=tuple(
             HeadStateSegment(
                 state=state,
-                frame_count=args.frame_count,
+                frame_count=frame_count,
                 head_state_hz=args.head_state_hz,
             )
             for state in head_state_segment_names
         ),
         head_state_hz=args.head_state_hz,
-        gaze_count=args.gaze_count,
+        gaze_count=gaze_count,
         gaze_timeout_ms=args.gaze_timeout_ms,
         health_timeout_s=args.health_timeout_s,
         health_interval_s=args.health_interval_s,
@@ -1294,6 +1311,8 @@ def _build_smoke_report(
             },
             "selected_scene": config.selected_scene,
             "selected_scene_dir": os.fspath(config.scene_dir),
+            "scene_replay_mode": config.scene_replay_mode,
+            "selected_scene_frame_count": config.selected_scene_frame_count,
             "published_frames": config.frame_count,
             "image_hz": config.image_hz,
             "head_state": {

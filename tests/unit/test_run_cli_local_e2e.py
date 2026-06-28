@@ -767,6 +767,162 @@ def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Pat
     ]
 
 
+def test_default_replay_mode_remains_partial_smoke_counts(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    write_frame(paths["data_dir"] / "scene-a" / "002.jpg")
+    write_frame(paths["data_dir"] / "scene-a" / "003.jpeg")
+    runner = successful_runner()
+
+    rc = module.main(base_argv(paths, "--head-state", "stationary"), runner=runner)
+
+    assert rc == 0
+    assert arg_value(runner.commands["image_publisher:stationary"], "--count") == "5"
+    assert arg_value(runner.commands["head_publisher:stationary"], "--count") == "5"
+    assert arg_value(runner.commands["gaze_subscriber"], "--count") == "1"
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
+    assert report["scene_replay_mode"] == "partial"
+    assert report["selected_scene_frame_count"] == 3
+    assert report["published_frames"] == 5
+    assert report["gaze"]["expected_count"] == 1
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+
+
+def test_full_scene_derives_frame_and_default_gaze_count_from_selected_scene(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    write_frame(paths["data_dir"] / "scene-a" / "002.jpg")
+    write_frame(paths["data_dir"] / "scene-a" / "003.jpeg")
+    write_frame(paths["data_dir"] / "scene-b" / "002.jpg")
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "tracking",
+                        "valid": True,
+                    },
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "lost",
+                        "valid": False,
+                    },
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "tracking",
+                        "valid": True,
+                    },
+                ),
+            )
+        }
+    )
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--full-scene",
+            "--scene",
+            "scene-a",
+            "--head-state",
+            "stationary",
+        ),
+        runner=runner,
+    )
+
+    assert rc == 0
+    assert arg_value(runner.commands["image_publisher:stationary"], "--count") == "3"
+    assert arg_value(runner.commands["head_publisher:stationary"], "--count") == "3"
+    assert arg_value(runner.commands["gaze_subscriber"], "--count") == "3"
+    report = load_report(paths["out"])
+    assert report["scene_replay_mode"] == "full_scene"
+    assert report["selected_scene_frame_count"] == 3
+    assert report["published_frames"] == 3
+    assert report["gaze"]["expected_count"] == 3
+    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+
+
+def test_full_scene_rejects_explicit_frame_count(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--frame-count", "5"),
+        runner=runner,
+    )
+
+    assert rc == 2
+    assert runner.events == []
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert any(
+        "--full-scene cannot be combined with --frame-count" in reason
+        for reason in report["failure_reasons"]
+    )
+
+
+def test_full_scene_default_gaze_count_shortfall_fails_slice(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    write_frame(paths["data_dir"] / "scene-a" / "002.jpg")
+    write_frame(paths["data_dir"] / "scene-a" / "003.jpeg")
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "tracking",
+                        "valid": True,
+                    },
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "lost",
+                        "valid": False,
+                    },
+                ),
+            )
+        }
+    )
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--full-scene",
+            "--scene",
+            "scene-a",
+            "--head-state",
+            "stationary",
+        ),
+        runner=runner,
+    )
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["scene_replay_mode"] == "full_scene"
+    assert report["selected_scene_frame_count"] == 3
+    assert report["published_frames"] == 3
+    assert report["gaze"]["expected_count"] == 3
+    assert report["gaze"]["accepted_count"] == 2
+    assert "gaze_target_count_shortfall:segment=stationary" in report["failure_reasons"]
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+    assert report["slice_pass"] is False
+
+
 def test_runtime_server_and_cli_do_not_inherit_ambient_python_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
