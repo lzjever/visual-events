@@ -1390,6 +1390,23 @@ def _write_warmup_jpeg(path: Path) -> None:
     image.save(path, format="JPEG", quality=75)
 
 
+def _runtime_identity_report(config: CliLocalE2EConfig) -> dict[str, Any]:
+    return {
+        "dds": {
+            "domain": config.dds_domain,
+            "network": config.dds_network,
+            "allow_non_loopback_dds": config.allow_non_loopback_dds,
+            "image_topic": config.image_topic,
+            "head_state_topic": config.head_state_topic,
+            "gaze_topic": config.gaze_topic,
+        },
+        "camera_names": {
+            "dds_source_camera_name": config.dds_source_camera_name,
+            "logical_camera_name": config.logical_camera_name,
+        },
+    }
+
+
 def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
     scene_names = _all_scene_names_from_effective_manifest(
         data_dir=config.data_dir,
@@ -1503,6 +1520,7 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
             "report_scope": CURRENT_PC_CORE_GATE_SCOPE,
             "overall_scope": CURRENT_PC_CORE_GATE_SCOPE,
             "scene_replay_mode": "full_scene_matrix",
+            **_runtime_identity_report(config),
             "scene_results": scene_reports,
             "botified_event_oracle": botified_event_oracle,
             "gaze_attention_oracle": gaze_attention_oracle,
@@ -1744,6 +1762,8 @@ def _matrix_scene_result(scene_report: dict[str, Any]) -> dict[str, Any]:
         "published_frames": scene_report.get("published_frames"),
         "slice_pass": scene_report.get("slice_pass"),
         "failure_reasons": scene_report.get("failure_reasons", []),
+        "dds": scene_report.get("dds"),
+        "camera_names": scene_report.get("camera_names"),
         "gaze": scene_report.get("gaze"),
         "head_state": scene_report.get("head_state"),
         "warmup": scene_report.get("warmup"),
@@ -2950,18 +2970,7 @@ def _build_smoke_report(
                     for result in segment_results
                 },
             },
-            "dds": {
-                "domain": config.dds_domain,
-                "network": config.dds_network,
-                "allow_non_loopback_dds": config.allow_non_loopback_dds,
-                "image_topic": config.image_topic,
-                "head_state_topic": config.head_state_topic,
-                "gaze_topic": config.gaze_topic,
-            },
-            "camera_names": {
-                "dds_source_camera_name": config.dds_source_camera_name,
-                "logical_camera_name": config.logical_camera_name,
-            },
+            **_runtime_identity_report(config),
             "selected_scene": config.selected_scene,
             "selected_scene_dir": os.fspath(config.scene_dir),
             "scene_replay_mode": config.scene_replay_mode,

@@ -1790,13 +1790,52 @@ def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> N
     runner = successful_full_scene_matrix_runner(cli_stdout=botified_frame("person_waving"))
 
     rc = module.main(
-        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        base_argv(
+            paths,
+            "--full-scene",
+            "--all-scenes",
+            "--head-state",
+            "stationary",
+            "--dds-source-camera-name",
+            "synthetic-image",
+            "--logical-camera-name",
+            "front",
+        ),
         runner=runner,
     )
 
     assert rc == 0
+    expected_camera_names = {
+        "dds_source_camera_name": "synthetic-image",
+        "logical_camera_name": "front",
+    }
+    expected_dds = {
+        "domain": 57,
+        "network": "lo",
+        "allow_non_loopback_dds": False,
+        "image_topic": "/camera/image/jpeg",
+        "head_state_topic": "/robot/head_state",
+        "gaze_topic": "/visual_events/gaze_target",
+    }
     report = load_report(paths["out"])
     assert report["pc_local_e2e_status"] == "full_scene_matrix_pass"
+    assert report["camera_names"] == expected_camera_names
+    assert report["dds"] == expected_dds
+    for scene_result in report["scene_results"]:
+        assert scene_result["camera_names"] == expected_camera_names
+        assert scene_result["dds"] == expected_dds
+        assert scene_result["report"]["camera_names"] == expected_camera_names
+        assert scene_result["report"]["dds"] == expected_dds
+    assert [
+        arg_value(command, "--camera-name")
+        for name, command in runner.command_history
+        if name.startswith("image_publisher:")
+    ] == ["synthetic-image", "synthetic-image"]
+    assert [
+        arg_value(command, "--camera")
+        for name, command in runner.command_history
+        if name == "cli"
+    ] == ["front"]
     assert report["slice_pass"] is True
     assert report["slice_matrix_pass"] is True
     assert report["overall_pass"] is True
