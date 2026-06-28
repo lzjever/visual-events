@@ -16,6 +16,21 @@ from visual_events_server.protocol import encode_frame_message
 
 JPEG_GLOBS = ("*.jpg", "*.jpeg")
 DEFAULT_OUT = Path("artifacts/visual-debug")
+_EVIDENCE_KEYS = (
+    "runtime_person_slot",
+    "visible_duration_ms",
+    "lost_duration_ms",
+    "wave_duration_ms",
+    "passing_speed_class",
+    "dx_ratio",
+    "avg_vx_px_s",
+    "bbox_area_ratio",
+    "area_growth_ratio",
+    "stationary_duration_ms",
+    "previous_track_id",
+    "target_track_id",
+    "switch_reason",
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -231,6 +246,12 @@ def _draw_header(canvas: Any, state: dict[str, Any]) -> None:
             f"{scene_flags.get('person_count', '-')}"
             f" stable={scene_flags.get('largest_person_stable', '-')}"
         )
+    scene_summary = _scene_context_summary(state.get("scene_context"))
+    if scene_summary != "-":
+        lines.append(_clip(scene_summary, 116))
+    reacquire_summary = _reacquire_summary(state.get("scene_context"))
+    if reacquire_summary != "-":
+        lines.append(_clip(reacquire_summary, 116))
     _draw_text_block(canvas, lines, origin=(10, 24))
 
 
@@ -241,10 +262,7 @@ def _draw_events(canvas: Any, state: dict[str, Any]) -> None:
     lines = []
     for event in events[:4]:
         if isinstance(event, dict):
-            lines.append(
-                f"{event.get('event', '-')}"
-                f" track={event.get('track_id', '-')}"
-            )
+            lines.append(_clip(_event_summary(event), 116))
     if lines:
         height = canvas.shape[0]
         _draw_text_block(canvas, lines, origin=(10, max(24, height - 24 * len(lines) - 8)))
@@ -344,6 +362,116 @@ def _fmt_float(value: Any) -> str:
     return "-"
 
 
+def _scene_context_summary(scene_context: Any) -> str:
+    if not isinstance(scene_context, dict):
+        return "-"
+
+    parts: list[str] = []
+    engagement = scene_context.get("engagement_state")
+    if engagement:
+        parts.append(f"engagement={_short(engagement)}")
+    reasons = _reasons_summary(scene_context.get("no_engage_reasons"))
+    if reasons:
+        parts.append(f"reasons={reasons}")
+    return " ".join(parts) if parts else "-"
+
+
+def _reacquire_summary(scene_context: Any) -> str:
+    if not isinstance(scene_context, dict):
+        return "-"
+    target_reacquired = scene_context.get("target_reacquired")
+    if not isinstance(target_reacquired, dict) or not target_reacquired:
+        return "-"
+
+    old_track = _short(target_reacquired.get("reacquired_from_track_id", "-"))
+    new_track = _short(target_reacquired.get("reacquired_to_track_id", "-"))
+    elapsed_ms = _short(target_reacquired.get("reacquire_elapsed_ms", "-"))
+    return f"reacq {old_track}->{new_track} elapsed_ms={elapsed_ms}"
+
+
+def _event_summary(event: Any) -> str:
+    if not isinstance(event, dict):
+        return "-"
+    evidence = _evidence_summary(event)
+    return (
+        f"{_short(event.get('event', '-'))}"
+        f" track={_short(event.get('track_id', '-'))}"
+        f" evidence={evidence}"
+    )
+
+
+def _evidence_summary(event: Any) -> str:
+    if not isinstance(event, dict) or not isinstance(event.get("evidence"), dict):
+        return "-"
+    evidence = event["evidence"]
+
+    items: list[str] = []
+    if "runtime_person_slot" in evidence:
+        items.append(f"runtime_person_slot={_short(evidence['runtime_person_slot'])}")
+
+    if (
+        "reacquired_from_track_id" in evidence
+        and "reacquired_to_track_id" in evidence
+    ):
+        items.append(
+            "reacq="
+            f"{_short(evidence['reacquired_from_track_id'])}"
+            f"->{_short(evidence['reacquired_to_track_id'])}"
+        )
+
+    if "reacquire_elapsed_ms" in evidence:
+        items.append(f"reacquire_elapsed_ms={_short(evidence['reacquire_elapsed_ms'])}")
+
+    for key in _EVIDENCE_KEYS:
+        if len(items) >= 4:
+            break
+        if key in evidence and not any(item.startswith(f"{key}=") for item in items):
+            items.append(f"{key}={_short(evidence[key])}")
+
+    return " ".join(items) if items else "-"
+
+
+def _reasons_summary(value: Any) -> str:
+    if isinstance(value, list):
+        reasons = [_short(item, 28) for item in value[:3] if item]
+        if len(value) > 3:
+            reasons.append(f"+{len(value) - 3}")
+        return ",".join(reasons)
+    if not value:
+        return ""
+    return _short(value, 40)
+
+
+def _short(value: Any, max_chars: int = 36) -> str:
+    if value is None:
+        text = "-"
+    elif isinstance(value, float):
+        text = f"{float(value):.2f}".rstrip("0").rstrip(".")
+    elif isinstance(value, list):
+        text = "[" + ",".join(_short(item, 12) for item in value[:3])
+        text += ",...]" if len(value) > 3 else "]"
+    else:
+        text = str(value)
+    return _clip(text, max_chars)
+
+
+def _clip(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)] + "..."
+
+
+def _list_len(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _engagement_state(scene_context: Any) -> str:
+    if not isinstance(scene_context, dict):
+        return "-"
+    engagement = scene_context.get("engagement_state")
+    return _short(engagement, 32) if engagement else "-"
+
+
 def _progress_line(
     index: int,
     total: int,
@@ -357,9 +485,10 @@ def _progress_line(
     events = response.get("semantic_events")
     return (
         f"[{index}/{total}] {image_path.name}: "
-        f"tracks={len(tracks) if isinstance(tracks, list) else 0} "
+        f"tracks={_list_len(tracks)} "
         f"attention={attention.get('target_track_id') if isinstance(attention, dict) else '-'} "
-        f"events={len(events) if isinstance(events, list) else 0}"
+        f"engagement={_engagement_state(response.get('scene_context'))} "
+        f"events={_list_len(events)}"
     )
 
 
@@ -404,21 +533,25 @@ def _render_html(
 def _render_card(root: Path, result: dict[str, Any]) -> str:
     response = result["response"]
     events = response.get("semantic_events")
-    event_names = []
+    event_summaries = []
     if isinstance(events, list):
-        event_names = [str(event.get("event", "-")) for event in events if isinstance(event, dict)]
+        event_summaries = [_event_summary(event) for event in events if isinstance(event, dict)]
     attention = response.get("attention")
     attention_text = "-"
     if isinstance(attention, dict):
         attention_text = str(attention.get("target_track_id", "-"))
+    scene_summary = _scene_context_summary(response.get("scene_context"))
+    reacquire_summary = _reacquire_summary(response.get("scene_context"))
     state_json = json.dumps(response, ensure_ascii=False, indent=2)
     return f"""<div class="card">
   <img src="{html.escape(_rel(root, result["output_image"]))}" alt="frame {result["index"]}">
   <div class="caption">
     #{result["index"]} {html.escape(result["source"].name)}
-    | tracks={len(response.get("tracks", []))}
+    | tracks={_list_len(response.get("tracks"))}
     | attention={html.escape(attention_text)}
-    | events={html.escape(", ".join(event_names) if event_names else "-")}
+    | scene={html.escape(scene_summary)}
+    | reacq={html.escape(reacquire_summary)}
+    | events={html.escape("; ".join(event_summaries) if event_summaries else "-")}
     | <a href="{html.escape(_rel(root, result["output_state"]))}">json</a>
   </div>
   <details><summary>visual_state</summary><pre>{html.escape(state_json)}</pre></details>

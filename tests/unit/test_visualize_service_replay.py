@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from tools.visualize_service_replay import (
+    _engagement_state,
+    _event_summary,
+    _evidence_summary,
+    _progress_line,
+    _reacquire_summary,
+    _render_html,
+    _scene_context_summary,
+)
+
+
+def _visual_state() -> dict:
+    return {
+        "frame_id": 12,
+        "camera": "front",
+        "tracks": [{"track_id": 7, "lost_ms": 0}],
+        "attention": {"target_track_id": 7},
+        "scene_context": {
+            "engagement_state": "no_engage_target",
+            "attention_available": False,
+            "target_track_id": 7,
+            "no_engage_reasons": ["too_far", "camera_motion_not_stationary"],
+            "target_reacquired": {
+                "runtime_person_slot": 2,
+                "reacquired_from_track_id": 4,
+                "reacquired_to_track_id": 7,
+                "reacquire_elapsed_ms": 850,
+                "reacquire_center_distance_px": 13.42,
+            },
+        },
+        "semantic_events": [
+            {
+                "type": "semantic_event",
+                "event": "person_waving",
+                "track_id": 7,
+                "evidence": {
+                    "runtime_person_slot": 2,
+                    "wave_duration_ms": 1200,
+                    "wrist_x_span_bbox_ratio": 0.42,
+                    "keypoint_min_confidence": 0.81,
+                    "reacquired_from_track_id": 4,
+                    "reacquired_to_track_id": 7,
+                    "reacquire_elapsed_ms": 850,
+                    "long_debug_text": "x" * 200,
+                },
+            }
+        ],
+    }
+
+
+def test_visual_debug_helpers_summarize_scene_reacquire_and_evidence() -> None:
+    state = _visual_state()
+    event = state["semantic_events"][0]
+
+    assert (
+        _scene_context_summary(state["scene_context"])
+        == "engagement=no_engage_target reasons=too_far,camera_motion_not_stationary"
+    )
+    assert _engagement_state(state["scene_context"]) == "no_engage_target"
+    assert _reacquire_summary(state["scene_context"]) == "reacq 4->7 elapsed_ms=850"
+
+    evidence = _evidence_summary(event)
+    assert "runtime_person_slot=2" in evidence
+    assert "reacq=4->7" in evidence
+    assert "reacquire_elapsed_ms=850" in evidence
+    assert "wave_duration_ms=1200" in evidence
+    assert "long_debug_text" not in evidence
+
+    event_summary = _event_summary(event)
+    assert "person_waving track=7" in event_summary
+    assert (
+        "evidence=runtime_person_slot=2 reacq=4->7 "
+        "reacquire_elapsed_ms=850 wave_duration_ms=1200"
+    ) in event_summary
+
+
+def test_visual_debug_html_and_progress_include_short_summaries(tmp_path: Path) -> None:
+    state = _visual_state()
+    args = argparse.Namespace(
+        out=tmp_path,
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene=Path("fixtures/scene"),
+    )
+    result = {
+        "index": 1,
+        "source": Path("frame_001.jpg"),
+        "output_image": tmp_path / "frames" / "frame_001.jpg",
+        "output_state": tmp_path / "states" / "frame_001.json",
+        "response": state,
+    }
+
+    rendered = _render_html(args, [result], tmp_path / "visual_state.jsonl")
+
+    assert "scene=engagement=no_engage_target reasons=too_far,camera_motion_not_stationary" in rendered
+    assert "reacq=reacq 4-&gt;7 elapsed_ms=850" in rendered
+    assert (
+        "person_waving track=7 evidence=runtime_person_slot=2 reacq=4-&gt;7 "
+        "reacquire_elapsed_ms=850 wave_duration_ms=1200"
+    ) in rendered
+    assert "<details><summary>visual_state</summary>" in rendered
+
+    progress = _progress_line(1, 3, Path("frame_001.jpg"), state)
+    assert progress == (
+        "[1/3] frame_001.jpg: tracks=1 attention=7 "
+        "engagement=no_engage_target events=1"
+    )
+
+
+def test_visual_debug_helpers_tolerate_missing_fields() -> None:
+    assert _scene_context_summary(None) == "-"
+    assert _scene_context_summary({}) == "-"
+    assert _engagement_state({}) == "-"
+    assert _reacquire_summary({}) == "-"
+    assert _evidence_summary({"event": "person_waving"}) == "-"
+    assert _evidence_summary({"evidence": "not-a-dict"}) == "-"
+    assert _event_summary({"event": "person_left"}) == "person_left track=- evidence=-"
+
+    progress = _progress_line(1, 1, Path("frame.jpg"), {"semantic_events": "bad"})
+    assert progress == "[1/1] frame.jpg: tracks=0 attention=- engagement=- events=0"
