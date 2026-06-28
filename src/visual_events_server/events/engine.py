@@ -365,11 +365,22 @@ class EventEngine:
         dx = _center_x(current.bbox_xyxy) - _center_x(reference.bbox_xyxy)
         dx_ratio = abs(dx) / float(frame.width) if frame.width > 0 else 0.0
         avg_vx = dx / (duration_ms / 1000.0) if duration_ms > 0 else 0.0
+        crossed_side_bands = self._crossed_side_bands(reference, current, frame)
+        swept_ltr_fallback = (
+            dx > 0.0
+            and crossed_side_bands
+            and self._bbox_swept_dx_ratio(reference, current, frame)
+            >= self.config.passing_min_dx_ratio
+        )
+        has_lateral_evidence = (
+            dx_ratio >= self.config.passing_min_dx_ratio
+            or swept_ltr_fallback
+        )
         if (
-            dx_ratio < self.config.passing_min_dx_ratio
+            not has_lateral_evidence
             or abs(avg_vx) < self.config.passing_min_abs_vx_px_s
             or self._entered_stopped_near_state(history, frame)
-            or not self._crossed_side_bands(reference, current, frame)
+            or not crossed_side_bands
         ):
             self._clear_active(track.track_id, event)
             return None
@@ -597,6 +608,23 @@ class EventEngine:
             return start_x <= left_band and end_x >= right_band
         return start_x >= right_band and end_x <= left_band
 
+    def _bbox_swept_dx_ratio(
+        self,
+        reference: _Observation,
+        current: _Observation,
+        frame: FrameMessage,
+    ) -> float:
+        width = float(frame.width)
+        if width <= 0.0:
+            return 0.0
+        ref_x1, _, ref_x2, _ = reference.bbox_xyxy
+        cur_x1, _, cur_x2, _ = current.bbox_xyxy
+        if _center_x(current.bbox_xyxy) > _center_x(reference.bbox_xyxy):
+            swept_dx = float(cur_x2) - float(ref_x1)
+        else:
+            swept_dx = float(ref_x2) - float(cur_x1)
+        return max(0.0, swept_dx) / width
+
     def _area_trend_is_steady(
         self,
         history: list[_Observation],
@@ -605,17 +633,43 @@ class EventEngine:
         since_ms: int,
     ) -> bool:
         image_area = float(frame.width) * float(frame.height)
+        observations = [
+            observation for observation in history if observation.timestamp_ms >= since_ms
+        ]
         ratios = [
             _area_ratio(observation.bbox_xyxy, image_area=image_area)
-            for observation in history
-            if observation.timestamp_ms >= since_ms
+            for observation in observations
         ]
         if len(ratios) < 2:
             return False
-        drops = sum(
-            1 for index in range(1, len(ratios)) if ratios[index] < ratios[index - 1] - 0.002
+        drop_epsilon = 0.002
+        drops = [
+            ratios[index - 1] - ratios[index]
+            for index in range(1, len(ratios))
+            if ratios[index] < ratios[index - 1] - drop_epsilon
+        ]
+        if not drops and ratios[-1] >= max(ratios[:-1]):
+            return True
+
+        net_gain = ratios[-1] - ratios[0]
+        if net_gain <= 0.0:
+            return False
+        jitter_min_current_area = max(
+            self.config.approach_min_current_area,
+            self.config.near_area_ratio * 0.72,
         )
-        return drops == 0 and ratios[-1] >= max(ratios[:-1])
+        if ratios[-1] < jitter_min_current_area:
+            return False
+        peak_gap = max(ratios) - ratios[-1]
+        peak_gap_limit = max(0.003, min(0.006, net_gain * 0.15))
+        total_drop_limit = max(0.006, min(0.012, net_gain * 0.35))
+        single_drop_limit = max(0.004, min(0.008, net_gain * 0.25))
+        return (
+            len(drops) <= 2
+            and peak_gap <= peak_gap_limit
+            and sum(drops) <= total_drop_limit
+            and max(drops, default=0.0) <= single_drop_limit
+        )
 
     def _near_and_slow(self, observation: _Observation, frame: FrameMessage) -> bool:
         vx, vy = observation.velocity_uv_s

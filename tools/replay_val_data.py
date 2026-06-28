@@ -78,6 +78,37 @@ _SCENE_EVENT_ORDER_REQUIREMENTS = {
         ("person_approaching_robot", "person_stopped_near_robot"),
     ),
 }
+_BOTIFIED_EVENT_ORACLE_IGNORED_EVENTS = {"attention_target_changed"}
+
+
+def botified_event_oracle_facts(scene: str, head_motion: str) -> dict[str, Any]:
+    required_events = set(_SCENE_EXPECTED_EVENTS.get(scene, set()))
+    required_events -= _BOTIFIED_EVENT_ORACLE_IGNORED_EVENTS
+    if head_motion != "stationary":
+        required_events -= _MOTION_SENSITIVE_EVENT_TYPES
+
+    forbidden_events = set(_SCENE_UNEXPECTED_EVENTS.get(scene, set()))
+    forbidden_events -= _BOTIFIED_EVENT_ORACLE_IGNORED_EVENTS
+
+    order_requirements: list[tuple[str, str]] = []
+    for before_event, after_event in _SCENE_EVENT_ORDER_REQUIREMENTS.get(scene, ()):
+        if (
+            before_event in _BOTIFIED_EVENT_ORACLE_IGNORED_EVENTS
+            or after_event in _BOTIFIED_EVENT_ORACLE_IGNORED_EVENTS
+        ):
+            continue
+        if head_motion != "stationary" and (
+            before_event in _MOTION_SENSITIVE_EVENT_TYPES
+            or after_event in _MOTION_SENSITIVE_EVENT_TYPES
+        ):
+            continue
+        order_requirements.append((before_event, after_event))
+
+    return {
+        "required_events": sorted(required_events),
+        "forbidden_events": sorted(forbidden_events),
+        "order_requirements": sorted(order_requirements),
+    }
 
 
 @dataclass(frozen=True)

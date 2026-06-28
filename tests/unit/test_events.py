@@ -243,6 +243,79 @@ def test_person_passing_by_requires_stationary_lateral_history():
     assert events_of(events, "person_passing_by")[0]["duration_ms"] == 1000
 
 
+def test_person_passing_by_accepts_late_left_reference_crossing_side_bands():
+    subject = EventEngine()
+    subject.update(
+        frame(frame_id=1, timestamp_ms=1000),
+        [
+            track(
+                1,
+                timestamp_ms=1000,
+                bbox_xyxy=(268.0, 200.0, 428.0, 500.0),
+            )
+        ],
+        attention(1),
+    )
+
+    events = subject.update(
+        frame(frame_id=2, timestamp_ms=2000),
+        [
+            track(
+                1,
+                timestamp_ms=2000,
+                bbox_xyxy=(692.0, 200.0, 852.0, 500.0),
+                velocity_uv_s=(424.0, 0.0),
+            )
+        ],
+        attention(1),
+    )
+
+    assert "person_passing_by" in event_names(events)
+
+
+def test_person_passing_by_rejects_right_to_left_swept_bbox_before_center_threshold():
+    subject = EventEngine()
+    subject.update(
+        frame(frame_id=1, timestamp_ms=1000, width=1280, height=720),
+        [
+            track(
+                1,
+                timestamp_ms=1000,
+                bbox_xyxy=(843.0, 25.0, 947.0, 461.0),
+            )
+        ],
+        attention(1),
+    )
+
+    early = subject.update(
+        frame(frame_id=2, timestamp_ms=2200, width=1280, height=720),
+        [
+            track(
+                1,
+                timestamp_ms=2200,
+                bbox_xyxy=(350.0, 25.0, 464.0, 455.0),
+                velocity_uv_s=(-400.0, 0.0),
+            )
+        ],
+        attention(1),
+    )
+    later = subject.update(
+        frame(frame_id=3, timestamp_ms=2600, width=1280, height=720),
+        [
+            track(
+                1,
+                timestamp_ms=2600,
+                bbox_xyxy=(230.0, 25.0, 370.0, 455.0),
+                velocity_uv_s=(-400.0, 0.0),
+            )
+        ],
+        attention(1),
+    )
+
+    assert "person_passing_by" not in event_names(early)
+    assert "person_passing_by" in event_names(later)
+
+
 def test_person_passing_by_rejects_short_or_near_stationary_motion():
     subject = EventEngine()
     subject.update(
@@ -265,6 +338,27 @@ def test_person_passing_by_rejects_short_or_near_stationary_motion():
     )
 
     assert "person_passing_by" not in event_names(short)
+
+    near_stationary_subject = EventEngine()
+    near_stationary_subject.update(
+        frame(frame_id=1, timestamp_ms=1000),
+        [track(1, timestamp_ms=1000, bbox_xyxy=(320.0, 200.0, 480.0, 500.0))],
+        attention(1),
+    )
+    near_stationary = near_stationary_subject.update(
+        frame(frame_id=2, timestamp_ms=2500),
+        [
+            track(
+                1,
+                timestamp_ms=2500,
+                bbox_xyxy=(340.0, 200.0, 500.0, 500.0),
+                velocity_uv_s=(13.0, 0.0),
+            )
+        ],
+        attention(1),
+    )
+
+    assert "person_passing_by" not in event_names(near_stationary)
 
 
 def test_person_approaching_robot_requires_area_growth_not_pure_sideways_motion():
@@ -295,6 +389,97 @@ def test_person_approaching_robot_requires_area_growth_not_pure_sideways_motion(
 
     assert "person_approaching_robot" in event_names(events)
     assert "person_approaching_robot" not in event_names(sideways)
+
+
+def test_person_approaching_robot_tolerates_small_bbox_area_jitter_before_stopped():
+    subject = EventEngine()
+    emitted: list[dict] = []
+    boxes = (
+        (405.0, 200.0, 595.0, 390.0),
+        (385.0, 180.0, 615.0, 410.0),
+        (390.0, 185.0, 610.0, 405.0),
+        (370.0, 165.0, 630.0, 425.0),
+        (375.0, 170.0, 625.0, 420.0),
+        (355.0, 150.0, 645.0, 440.0),
+        (355.0, 150.0, 645.0, 440.0),
+        (355.0, 150.0, 645.0, 440.0),
+        (355.0, 150.0, 645.0, 440.0),
+    )
+    for index, bbox_xyxy in enumerate(boxes):
+        timestamp_ms = 1000 + (index * 100)
+        if index >= 6:
+            timestamp_ms += (index - 5) * 400
+        emitted.extend(
+            subject.update(
+                frame(frame_id=index + 1, timestamp_ms=timestamp_ms),
+                [
+                    track(
+                        1,
+                        timestamp_ms=timestamp_ms,
+                        bbox_xyxy=bbox_xyxy,
+                        velocity_uv_s=(5.0, 0.0),
+                    )
+                ],
+                attention(1),
+            )
+        )
+
+    names = event_names(emitted)
+
+    assert "person_approaching_robot" in names
+    if "person_stopped_near_robot" in names:
+        assert names.index("person_approaching_robot") < names.index(
+            "person_stopped_near_robot"
+        )
+
+
+def test_person_approaching_robot_rejects_short_early_jitter_window():
+    subject = EventEngine()
+    samples = (
+        (1000, (0.0, 214.8, 73.7, 456.5)),
+        (1379, (0.0, 151.7, 105.9, 458.7)),
+        (1421, (0.0, 152.2, 105.8, 457.6)),
+        (1519, (0.0, 156.7, 99.0, 453.6)),
+        (1594, (0.0, 144.6, 101.3, 475.1)),
+        (1927, (0.0, 129.4, 132.4, 470.3)),
+        (1949, (0.0, 125.8, 139.1, 472.5)),
+        (1963, (0.0, 125.0, 129.6, 471.5)),
+        (1997, (0.0, 125.7, 127.8, 471.3)),
+        (2094, (0.0, 106.8, 153.7, 464.6)),
+    )
+
+    emitted_by_frame: list[tuple[int, list[str]]] = []
+    for index, (timestamp_ms, bbox_xyxy) in enumerate(samples, start=1):
+        events = subject.update(
+            frame(
+                frame_id=index,
+                timestamp_ms=timestamp_ms,
+                width=1280,
+                height=720,
+            ),
+            [
+                track(
+                    1,
+                    timestamp_ms=timestamp_ms,
+                    first_seen_ms=1000,
+                    bbox_xyxy=bbox_xyxy,
+                    velocity_uv_s=(45.0, 0.0),
+                )
+            ],
+            attention(1),
+        )
+        emitted_by_frame.append((index, event_names(events)))
+
+    early_names = [
+        name
+        for frame_id, names in emitted_by_frame
+        if frame_id <= 5
+        for name in names
+    ]
+    all_names = [name for _, names in emitted_by_frame for name in names]
+
+    assert "person_approaching_robot" not in early_names
+    assert "person_approaching_robot" in all_names
 
 
 def test_person_stopped_near_robot_requires_near_low_speed_duration_and_rising_edge():

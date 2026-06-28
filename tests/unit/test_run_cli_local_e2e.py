@@ -379,6 +379,18 @@ def make_case(tmp_path: Path) -> dict[str, Path]:
     }
 
 
+def replace_scenes(paths: dict[str, Path], scene_names: list[str]) -> None:
+    data_dir = paths["data_dir"]
+    for scene_dir in list(data_dir.iterdir()):
+        if not scene_dir.is_dir():
+            continue
+        for frame in scene_dir.iterdir():
+            frame.unlink()
+        scene_dir.rmdir()
+    for scene_name in scene_names:
+        write_frame(data_dir / scene_name / "001.jpg")
+
+
 def authoritative_manifest_for_data(manifest_module: Any, data_dir: Path) -> dict[str, Any]:
     inventory = manifest_module.generate_effective_manifest(data_dir)
     return {
@@ -525,6 +537,37 @@ def gaze_jsonl(*payloads: dict[str, Any]) -> str:
     return "".join(
         json.dumps(payload, separators=(",", ":")) + "\n"
         for payload in payloads
+    )
+
+
+def successful_full_scene_gaze_result() -> FakeResult:
+    return FakeResult(
+        0,
+        stdout=gaze_jsonl(
+            {
+                "type": "gaze_target",
+                "camera": "front",
+                "state": "tracking",
+                "valid": True,
+                "frame_timestamp_ms": 990,
+                "publish_timestamp_ms": 1000,
+            },
+            {
+                "type": "gaze_target",
+                "camera": "front",
+                "state": "lost",
+                "valid": False,
+                "frame_timestamp_ms": 1090,
+                "publish_timestamp_ms": 1100,
+            },
+        ),
+    )
+
+
+def successful_full_scene_matrix_runner(*, cli_stdout: str) -> FakeRunner:
+    return FakeRunner(
+        sync_results={"gaze_subscriber": successful_full_scene_gaze_result()},
+        process_results={"cli": FakeResult(0, stdout=cli_stdout)},
     )
 
 
@@ -862,6 +905,18 @@ def test_full_scene_uses_duration_gaze_collection_not_frame_count(
     )
 
     assert rc == 0
+    assert runner.events.index(("start", "head_publisher:warmup")) < runner.events.index(
+        ("run_sync", "image_publisher:warmup")
+    )
+    assert runner.events.index(("run_sync", "image_publisher:warmup")) < runner.events.index(
+        ("start", "gaze_subscriber")
+    )
+    assert runner.events.index(("wait", "head_publisher:warmup")) < runner.events.index(
+        ("start", "gaze_subscriber")
+    )
+    assert arg_value(runner.commands["image_publisher:warmup"], "--count") == "1"
+    assert arg_value(runner.commands["head_publisher:warmup"], "--state") == "stationary"
+    assert arg_value(runner.commands["head_publisher:warmup"], "--count") == "1"
     assert arg_value(runner.commands["image_publisher:stationary"], "--count") == "3"
     assert arg_value(runner.commands["head_publisher:stationary"], "--count") == "3"
     assert arg_value(runner.commands["gaze_subscriber"], "--count") is None
@@ -871,6 +926,12 @@ def test_full_scene_uses_duration_gaze_collection_not_frame_count(
     assert report["scene_replay_mode"] == "full_scene"
     assert report["selected_scene_frame_count"] == 3
     assert report["published_frames"] == 3
+    assert report["warmup"] == {
+        "enabled": True,
+        "passed": True,
+        "failure_reason": None,
+        "count": 1,
+    }
     assert report["gaze"]["expected_count"] == 1
     assert report["pc_local_e2e_status"] == "partial_smoke_pass"
     assert report["overall_pass"] is False
@@ -1007,6 +1068,42 @@ def test_full_scene_duration_requires_available_fresh_gaze_rate(
     assert report["slice_pass"] is False
 
 
+def test_full_scene_warmup_failure_fails_slice(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    write_frame(paths["data_dir"] / "scene-a" / "002.jpg")
+    runner = FakeRunner(
+        sync_results={
+            "image_publisher:warmup": FakeResult(5, stderr="warmup image failed"),
+            "gaze_subscriber": successful_full_scene_gaze_result(),
+        }
+    )
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--full-scene",
+            "--scene",
+            "scene-a",
+            "--head-state",
+            "stationary",
+        ),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["warmup"] == {
+        "enabled": True,
+        "passed": False,
+        "failure_reason": "warmup_image_publisher_failed",
+        "count": 1,
+    }
+    assert "warmup_failed:warmup_image_publisher_failed" in report["failure_reasons"]
+    assert report["slice_pass"] is False
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+
+
 def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
     tmp_path: Path,
 ) -> None:
@@ -1110,10 +1207,33 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
     assert report["slice_pass"] is True
     assert report["overall_pass"] is False
     assert report["ga_gate_pass"] is False
-    assert report["oracle_evaluated"] is False
-    assert report["oracle_evaluation_passed"] is None
+    assert report["oracle_evaluated"] is True
+    assert report["oracle_evaluation_passed"] is True
+    assert report["botified_event_oracle"] == {
+        "evaluated": True,
+        "passed": True,
+        "scenes": [
+            {
+                "scene": "scene-a",
+                "observed": {},
+                "required": [],
+                "missing": [],
+                "forbidden_present": {},
+                "order_violations": [],
+            },
+            {
+                "scene": "scene-b",
+                "observed": {},
+                "required": [],
+                "missing": [],
+                "forbidden_present": {},
+                "order_violations": [],
+            },
+        ],
+    }
     assert "full_scene_matrix" not in report["not_covered"]
-    for gap in ["oracle", "latency_p95_p99", "fault_matrix", "soak", "release_report"]:
+    assert "oracle" not in report["not_covered"]
+    for gap in ["latency_p95_p99", "fault_matrix", "soak", "release_report"]:
         assert gap in report["not_covered"]
     assert [
         (
@@ -1130,6 +1250,127 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
     ] == [
         ("scene-a", 3, 3, True, [], 1, 3, "cli_stdout"),
         ("scene-b", 2, 2, True, [], 1, 2, "cli_stdout"),
+    ]
+
+
+def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    runner = successful_full_scene_matrix_runner(cli_stdout=botified_frame("person_waving"))
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is True
+    assert report["oracle_evaluated"] is True
+    assert report["oracle_evaluation_passed"] is True
+    assert "oracle" not in report["not_covered"]
+    assert report["botified_event_oracle"]["scenes"] == [
+        {
+            "scene": "pic_hello",
+            "observed": {"person_waving": 1},
+            "required": ["person_waving"],
+            "missing": [],
+            "forbidden_present": {},
+            "order_violations": [],
+        }
+    ]
+
+
+def test_all_scenes_full_scene_botified_event_oracle_fails_missing_required(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    runner = successful_full_scene_matrix_runner(cli_stdout="")
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "full_scene_matrix_failed"
+    assert report["slice_pass"] is False
+    assert report["scene_results"][0]["slice_pass"] is True
+    assert report["oracle_evaluated"] is True
+    assert report["oracle_evaluation_passed"] is False
+    assert "botified_event_oracle_missing:pic_hello:person_waving" in report[
+        "failure_reasons"
+    ]
+    scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["missing"] == ["person_waving"]
+    assert scene_oracle["forbidden_present"] == {}
+    assert scene_oracle["order_violations"] == []
+
+
+def test_all_scenes_full_scene_botified_event_oracle_fails_forbidden_present(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_leave"])
+    runner = successful_full_scene_matrix_runner(
+        cli_stdout=botified_frame("person_left")
+        + botified_frame("person_waving", event_id="front:evt_000457")
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["oracle_evaluation_passed"] is False
+    assert "botified_event_oracle_forbidden:pic_leave:person_waving" in report[
+        "failure_reasons"
+    ]
+    scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["missing"] == []
+    assert scene_oracle["forbidden_present"] == {"person_waving": 1}
+
+
+def test_all_scenes_full_scene_botified_event_oracle_fails_order_violation(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_walk_in_stop"])
+    runner = successful_full_scene_matrix_runner(
+        cli_stdout=botified_frame("person_stopped_near_robot")
+        + botified_frame("person_approaching_robot", event_id="front:evt_000457")
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["oracle_evaluation_passed"] is False
+    assert (
+        "botified_event_oracle_order:"
+        "pic_walk_in_stop:person_approaching_robot_before_person_stopped_near_robot"
+        in report["failure_reasons"]
+    )
+    scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["missing"] == []
+    assert scene_oracle["order_violations"] == [
+        {
+            "before_event": "person_approaching_robot",
+            "after_event": "person_stopped_near_robot",
+            "before_line": 2,
+            "after_line": 1,
+        }
     ]
 
 
@@ -1818,6 +2059,12 @@ def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -
     assert report["ga_gate_pass"] is False
     assert report["pc_local_e2e_status"] == "partial_smoke_pass"
     assert report["failure_reasons"] == []
+    assert report["warmup"] == {
+        "enabled": False,
+        "passed": None,
+        "failure_reason": None,
+        "count": 0,
+    }
     assert report["manifest_source"] == "generated"
     assert report["scene_count"] == 2
     assert report["selected_scene"] == "scene-a"
@@ -1841,6 +2088,7 @@ def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -
         "parse_error_count": 0,
         "forbidden_event_count": 0,
         "event_counts": {},
+        "event_sequence": [],
         "first_frame": None,
         "last_frame": None,
         "collection_truncated": False,
@@ -2904,6 +3152,7 @@ def test_botified_stdout_valid_frame_is_reported_without_required_count(tmp_path
     assert botified["frame_count"] == 1
     assert botified["allowed_frame_count"] == 1
     assert botified["event_counts"] == {"person_waving": 1}
+    assert botified["event_sequence"] == [{"line": 1, "event": "person_waving"}]
     assert botified["pollution_count"] == 0
     assert botified["parse_error_count"] == 0
     assert botified["forbidden_event_count"] == 0

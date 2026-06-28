@@ -21,6 +21,7 @@ from typing import Any, Protocol
 try:
     from tools import runtime_provenance
     from tools import cli_local_e2e_manifest
+    from tools import replay_val_data
     from tools.dds_pc_tools import (
         DEFAULT_BUILD_DIR,
         DEFAULT_CAMERA_TOPIC,
@@ -32,6 +33,7 @@ try:
 except ModuleNotFoundError:
     import runtime_provenance  # type: ignore[no-redef]
     import cli_local_e2e_manifest  # type: ignore[no-redef]
+    import replay_val_data  # type: ignore[no-redef]
     from dds_pc_tools import (  # type: ignore[no-redef]
         DEFAULT_BUILD_DIR,
         DEFAULT_CAMERA_TOPIC,
@@ -150,6 +152,17 @@ class SegmentSmokeResult:
 class SmokeRunResult:
     report: dict[str, Any]
     rc: int
+
+
+@dataclass(frozen=True)
+class WarmupResult:
+    enabled: bool
+    passed: bool | None
+    failure_reason: str | None = None
+    count: int = 0
+    image_dir: Path | None = None
+    image_result: CommandResult | None = None
+    head_result: CommandResult | None = None
 
 
 class ProcessLike(Protocol):
@@ -897,6 +910,7 @@ def _run_smoke_result(
             segment.state: image_command for segment in config.head_state_segments
         },
     }
+    warmup_result = WarmupResult(enabled=False, passed=None)
     failure_reasons: list[str] = []
     server_process: ProcessLike | None = None
     cli_process: ProcessLike | None = None
@@ -933,6 +947,17 @@ def _run_smoke_result(
                 name="cli",
             )
             runner.sleep(config.startup_grace_s)
+            warmup_result, warmup_commands = _run_full_scene_warmup(
+                config,
+                runner,
+                orchestration_env=orchestration_env,
+            )
+            if warmup_commands is not None:
+                commands["warmup"] = warmup_commands
+            if warmup_result.enabled and not warmup_result.passed:
+                failure_reasons.append(
+                    f"warmup_failed:{warmup_result.failure_reason or 'unknown'}"
+                )
             for segment in config.head_state_segments:
                 segment_suffix = f":segment={segment.state}"
                 gaze_process = runner.start_process(
@@ -1076,8 +1101,132 @@ def _run_smoke_result(
         segment_results=segment_results,
         gaze_summary=gaze_summary,
         botified_stdout=botified_stdout,
+        warmup_result=warmup_result,
     )
     return SmokeRunResult(report=report, rc=0 if slice_pass else 1)
+
+
+def _run_full_scene_warmup(
+    config: CliLocalE2EConfig,
+    runner: ProcessRunner,
+    *,
+    orchestration_env: dict[str, str],
+) -> tuple[WarmupResult, dict[str, list[str]] | None]:
+    if config.scene_replay_mode != "full_scene":
+        return WarmupResult(enabled=False, passed=None), None
+
+    head_process: ProcessLike | None = None
+    head_result: CommandResult | None = None
+    image_result: CommandResult | None = None
+    image_dir: Path | None = None
+    try:
+        image_dir = _ensure_warmup_jpeg_dir(config)
+        warmup_config = replace(config, scene_dir=image_dir, frame_count=1)
+        head_segment = HeadStateSegment(
+            state="stationary",
+            frame_count=1,
+            head_state_hz=max(config.head_state_hz, MIN_HEAD_STATE_HZ),
+        )
+        head_command = _head_publisher_command(warmup_config, head_segment)
+        image_command = _image_publisher_command(warmup_config)
+        commands = {
+            "head_publisher": head_command,
+            "image_publisher": image_command,
+        }
+
+        head_process = runner.start_process(
+            head_command,
+            cwd=REPO_ROOT,
+            env=orchestration_env,
+            name="head_publisher:warmup",
+        )
+        image_result = runner.run_sync(
+            image_command,
+            cwd=REPO_ROOT,
+            env=orchestration_env,
+            name="image_publisher:warmup",
+        )
+        head_result = runner.wait_process(
+            head_process,
+            name="head_publisher:warmup",
+            timeout_s=_publisher_timeout_s(1, head_segment.head_state_hz),
+        )
+        head_process = None
+
+        failure_reason = _warmup_failure_reason(
+            image_result=image_result,
+            head_result=head_result,
+        )
+        return (
+            WarmupResult(
+                enabled=True,
+                passed=failure_reason is None,
+                failure_reason=failure_reason,
+                count=1,
+                image_dir=image_dir,
+                image_result=image_result,
+                head_result=head_result,
+            ),
+            commands,
+        )
+    except Exception as exc:
+        return (
+            WarmupResult(
+                enabled=True,
+                passed=False,
+                failure_reason=f"warmup_exception:{type(exc).__name__}",
+                count=1,
+                image_dir=image_dir,
+                image_result=image_result,
+                head_result=head_result,
+            ),
+            None,
+        )
+    finally:
+        if head_process is not None and head_process.poll() is None:
+            runner.stop_process(head_process)
+
+
+def _warmup_failure_reason(
+    *,
+    image_result: CommandResult,
+    head_result: CommandResult,
+) -> str | None:
+    if image_result.returncode != 0:
+        return "warmup_image_publisher_failed"
+    if head_result.returncode != 0:
+        return "warmup_head_publisher_failed"
+    head_stdout_json, head_stdout_parse_error = _parse_head_publisher_stdout(
+        head_result.stdout
+    )
+    if head_stdout_parse_error is not None or head_stdout_json is None:
+        return "warmup_head_publisher_malformed_json"
+    if head_stdout_json.get("state") != "stationary":
+        return "warmup_head_publisher_state_mismatch"
+    published = head_stdout_json.get("published")
+    if not isinstance(published, int) or isinstance(published, bool) or published < 1:
+        return "warmup_head_publisher_count_mismatch"
+    return None
+
+
+def _ensure_warmup_jpeg_dir(config: CliLocalE2EConfig) -> Path:
+    scene_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", config.selected_scene) or "scene"
+    image_dir = config.out.parent / "tmp" / "cli-local-e2e-warmup" / scene_name
+    image_dir.mkdir(parents=True, exist_ok=True)
+    image_path = image_dir / "000001.jpg"
+    _write_warmup_jpeg(image_path)
+    return image_dir
+
+
+def _write_warmup_jpeg(path: Path) -> None:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required to generate the DDS E2E warmup JPEG") from exc
+
+    # DDS E2E warmup blank JPEG; must be decodable by server inference.
+    image = Image.new("RGB", (1280, 720), (0, 0, 0))
+    image.save(path, format="JPEG", quality=75)
 
 
 def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
@@ -1087,6 +1236,7 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
     )
     scene_reports: list[dict[str, Any]] = []
     failure_reasons: list[str] = []
+    oracle_evaluated = _should_evaluate_botified_event_oracle(config)
 
     for scene_name in scene_names:
         scene_config = _config_for_full_scene(config, scene_name)
@@ -1100,9 +1250,22 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
                 for reason in scene_report.get("failure_reasons", [])
             )
 
-    matrix_pass = bool(scene_reports) and all(
+    slice_matrix_pass = bool(scene_reports) and all(
         result.get("slice_pass") is True for result in scene_reports
     )
+    if oracle_evaluated:
+        botified_event_oracle, oracle_failure_reasons = (
+            _evaluate_botified_event_oracle(scene_reports, head_motion="stationary")
+        )
+        failure_reasons.extend(oracle_failure_reasons)
+    else:
+        botified_event_oracle = _unevaluated_botified_event_oracle()
+    oracle_pass = (
+        True
+        if botified_event_oracle["passed"] is None
+        else bool(botified_event_oracle["passed"])
+    )
+    matrix_pass = slice_matrix_pass and oracle_pass
     report = _base_report(
         manifest_report=config.manifest_report,
         status="full_scene_matrix_pass" if matrix_pass else "full_scene_matrix_failed",
@@ -1113,8 +1276,14 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
             "slice_pass": matrix_pass,
             "scene_replay_mode": "full_scene_matrix",
             "scene_results": scene_reports,
+            "botified_event_oracle": botified_event_oracle,
+            "oracle_evaluated": oracle_evaluated,
+            "oracle_evaluation_passed": botified_event_oracle["passed"],
             "not_covered": [
-                gap for gap in NOT_COVERED if gap != "full_scene_matrix"
+                gap
+                for gap in NOT_COVERED
+                if gap != "full_scene_matrix"
+                and not (oracle_evaluated and gap == "oracle")
             ],
         }
     )
@@ -1166,9 +1335,136 @@ def _matrix_scene_result(scene_report: dict[str, Any]) -> dict[str, Any]:
         "failure_reasons": scene_report.get("failure_reasons", []),
         "gaze": scene_report.get("gaze"),
         "head_state": scene_report.get("head_state"),
+        "warmup": scene_report.get("warmup"),
         "botified_stdout": scene_report.get("botified_stdout"),
         "report": scene_report,
     }
+
+
+def _should_evaluate_botified_event_oracle(config: CliLocalE2EConfig) -> bool:
+    return (
+        len(config.head_state_segments) == 1
+        and config.head_state_segments[0].state == "stationary"
+    )
+
+
+def _unevaluated_botified_event_oracle() -> dict[str, Any]:
+    return {
+        "evaluated": False,
+        "passed": None,
+        "scenes": [],
+    }
+
+
+def _evaluate_botified_event_oracle(
+    scene_reports: list[dict[str, Any]],
+    *,
+    head_motion: str,
+) -> tuple[dict[str, Any], list[str]]:
+    scenes: list[dict[str, Any]] = []
+    failure_reasons: list[str] = []
+
+    for scene_report in scene_reports:
+        scene = str(scene_report.get("scene") or "")
+        botified_stdout = scene_report.get("botified_stdout")
+        if not isinstance(botified_stdout, dict):
+            botified_stdout = {}
+        observed = _int_event_counts(botified_stdout.get("event_counts"))
+        sequence = _event_sequence(botified_stdout.get("event_sequence"))
+        facts = replay_val_data.botified_event_oracle_facts(scene, head_motion)
+        required = list(facts["required_events"])
+        forbidden = list(facts["forbidden_events"])
+        order_requirements = list(facts["order_requirements"])
+
+        missing = [event for event in required if observed.get(event, 0) <= 0]
+        forbidden_present = {
+            event: observed[event]
+            for event in forbidden
+            if observed.get(event, 0) > 0
+        }
+        order_violations = _botified_event_order_violations(
+            sequence,
+            order_requirements,
+        )
+
+        for event in missing:
+            failure_reasons.append(f"botified_event_oracle_missing:{scene}:{event}")
+        for event in forbidden_present:
+            failure_reasons.append(f"botified_event_oracle_forbidden:{scene}:{event}")
+        for violation in order_violations:
+            failure_reasons.append(
+                "botified_event_oracle_order:"
+                f"{scene}:{violation['before_event']}_before_{violation['after_event']}"
+            )
+
+        scenes.append(
+            {
+                "scene": scene,
+                "observed": observed,
+                "required": required,
+                "missing": missing,
+                "forbidden_present": forbidden_present,
+                "order_violations": order_violations,
+            }
+        )
+
+    return (
+        {
+            "evaluated": True,
+            "passed": not failure_reasons,
+            "scenes": scenes,
+        },
+        failure_reasons,
+    )
+
+
+def _int_event_counts(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for event, count in value.items():
+        if isinstance(event, str) and isinstance(count, int) and not isinstance(count, bool):
+            counts[event] = count
+    return dict(sorted(counts.items()))
+
+
+def _event_sequence(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    sequence: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        line = item.get("line")
+        event = item.get("event")
+        if isinstance(line, int) and not isinstance(line, bool) and isinstance(event, str):
+            sequence.append({"line": line, "event": event})
+    return sequence
+
+
+def _botified_event_order_violations(
+    sequence: list[dict[str, Any]],
+    order_requirements: list[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    first_line_by_event: dict[str, int] = {}
+    for item in sequence:
+        first_line_by_event.setdefault(item["event"], item["line"])
+
+    violations: list[dict[str, Any]] = []
+    for before_event, after_event in order_requirements:
+        before_line = first_line_by_event.get(before_event)
+        after_line = first_line_by_event.get(after_event)
+        if before_line is None or after_line is None or before_line < after_line:
+            continue
+        violations.append(
+            {
+                "before_event": before_event,
+                "after_event": after_event,
+                "before_line": before_line,
+                "after_line": after_line,
+            }
+        )
+    return violations
 
 
 def _server_command(config: CliLocalE2EConfig) -> list[str]:
@@ -1387,7 +1683,7 @@ def _head_segment_failure_reasons(
 def _build_smoke_report(
     config: CliLocalE2EConfig,
     *,
-    commands: dict[str, list[str]],
+    commands: dict[str, Any],
     started_at: str,
     elapsed_s: float,
     slice_pass: bool,
@@ -1399,6 +1695,7 @@ def _build_smoke_report(
     segment_results: list[SegmentSmokeResult],
     gaze_summary: dict[str, Any],
     botified_stdout: dict[str, Any],
+    warmup_result: WarmupResult,
 ) -> dict[str, Any]:
     legacy_segment_result = _legacy_segment_result(segment_results)
     head_result = None if legacy_segment_result is None else legacy_segment_result.head_result
@@ -1443,6 +1740,7 @@ def _build_smoke_report(
             "server_url": config.server_url.original,
             "healthz_url": config.server_url.healthz_url,
             "commands": commands,
+            "warmup": _warmup_report(warmup_result),
             "processes": {
                 "server": _process_report(server_process),
                 "cli": _process_report(cli_process),
@@ -1566,6 +1864,15 @@ def _build_smoke_report(
     )
     report["evidence_summary"] = _evidence_summary(report)
     return report
+
+
+def _warmup_report(warmup_result: WarmupResult) -> dict[str, Any]:
+    return {
+        "enabled": warmup_result.enabled,
+        "passed": warmup_result.passed,
+        "failure_reason": warmup_result.failure_reason,
+        "count": warmup_result.count,
+    }
 
 
 def _evidence_summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -1861,6 +2168,7 @@ def _base_report(
         "pc_local_e2e_status": status,
         "failure_reasons": failure_reasons,
         "not_covered": NOT_COVERED,
+        "botified_event_oracle": _unevaluated_botified_event_oracle(),
     }
     for key in MANIFEST_REPORT_KEYS:
         report[key] = manifest_report.get(key)
@@ -2089,6 +2397,7 @@ def _summarize_botified_stdout(
     parse_error_count = 0
     forbidden_event_count = 0
     event_counts: dict[str, int] = {}
+    event_sequence: list[dict[str, Any]] = []
     first_frame: dict[str, Any] | None = None
     last_frame: dict[str, Any] | None = None
     contract_violations: list[str] = []
@@ -2141,6 +2450,7 @@ def _summarize_botified_stdout(
 
         allowed_frame_count += 1
         event_counts[event] = event_counts.get(event, 0) + 1
+        event_sequence.append({"line": line_number, "event": event})
 
     return {
         "source": "cli_stdout",
@@ -2152,6 +2462,7 @@ def _summarize_botified_stdout(
         "parse_error_count": parse_error_count,
         "forbidden_event_count": forbidden_event_count,
         "event_counts": dict(sorted(event_counts.items())),
+        "event_sequence": event_sequence,
         "first_frame": first_frame,
         "last_frame": last_frame,
         "collection_truncated": collection_truncated,
