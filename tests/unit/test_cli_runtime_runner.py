@@ -239,12 +239,20 @@ def visual_state_with_semantic_event(
         {
             "type": "semantic_event",
             "event_id": "event-1",
-            "event": "person_appeared",
+            "event": "person_waving",
             "camera": "front",
             "track_id": 7,
             "confidence": 0.91,
-            "duration_ms": 0,
-            "text": "person appeared",
+            "duration_ms": 900,
+            "evidence": {
+                "runtime_person_slot": 3,
+                "wrist_x_span_px": 84.0,
+                "wrist_x_span_bbox_ratio": 0.42,
+                "wrist_y_relative_to_shoulder_px": 18.0,
+                "wave_duration_ms": 900,
+                "keypoint_min_confidence": 0.72,
+            },
+            "text": "person waving",
         }
     ]
     return state

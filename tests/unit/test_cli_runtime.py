@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from tests.jpeg_fixtures import JPEG_1280X720
-from visual_events_cli.botified_output import BotifiedPipeClosed, format_botified_frame
+from visual_events_cli.botified_output import BotifiedPipeClosed
 from visual_events_cli.frame_pump import HeadMotion, InputFrame
 from visual_events_cli.target_mapper import (
     make_invalid_gaze_target,
@@ -178,6 +178,12 @@ class BlockingFailingDrainWriter(FakeBotifiedWriter):
         raise BotifiedPipeClosed("botified stdout closed")
 
 
+def parse_botified_payload(frame: str) -> dict[str, Any]:
+    assert frame.startswith("<botified>")
+    assert frame.endswith("</botified>")
+    return json.loads(frame[len("<botified>") : -len("</botified>")])
+
+
 def head_motion() -> HeadMotion:
     return HeadMotion(
         state="stationary",
@@ -273,9 +279,10 @@ async def test_runtime_coordinator_pumps_frame_to_service_gaze_and_botified_with
             stale_after_ms=250,
         ).to_dict()
     ]
-    assert botified.frames == [
-        format_botified_frame(visual_state["semantic_events"][0])
-    ]
+    assert len(botified.frames) == 1
+    payload = parse_botified_payload(botified.frames[0])
+    assert payload["id"] == f"visual:{visual_state['semantic_events'][0]['event_id']}"
+    assert "visual_context=" in payload["request"]
     assert botified.drained_frames == botified.frames
 
     captured = capsys.readouterr()
@@ -495,9 +502,10 @@ async def test_runtime_coordinator_broken_botified_pipe_publishes_stale_and_retu
 
     assert exit_code == runtime.EXIT_BOTIFIED_PIPE_CLOSED
     assert service.requests
-    assert botified.frames == [
-        format_botified_frame(visual_state["semantic_events"][0])
-    ]
+    assert len(botified.frames) == 1
+    payload = parse_botified_payload(botified.frames[0])
+    assert payload["id"] == f"visual:{visual_state['semantic_events'][0]['event_id']}"
+    assert "visual_context=" in payload["request"]
     stale_payloads = [
         payload for payload in gaze.dicts() if payload["state"] == "stale"
     ]

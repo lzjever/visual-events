@@ -275,12 +275,11 @@ v0.2 event-specific required evidence keys：
 
 CLI 只负责：
 
-- 按 `event_id` 做 Botified 输出幂等保护。
-- 按 Botified stdout allowlist 把事件事实转换为 Botified request frame。
+- 做 Botified notification gate：allowlist、`event_id` 幂等、pending/coalescing、same-key gap、global/burst limit、低价值事件静默。
 - 做 stdout writer 背压处理。
-- 不重新实现事件规则，不根据 attention 高频状态生成 Botified 事件，不实现 Botified 业务 rate limiter。
+- 不重新实现视觉规则，不根据 attention 高频状态生成 Botified 事件；只消费 server 输出的 event type、event evidence、`scene_context`、`track_id`/`event_id`。
 
-Botified 每 track/event/min 和全局事件/min 上限由 server semantic event engine 的 rising-edge、cooldown、dedupe 规则产生，并由 PC/现场 report gate 验收；CLI writer 只做 `event_id` 幂等、allowlist 和背压。
+Botified 通知频率由 server semantic event engine 的 rising-edge、cooldown、dedupe 与 CLI notification gate 共同约束，并由 PC/现场 report gate 验收。
 
 Botified stdout allowlist：
 
@@ -337,8 +336,10 @@ CLI 行为：
 CLI stdout 默认只输出 Botified allowlist frame：
 
 ```text
-<botified>{"id":"visual:front:evt_000456","urgency":"normal","timeout_secs":8,"request":"视觉事件：有人在机器人前方挥手。track_id=7, confidence=0.86。请根据当前上下文决定是否回应；处理完成后回复 ack。","expect":"ack"}</botified>
+<botified>{"id":"visual:front:evt_000456","urgency":"normal","timeout_secs":8,"request":"event=person_waving camera=front track_id=7 confidence=0.86 duration_ms=900 text=有人在机器人前方挥手 visual_context={\"visual_context\":{\"event_target\":{\"track_id\":7,\"runtime_person_slot\":3,\"visible_now\":true,\"matches_attention_target\":true,\"event_age_ms\":82,\"position\":\"center\",\"size\":\"mid\",\"bbox_area_ratio\":0.1042},\"trigger_evidence\":{\"runtime_person_slot\":3,\"wave_duration_ms\":900},\"current_scene\":{\"camera\":\"front\",\"frame_age_ms\":82,\"person_count\":1,\"attention_target\":{\"track_id\":7,\"position\":\"center\",\"size\":\"mid\",\"center_uv\":[420.0,360.0],\"bbox_area_ratio\":0.1042},\"other_people_count\":0,\"engagement_state\":\"available\",\"no_engage_reasons\":[]}}}","expect":"ack"}</botified>
 ```
+
+顶层 payload 只包含 `id`、`urgency`、`timeout_secs`、`request`、`expect`。`request` 中包含 `event=... track_id=... visual_context=<minified-json>`。`visual_context` 是紧凑 JSON wrapper，包含 `event_target`、`trigger_evidence`、`current_scene`；不包含图片、crop、embedding、身份或全量 tracks。
 
 日志、调试状态、性能指标走 stderr 或文件。`--debug-json-stdout` 只能用于手工调试，不能用于 Botified task。
 

@@ -43,6 +43,8 @@ def semantic_event(
     *,
     event_id: str = "front:evt_000456",
     event: str = "person_waving",
+    track_id: int = 7,
+    evidence: dict[str, Any] | None = None,
     text: str = "有人在机器人前方挥手",
 ) -> dict[str, Any]:
     return {
@@ -50,9 +52,19 @@ def semantic_event(
         "event_id": event_id,
         "event": event,
         "camera": "front",
-        "track_id": 7,
+        "track_id": track_id,
         "confidence": 0.86,
         "duration_ms": 900,
+        "evidence": evidence
+        if evidence is not None
+        else {
+            "runtime_person_slot": 3,
+            "wrist_x_span_px": 84.0,
+            "wrist_x_span_bbox_ratio": 0.42,
+            "wrist_y_relative_to_shoulder_px": 18.0,
+            "wave_duration_ms": 900,
+            "keypoint_min_confidence": 0.72,
+        },
         "text": text,
     }
 
@@ -73,6 +85,61 @@ def parse_botified_frame(frame: str, *, event_id: str) -> dict[str, Any]:
     assert isinstance(payload["request"], str)
     assert payload["request"].strip()
     return payload
+
+
+def parse_visual_context(payload: dict[str, Any]) -> dict[str, Any]:
+    marker = "visual_context="
+    request = payload["request"]
+    start = request.index(marker) + len(marker)
+    wrapper, end = json.JSONDecoder().raw_decode(request[start:])
+    assert request[start + end :].strip() == ""
+    assert set(wrapper) == {"visual_context"}
+    return wrapper["visual_context"]
+
+
+def visual_state_with_events(
+    events: list[dict[str, Any]],
+    *,
+    timestamp_ms: int = 1_710_000_000_000,
+    scene_context: dict[str, Any] | None = None,
+    tracks: list[dict[str, Any]] | None = None,
+    scene_flags: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    state = {
+        "type": "visual_state",
+        "schema_version": 1,
+        "camera": "front",
+        "frame_id": 1,
+        "frame_timestamp_ms": timestamp_ms,
+        "image_size": [1280, 720],
+        "attention": {"target_track_id": 7, "confidence": 0.91},
+        "tracks": tracks
+        if tracks is not None
+        else [
+            {
+                "track_id": 7,
+                "class": "person",
+                "bbox_xyxy": [320.0, 120.0, 520.0, 600.0],
+                "bbox_area_ratio": 0.1042,
+                "center_uv": [420.0, 360.0],
+                "head_uv": [421.0, 205.0],
+                "lost_ms": 0,
+            }
+        ],
+        "scene_context": scene_context
+        if scene_context is not None
+        else {
+            "engagement_state": "available",
+            "attention_available": True,
+            "target_track_id": 7,
+            "no_engage_reasons": [],
+            "target_reacquired": None,
+        },
+        "semantic_events": events,
+    }
+    if scene_flags is not None:
+        state["scene_flags"] = scene_flags
+    return state
 
 
 def test_allowed_events_constant_is_exact_six_person_events():
@@ -128,6 +195,358 @@ def test_same_event_id_outputs_only_once_within_frame_and_across_frames():
     assert len(first_frames) == 1
     assert parse_botified_frame(first_frames[0], event_id="front:evt_000456")
     assert second_frames == []
+
+
+def test_appeared_and_ordinary_left_are_suppressed_by_mapper():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    appeared = semantic_event(event_id="front:appeared", event="person_appeared")
+    ordinary_left = semantic_event(
+        event_id="front:left",
+        event="person_left",
+        evidence={
+            "runtime_person_slot": 44,
+            "lost_duration_ms": 350,
+            "last_bbox_area_ratio": 0.05,
+        },
+    )
+
+    frames = mapper.frames_from_visual_state(
+        visual_state_with_events([appeared, ordinary_left])
+    )
+
+    assert frames == []
+
+
+@pytest.mark.parametrize(
+    ("evidence", "no_engage_reasons"),
+    [
+        ({"runtime_person_slot": 3, "passing_speed_class": "fast"}, []),
+        ({"runtime_person_slot": 3, "passing_speed_class": "medium"}, ["passing_fast"]),
+    ],
+)
+def test_fast_passing_is_suppressed_by_mapper(
+    evidence: dict[str, Any],
+    no_engage_reasons: list[str],
+):
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    event = semantic_event(
+        event_id="front:passing",
+        event="person_passing_by",
+        evidence=evidence,
+    )
+    state = visual_state_with_events(
+        [event],
+        scene_context={
+            "engagement_state": "no_engage_target",
+            "attention_available": False,
+            "target_track_id": 7,
+            "no_engage_reasons": no_engage_reasons,
+            "target_reacquired": None,
+        },
+    )
+
+    assert mapper.frames_from_visual_state(state) == []
+
+
+def test_approaching_pending_upgrades_to_stopped_or_waving_within_window():
+    module = import_botified_output()
+    now_ms = 1_710_000_000_100
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: now_ms)
+    approaching = semantic_event(
+        event_id="front:approaching",
+        event="person_approaching_robot",
+        evidence={
+            "runtime_person_slot": 3,
+            "bbox_area_ratio_start": 0.02,
+            "bbox_area_ratio_end": 0.08,
+            "area_growth_ratio": 4.0,
+            "area_delta": 0.06,
+            "camera_motion_state": "stationary",
+        },
+    )
+    stopped = semantic_event(
+        event_id="front:stopped",
+        event="person_stopped_near_robot",
+        evidence={
+            "runtime_person_slot": 3,
+            "bbox_area_ratio": 0.11,
+            "speed_px_s_p95": 8.0,
+            "stationary_duration_ms": 1100,
+            "camera_motion_state": "stationary",
+        },
+    )
+
+    assert mapper.frames_from_visual_state(visual_state_with_events([approaching])) == []
+    now_ms += 500
+    frames = mapper.frames_from_visual_state(visual_state_with_events([stopped]))
+
+    assert len(frames) == 1
+    payload = parse_botified_frame(frames[0], event_id="front:stopped")
+    assert "person_stopped_near_robot" in payload["request"]
+    assert "person_approaching_robot" not in payload["request"]
+
+
+def test_pending_approaching_flushes_after_window_on_next_mapper_call():
+    module = import_botified_output()
+    now_ms = 1_710_000_000_100
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: now_ms)
+    approaching = semantic_event(
+        event_id="front:approaching",
+        event="person_approaching_robot",
+        evidence={
+            "runtime_person_slot": 3,
+            "bbox_area_ratio_start": 0.02,
+            "bbox_area_ratio_end": 0.08,
+            "area_growth_ratio": 4.0,
+            "area_delta": 0.06,
+            "camera_motion_state": "stationary",
+        },
+    )
+
+    assert mapper.frames_from_visual_state(visual_state_with_events([approaching])) == []
+    now_ms += 799
+    assert mapper.frames_from_visual_state(visual_state_with_events([])) == []
+    now_ms += 1
+    frames = mapper.frames_from_visual_state(visual_state_with_events([]))
+
+    assert len(frames) == 1
+    payload = parse_botified_frame(frames[0], event_id="front:approaching")
+    assert "person_approaching_robot" in payload["request"]
+
+
+def test_waving_frame_contains_parseable_visual_context_and_stable_top_level_payload():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    event = semantic_event(event_id="front:waving", event="person_waving")
+
+    frames = mapper.frames_from_visual_state(visual_state_with_events([event]))
+
+    assert len(frames) == 1
+    payload = parse_botified_frame(frames[0], event_id="front:waving")
+    assert set(payload) == {"id", "urgency", "timeout_secs", "request", "expect"}
+    context = parse_visual_context(payload)
+    assert set(context) == {"event_target", "trigger_evidence", "current_scene"}
+    assert context["event_target"]["track_id"] == 7
+    assert context["event_target"]["runtime_person_slot"] == 3
+    assert context["event_target"]["visible_now"] is True
+    assert context["event_target"]["position"] in {"left", "center", "right"}
+    assert context["event_target"]["size"] in {"far", "mid", "near"}
+    assert context["current_scene"]["attention_target"]["track_id"] == 7
+    assert context["current_scene"]["attention_target"]["position"] in {
+        "left",
+        "center",
+        "right",
+    }
+    assert context["current_scene"]["attention_target"]["size"] in {
+        "far",
+        "mid",
+        "near",
+    }
+    assert context["current_scene"]["attention_target"]["center_uv"] == [420.0, 360.0]
+    assert context["current_scene"]["attention_target"]["bbox_area_ratio"] == 0.1042
+
+
+def test_pending_approaching_flush_uses_latest_visual_state_for_current_scene():
+    module = import_botified_output()
+    now_ms = 1_710_000_000_100
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: now_ms)
+    approaching = semantic_event(
+        event_id="front:approaching_latest",
+        event="person_approaching_robot",
+        evidence={
+            "runtime_person_slot": 3,
+            "bbox_area_ratio_start": 0.02,
+            "bbox_area_ratio_end": 0.08,
+            "area_growth_ratio": 4.0,
+            "area_delta": 0.06,
+            "camera_motion_state": "stationary",
+        },
+    )
+
+    old_state = visual_state_with_events(
+        [approaching],
+        timestamp_ms=now_ms - 100,
+        scene_flags={"person_count": 9},
+        scene_context={
+            "engagement_state": "available",
+            "attention_available": True,
+            "target_track_id": 7,
+            "no_engage_reasons": [],
+            "target_reacquired": None,
+        },
+    )
+    assert mapper.frames_from_visual_state(old_state) == []
+
+    now_ms += 800
+    latest_state = visual_state_with_events(
+        [],
+        timestamp_ms=now_ms - 20,
+        scene_flags={"person_count": 2},
+        tracks=[],
+        scene_context={
+            "engagement_state": "no_engage_target",
+            "attention_available": False,
+            "target_track_id": None,
+            "no_engage_reasons": ["too_far"],
+            "target_reacquired": None,
+        },
+    )
+    frames = mapper.frames_from_visual_state(latest_state)
+
+    context = parse_visual_context(
+        parse_botified_frame(frames[0], event_id="front:approaching_latest")
+    )
+    assert context["event_target"]["visible_now"] is False
+    assert context["event_target"]["position"] == "unknown"
+    assert context["event_target"]["size"] == "unknown"
+    assert context["current_scene"]["frame_age_ms"] == 20
+    assert context["current_scene"]["person_count"] == 2
+    assert context["current_scene"]["engagement_state"] == "no_engage_target"
+    assert context["current_scene"]["attention_target"] is None
+
+
+def test_current_scene_person_count_uses_visible_tracks_when_scene_flags_missing():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    event = semantic_event(event_id="front:waving_visible_count", event="person_waving")
+    tracks = [
+        {
+            "track_id": 7,
+            "class": "person",
+            "bbox_xyxy": [320.0, 120.0, 520.0, 600.0],
+            "bbox_area_ratio": 0.1042,
+            "center_uv": [420.0, 360.0],
+            "head_uv": [421.0, 205.0],
+            "lost_ms": 0,
+        },
+        {
+            "track_id": 8,
+            "class": "person",
+            "bbox_xyxy": [700.0, 180.0, 850.0, 610.0],
+            "bbox_area_ratio": 0.07,
+            "center_uv": [775.0, 395.0],
+            "head_uv": [776.0, 240.0],
+            "lost_ms": 500,
+        },
+        {
+            "track_id": 9,
+            "class": "chair",
+            "bbox_xyxy": [100.0, 200.0, 180.0, 360.0],
+            "bbox_area_ratio": 0.02,
+            "center_uv": [140.0, 280.0],
+            "lost_ms": 0,
+        },
+    ]
+
+    frames = mapper.frames_from_visual_state(
+        visual_state_with_events([event], tracks=tracks)
+    )
+
+    context = parse_visual_context(
+        parse_botified_frame(frames[0], event_id="front:waving_visible_count")
+    )
+    assert context["current_scene"]["person_count"] == 1
+
+
+def test_trigger_evidence_only_contains_whitelisted_projection_fields():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    event = semantic_event(
+        event_id="front:waving",
+        event="person_waving",
+        evidence={
+            "runtime_person_slot": 3,
+            "wrist_x_span_px": 84.0,
+            "wrist_x_span_bbox_ratio": 0.42,
+            "wrist_y_relative_to_shoulder_px": 18.0,
+            "wave_duration_ms": 900,
+            "keypoint_min_confidence": 0.72,
+            "crop_b64": "must-not-leak",
+            "embedding": [0.1, 0.2, 0.3],
+            "identity_name": "must-not-leak",
+        },
+    )
+
+    frames = mapper.frames_from_visual_state(visual_state_with_events([event]))
+
+    evidence = parse_visual_context(
+        parse_botified_frame(frames[0], event_id="front:waving")
+    )["trigger_evidence"]
+    assert evidence == {
+        "runtime_person_slot": 3,
+        "wrist_x_span_px": 84.0,
+        "wrist_x_span_bbox_ratio": 0.42,
+        "wrist_y_relative_to_shoulder_px": 18.0,
+        "wave_duration_ms": 900,
+        "keypoint_min_confidence": 0.72,
+    }
+
+
+def test_event_target_matches_attention_target_uses_current_scene_context():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    matching = semantic_event(
+        event_id="front:waving_match",
+        event="person_waving",
+        track_id=7,
+    )
+    non_matching = semantic_event(
+        event_id="front:waving_other",
+        event="person_waving",
+        track_id=8,
+        evidence={"runtime_person_slot": 4, "wave_duration_ms": 900},
+    )
+    tracks = [
+        {
+            "track_id": 7,
+            "class": "person",
+            "bbox_xyxy": [320.0, 120.0, 520.0, 600.0],
+            "bbox_area_ratio": 0.1042,
+            "center_uv": [420.0, 360.0],
+            "head_uv": [421.0, 205.0],
+            "lost_ms": 0,
+        },
+        {
+            "track_id": 8,
+            "class": "person",
+            "bbox_xyxy": [700.0, 180.0, 850.0, 610.0],
+            "bbox_area_ratio": 0.07,
+            "center_uv": [775.0, 395.0],
+            "head_uv": [776.0, 240.0],
+            "lost_ms": 0,
+        },
+    ]
+
+    frames = mapper.frames_from_visual_state(
+        visual_state_with_events([matching, non_matching], tracks=tracks)
+    )
+
+    contexts = [
+        parse_visual_context(parse_botified_frame(frame, event_id=event_id))
+        for frame, event_id in zip(frames, ["front:waving_match", "front:waving_other"])
+    ]
+    assert contexts[0]["event_target"]["matches_attention_target"] is True
+    assert contexts[1]["event_target"]["matches_attention_target"] is False
+
+
+def test_burst_one_second_limit_caps_mapper_output():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    events = [
+        semantic_event(
+            event_id=f"front:waving_{index}",
+            event="person_waving",
+            track_id=100 + index,
+            evidence={"runtime_person_slot": 100 + index, "wave_duration_ms": 900},
+        )
+        for index in range(4)
+    ]
+
+    frames = mapper.frames_from_visual_state(visual_state_with_events(events))
+
+    assert len(frames) == 3
 
 
 def test_botified_frame_is_one_line_wrapped_json_request_with_event_facts():

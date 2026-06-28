@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 
 from tests.jpeg_fixtures import JPEG_1280X720
-from visual_events_cli.botified_output import format_botified_frame
 from visual_events_cli.target_mapper import (
     make_invalid_gaze_target,
     map_visual_state_to_gaze_target,
@@ -59,6 +58,14 @@ def semantic_event(
         "track_id": 7,
         "confidence": 0.86,
         "duration_ms": 900,
+        "evidence": {
+            "runtime_person_slot": 3,
+            "wrist_x_span_px": 84.0,
+            "wrist_x_span_bbox_ratio": 0.42,
+            "wrist_y_relative_to_shoulder_px": 18.0,
+            "wave_duration_ms": 900,
+            "keypoint_min_confidence": 0.72,
+        },
         "text": "有人在机器人前方挥手",
     }
 
@@ -114,6 +121,12 @@ class FakeEnqueueBotifiedWriter:
     def drain_available(self) -> None:
         self.drain_called = True
         raise AssertionError("FramePump must not drain botified stdout")
+
+
+def parse_botified_payload(frame: str) -> dict[str, Any]:
+    assert frame.startswith("<botified>")
+    assert frame.endswith("</botified>")
+    return json.loads(frame[len("<botified>") : -len("</botified>")])
 
 
 def service_result(visual_state: dict[str, Any] | None = None, error: Any = None) -> Any:
@@ -303,7 +316,10 @@ async def test_semantic_events_are_written_as_botified_frames_except_attention_c
     slot.push(make_frame(module, timestamp_ms=1710000000000))
     await pump.process_one(now_ms=1710000000082)
 
-    assert botified.frames == [format_botified_frame(allowed)]
+    assert len(botified.frames) == 1
+    payload = parse_botified_payload(botified.frames[0])
+    assert payload["id"] == f"visual:{allowed['event_id']}"
+    assert "visual_context=" in payload["request"]
 
 
 @pytest.mark.asyncio
@@ -323,7 +339,10 @@ async def test_frame_pump_enqueues_botified_frames_without_draining_writer():
     slot.push(make_frame(module, timestamp_ms=1710000000000))
     await pump.process_one(now_ms=1710000000082)
 
-    assert botified.frames == [format_botified_frame(allowed)]
+    assert len(botified.frames) == 1
+    payload = parse_botified_payload(botified.frames[0])
+    assert payload["id"] == f"visual:{allowed['event_id']}"
+    assert "visual_context=" in payload["request"]
     assert botified.drain_called is False
 
 
