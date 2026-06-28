@@ -436,6 +436,24 @@ def write_authoritative_manifest(module: Any, paths: dict[str, Path]) -> Path:
     return manifest_path
 
 
+def write_attention_oracle_manifest(
+    module: Any,
+    paths: dict[str, Path],
+    scenes: dict[str, list[dict[str, Any]]],
+) -> Path:
+    manifest = authoritative_manifest_for_data(
+        module.cli_local_e2e_manifest,
+        paths["data_dir"],
+    )
+    manifest["oracle"]["expected_attention_target_timeline"]["scenes"] = scenes
+    manifest_path = paths["data_dir"] / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
 def base_argv(paths: dict[str, Path], *extra: str) -> list[str]:
     return [
         "--data-dir",
@@ -549,6 +567,7 @@ def successful_full_scene_gaze_result() -> FakeResult:
                 "camera": "front",
                 "state": "tracking",
                 "valid": True,
+                "target_track_id": 1,
                 "frame_timestamp_ms": 990,
                 "publish_timestamp_ms": 1000,
             },
@@ -1214,6 +1233,8 @@ def test_all_scenes_full_scene_frame_counts_fail_core_without_scene_contracts(
     assert report["overall_scope"] == "current_pc_core_gate"
     assert report["oracle_evaluated"] is True
     assert report["oracle_evaluation_passed"] is False
+    assert report["gaze_attention_oracle"]["evaluated"] is False
+    assert "gaze_attention_oracle_not_evaluated" in report["failure_reasons"]
     assert "botified_event_oracle_missing_scene_contract:scene-a" in report[
         "failure_reasons"
     ]
@@ -1246,6 +1267,7 @@ def test_all_scenes_full_scene_frame_counts_fail_core_without_scene_contracts(
     }
     assert "full_scene_matrix" not in report["not_covered"]
     assert "oracle" in report["not_covered"]
+    assert "gaze_attention_oracle" in report["not_covered"]
     for gap in ["latency_p95_p99", "fault_matrix", "soak", "release_report"]:
         assert gap not in report["not_covered"]
         assert gap in report["non_blocking_gaps"]
@@ -1257,6 +1279,8 @@ def test_all_scenes_full_scene_frame_counts_fail_core_without_scene_contracts(
         "slice_matrix_pass": True,
         "oracle_evaluated": True,
         "oracle_pass": False,
+        "gaze_attention_oracle_evaluated": False,
+        "gaze_attention_oracle_pass": False,
         "stdout_pollution_count": 0,
         "fresh_gaze_hz_pass": True,
     }
@@ -1309,15 +1333,36 @@ def test_all_scenes_full_scene_requires_stationary_oracle_for_current_core(
     assert report["oracle_evaluation_passed"] is None
     assert "oracle" in report["not_covered"]
     assert "botified_event_oracle_not_evaluated" in report["failure_reasons"]
+    assert "gaze_attention_oracle_not_evaluated" in report["failure_reasons"]
     assert report["gates"]["current_pc_core"]["slice_matrix_pass"] is True
     assert report["gates"]["current_pc_core"]["oracle_evaluated"] is False
     assert report["gates"]["current_pc_core"]["oracle_pass"] is False
+    assert report["gates"]["current_pc_core"]["gaze_attention_oracle_evaluated"] is False
+    assert report["gates"]["current_pc_core"]["gaze_attention_oracle_pass"] is False
 
 
 def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> None:
     module = import_runner_module()
     paths = make_case(tmp_path)
     replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+                {
+                    "start_frame_timestamp_ms": 1090,
+                    "end_frame_timestamp_ms": 1090,
+                    "no_target": True,
+                },
+            ],
+        },
+    )
     runner = successful_full_scene_matrix_runner(cli_stdout=botified_frame("person_waving"))
 
     rc = module.main(
@@ -1345,6 +1390,9 @@ def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> N
     assert report["oracle_evaluated"] is True
     assert report["oracle_evaluation_passed"] is True
     assert "oracle" not in report["not_covered"]
+    assert report["gaze_attention_oracle"]["passed"] is True
+    assert report["gates"]["current_pc_core"]["gaze_attention_oracle_evaluated"] is True
+    assert report["gates"]["current_pc_core"]["gaze_attention_oracle_pass"] is True
     assert report["botified_event_oracle"]["scenes"] == [
         {
             "scene": "pic_hello",
@@ -1356,6 +1404,211 @@ def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> N
             "order_violations": [],
         }
     ]
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_fails_wrong_target(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 7,
+                },
+            ],
+        },
+    )
+    runner = successful_full_scene_matrix_runner(cli_stdout=botified_frame("person_waving"))
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["slice_matrix_pass"] is True
+    assert report["current_pc_core_gate_pass"] is False
+    assert report["gaze_attention_oracle"]["evaluated"] is True
+    assert report["gaze_attention_oracle"]["passed"] is False
+    assert "gaze_attention_oracle_mismatch:pic_hello" in report["failure_reasons"]
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["contract_present"] is True
+    assert scene_oracle["matched_windows"] == 0
+    assert scene_oracle["mismatches"][0]["reason"] == "target_not_observed"
+    assert report["gates"]["current_pc_core"]["gaze_attention_oracle_pass"] is False
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_allows_switch_targets(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "allowed_target_track_ids": [1, 2],
+                },
+            ],
+        },
+    )
+    runner = successful_full_scene_matrix_runner(cli_stdout=botified_frame("person_waving"))
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["current_pc_core_gate_pass"] is True
+    assert report["gaze_attention_oracle"]["passed"] is True
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 1
+    assert scene_oracle["mismatches"] == []
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_fails_target_point_tolerance(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                    "target_u": 130,
+                    "target_v": 100,
+                    "tolerance_px": 10,
+                },
+            ],
+        },
+    )
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "tracking",
+                        "valid": True,
+                        "target_track_id": 1,
+                        "target_u": 100,
+                        "target_v": 100,
+                        "frame_timestamp_ms": 990,
+                        "publish_timestamp_ms": 1000,
+                    },
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "lost",
+                        "valid": False,
+                        "frame_timestamp_ms": 1090,
+                        "publish_timestamp_ms": 1100,
+                    },
+                ),
+            )
+        },
+        process_results={"cli": FakeResult(0, stdout=botified_frame("person_waving"))},
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["current_pc_core_gate_pass"] is False
+    assert report["gaze_attention_oracle"]["passed"] is False
+    assert "gaze_attention_oracle_mismatch:pic_hello" in report["failure_reasons"]
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 0
+    assert scene_oracle["mismatches"][0]["reason"] == "target_not_observed"
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_fails_no_target_tracking(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "no_target": True,
+                },
+            ],
+        },
+    )
+    runner = successful_full_scene_matrix_runner(cli_stdout=botified_frame("person_waving"))
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["current_pc_core_gate_pass"] is False
+    assert "gaze_attention_oracle_mismatch:pic_hello" in report["failure_reasons"]
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 0
+    assert scene_oracle["mismatches"][0]["reason"] == "tracking_during_no_target"
+
+
+def test_all_scenes_full_scene_missing_gaze_attention_oracle_blocks_current_core(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    runner = successful_full_scene_matrix_runner(cli_stdout=botified_frame("person_waving"))
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["slice_matrix_pass"] is True
+    assert report["botified_event_oracle"]["passed"] is True
+    assert report["gaze_attention_oracle"] == {
+        "evaluated": False,
+        "passed": None,
+        "scenes": [],
+    }
+    assert "gaze_attention_oracle_not_evaluated" in report["failure_reasons"]
+    assert "gaze_attention_oracle" in report["not_covered"]
+    assert report["gates"]["current_pc_core"]["gaze_attention_oracle_evaluated"] is False
+    assert report["gates"]["current_pc_core"]["gaze_attention_oracle_pass"] is False
 
 
 def test_all_scenes_full_scene_botified_event_oracle_fails_missing_required(

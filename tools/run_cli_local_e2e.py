@@ -1279,15 +1279,43 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
         botified_event_oracle = _unevaluated_botified_event_oracle()
     if not oracle_evaluated:
         failure_reasons.append("botified_event_oracle_not_evaluated")
+    attention_oracle_contract = _attention_oracle_contract(
+        config.manifest_report.get("effective_manifest")
+    )
+    gaze_attention_oracle_evaluated = (
+        oracle_evaluated and attention_oracle_contract is not None
+    )
+    if gaze_attention_oracle_evaluated:
+        gaze_attention_oracle, attention_failure_reasons = (
+            _evaluate_gaze_attention_oracle(
+                scene_reports,
+                attention_oracle_contract,
+            )
+        )
+        failure_reasons.extend(attention_failure_reasons)
+    else:
+        gaze_attention_oracle = _unevaluated_gaze_attention_oracle()
+    if not gaze_attention_oracle_evaluated:
+        failure_reasons.append("gaze_attention_oracle_not_evaluated")
     oracle_contracts_present = _botified_event_oracle_contracts_present(
         botified_event_oracle
+    )
+    gaze_attention_oracle_contracts_present = (
+        _gaze_attention_oracle_contracts_present(gaze_attention_oracle)
     )
     oracle_pass = (
         oracle_evaluated
         and botified_event_oracle["passed"] is True
         and oracle_contracts_present
     )
-    current_pc_core_gate_pass = slice_matrix_pass and oracle_pass
+    gaze_attention_oracle_pass = (
+        gaze_attention_oracle_evaluated
+        and gaze_attention_oracle["passed"] is True
+        and gaze_attention_oracle_contracts_present
+    )
+    current_pc_core_gate_pass = (
+        slice_matrix_pass and oracle_pass and gaze_attention_oracle_pass
+    )
     ga_gate_status = (
         GA_GATE_STATUS_PC_SIMULATED_PASS
         if current_pc_core_gate_pass
@@ -1315,12 +1343,19 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
             "scene_replay_mode": "full_scene_matrix",
             "scene_results": scene_reports,
             "botified_event_oracle": botified_event_oracle,
+            "gaze_attention_oracle": gaze_attention_oracle,
+            "gaze_attention_oracle_evaluated": gaze_attention_oracle_evaluated,
+            "gaze_attention_oracle_pass": gaze_attention_oracle_pass,
             "oracle_evaluated": oracle_evaluated,
             "oracle_evaluation_passed": botified_event_oracle["passed"],
             "not_covered": _full_scene_matrix_not_covered(
                 slice_matrix_pass=slice_matrix_pass,
                 oracle_evaluated=oracle_evaluated,
                 oracle_contracts_present=oracle_contracts_present,
+                gaze_attention_oracle_evaluated=gaze_attention_oracle_evaluated,
+                gaze_attention_oracle_contracts_present=(
+                    gaze_attention_oracle_contracts_present
+                ),
             ),
             "non_blocking_gaps": list(FULL_MATRIX_NON_BLOCKING_GAPS),
             "gates": _full_scene_matrix_gates(
@@ -1329,6 +1364,8 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
                 slice_matrix_pass=slice_matrix_pass,
                 oracle_evaluated=oracle_evaluated,
                 oracle_pass=oracle_pass,
+                gaze_attention_oracle_evaluated=gaze_attention_oracle_evaluated,
+                gaze_attention_oracle_pass=gaze_attention_oracle_pass,
                 ga_gate_status=ga_gate_status,
             ),
         }
@@ -1343,12 +1380,19 @@ def _full_scene_matrix_not_covered(
     slice_matrix_pass: bool,
     oracle_evaluated: bool,
     oracle_contracts_present: bool,
+    gaze_attention_oracle_evaluated: bool,
+    gaze_attention_oracle_contracts_present: bool,
 ) -> list[str]:
     gaps: list[str] = []
     if not slice_matrix_pass:
         gaps.append("full_scene_matrix")
     if not oracle_evaluated or not oracle_contracts_present:
         gaps.append("oracle")
+    if (
+        not gaze_attention_oracle_evaluated
+        or not gaze_attention_oracle_contracts_present
+    ):
+        gaps.append("gaze_attention_oracle")
     return gaps
 
 
@@ -1359,6 +1403,8 @@ def _full_scene_matrix_gates(
     slice_matrix_pass: bool,
     oracle_evaluated: bool,
     oracle_pass: bool,
+    gaze_attention_oracle_evaluated: bool,
+    gaze_attention_oracle_pass: bool,
     ga_gate_status: str,
 ) -> dict[str, Any]:
     return {
@@ -1370,6 +1416,8 @@ def _full_scene_matrix_gates(
             "slice_matrix_pass": slice_matrix_pass,
             "oracle_evaluated": oracle_evaluated,
             "oracle_pass": oracle_pass,
+            "gaze_attention_oracle_evaluated": gaze_attention_oracle_evaluated,
+            "gaze_attention_oracle_pass": gaze_attention_oracle_pass,
             "stdout_pollution_count": _full_scene_matrix_stdout_pollution_count(
                 scene_reports
             ),
@@ -1476,6 +1524,229 @@ def _should_evaluate_botified_event_oracle(config: CliLocalE2EConfig) -> bool:
     return (
         len(config.head_state_segments) == 1
         and config.head_state_segments[0].state == "stationary"
+    )
+
+
+def _unevaluated_gaze_attention_oracle() -> dict[str, Any]:
+    return {
+        "evaluated": False,
+        "passed": None,
+        "scenes": [],
+    }
+
+
+def _attention_oracle_contract(effective_manifest: Any) -> dict[str, Any] | None:
+    if not isinstance(effective_manifest, dict):
+        return None
+    oracle = effective_manifest.get("oracle")
+    if not isinstance(oracle, dict):
+        return None
+    timeline = oracle.get("expected_attention_target_timeline")
+    if not isinstance(timeline, dict):
+        return None
+    scenes = timeline.get("scenes")
+    if not isinstance(scenes, dict) or not scenes:
+        return None
+    return scenes
+
+
+def _evaluate_gaze_attention_oracle(
+    scene_reports: list[dict[str, Any]],
+    scene_contracts: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    scenes: list[dict[str, Any]] = []
+    failure_reasons: list[str] = []
+
+    for scene_report in scene_reports:
+        scene = str(scene_report.get("scene") or "")
+        raw_windows = scene_contracts.get(scene)
+        contract_present = isinstance(raw_windows, list) and bool(raw_windows)
+        if not contract_present:
+            failure_reasons.append(
+                f"gaze_attention_oracle_missing_scene_contract:{scene}"
+            )
+            scenes.append(
+                {
+                    "scene": scene,
+                    "contract_present": False,
+                    "windows": 0,
+                    "matched_windows": 0,
+                    "mismatches": [],
+                }
+            )
+            continue
+
+        gaze = scene_report.get("gaze")
+        if not isinstance(gaze, dict):
+            gaze = {}
+        accepted_samples = _fresh_gaze_samples(gaze.get("accepted_samples"))
+        scene_diagnostics = _evaluate_gaze_attention_scene(
+            scene=scene,
+            windows=raw_windows,
+            accepted_samples=accepted_samples,
+        )
+        if scene_diagnostics["mismatches"]:
+            failure_reasons.append(f"gaze_attention_oracle_mismatch:{scene}")
+        scenes.append(scene_diagnostics)
+
+    return (
+        {
+            "evaluated": True,
+            "passed": not failure_reasons,
+            "scenes": scenes,
+        },
+        failure_reasons,
+    )
+
+
+def _evaluate_gaze_attention_scene(
+    *,
+    scene: str,
+    windows: list[Any],
+    accepted_samples: list[dict[str, Any]],
+) -> dict[str, Any]:
+    mismatches: list[dict[str, Any]] = []
+    matched_windows = 0
+
+    for index, window in enumerate(windows):
+        if not isinstance(window, dict):
+            mismatches.append({"window_index": index, "reason": "invalid_window"})
+            continue
+        start_ms = _finite_float(window.get("start_frame_timestamp_ms"))
+        end_ms = _finite_float(window.get("end_frame_timestamp_ms"))
+        if start_ms is None or end_ms is None or end_ms < start_ms:
+            mismatches.append({"window_index": index, "reason": "invalid_window"})
+            continue
+
+        samples = [
+            sample
+            for sample in accepted_samples
+            if _sample_frame_timestamp_in_window(sample, start_ms, end_ms)
+        ]
+        if window.get("no_target") is True:
+            tracking_samples = [
+                sample for sample in samples if _is_tracking_gaze_sample(sample)
+            ]
+            if tracking_samples:
+                mismatches.append(
+                    {
+                        "window_index": index,
+                        "reason": "tracking_during_no_target",
+                        "sample_count": len(samples),
+                        "tracking_count": len(tracking_samples),
+                    }
+                )
+            else:
+                matched_windows += 1
+            continue
+
+        allowed_track_ids = _allowed_attention_track_ids(window)
+        if not allowed_track_ids:
+            mismatches.append(
+                {"window_index": index, "reason": "missing_expected_target"}
+            )
+            continue
+
+        matching_samples = [
+            sample
+            for sample in samples
+            if _is_tracking_gaze_sample(sample)
+            and _sample_track_id(sample) in allowed_track_ids
+            and _sample_matches_optional_attention_point(sample, window)
+        ]
+        if matching_samples:
+            matched_windows += 1
+        else:
+            mismatches.append(
+                {
+                    "window_index": index,
+                    "reason": "target_not_observed",
+                    "sample_count": len(samples),
+                    "allowed_target_track_ids": sorted(allowed_track_ids),
+                }
+            )
+
+    return {
+        "scene": scene,
+        "contract_present": True,
+        "windows": len(windows),
+        "matched_windows": matched_windows,
+        "mismatches": mismatches,
+    }
+
+
+def _fresh_gaze_samples(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    samples: list[dict[str, Any]] = []
+    for sample in value:
+        if isinstance(sample, dict) and sample.get("state") != "stale":
+            samples.append(sample)
+    return samples
+
+
+def _sample_frame_timestamp_in_window(
+    sample: dict[str, Any],
+    start_ms: float,
+    end_ms: float,
+) -> bool:
+    timestamp_ms = _finite_float(sample.get("frame_timestamp_ms"))
+    return timestamp_ms is not None and start_ms <= timestamp_ms <= end_ms
+
+
+def _is_tracking_gaze_sample(sample: dict[str, Any]) -> bool:
+    return sample.get("valid") is True and sample.get("state") == "tracking"
+
+
+def _sample_track_id(sample: dict[str, Any]) -> int | None:
+    value = sample.get("target_track_id")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _allowed_attention_track_ids(window: dict[str, Any]) -> set[int]:
+    allowed: set[int] = set()
+    target_track_id = window.get("target_track_id")
+    if isinstance(target_track_id, int) and not isinstance(target_track_id, bool):
+        allowed.add(target_track_id)
+    raw_allowed = window.get("allowed_target_track_ids")
+    if isinstance(raw_allowed, list):
+        for item in raw_allowed:
+            if isinstance(item, int) and not isinstance(item, bool):
+                allowed.add(item)
+    return allowed
+
+
+def _sample_matches_optional_attention_point(
+    sample: dict[str, Any],
+    window: dict[str, Any],
+) -> bool:
+    expected_u = _finite_float(window.get("target_u"))
+    expected_v = _finite_float(window.get("target_v"))
+    tolerance_px = _finite_float(window.get("tolerance_px"))
+    if expected_u is None and expected_v is None:
+        return True
+    if tolerance_px is None or tolerance_px < 0:
+        return False
+    sample_u = _finite_float(sample.get("target_u"))
+    sample_v = _finite_float(sample.get("target_v"))
+    if expected_u is not None and (sample_u is None or abs(sample_u - expected_u) > tolerance_px):
+        return False
+    if expected_v is not None and (sample_v is None or abs(sample_v - expected_v) > tolerance_px):
+        return False
+    return True
+
+
+def _gaze_attention_oracle_contracts_present(
+    gaze_attention_oracle: dict[str, Any],
+) -> bool:
+    scenes = gaze_attention_oracle.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        return False
+    return all(
+        isinstance(scene, dict) and scene.get("contract_present") is True
+        for scene in scenes
     )
 
 
@@ -2324,6 +2595,9 @@ def _base_report(
         "not_covered": list(NOT_COVERED),
         "non_blocking_gaps": [],
         "botified_event_oracle": _unevaluated_botified_event_oracle(),
+        "gaze_attention_oracle": _unevaluated_gaze_attention_oracle(),
+        "gaze_attention_oracle_evaluated": False,
+        "gaze_attention_oracle_pass": False,
         "gates": _default_gates(status),
     }
     for key in MANIFEST_REPORT_KEYS:
@@ -2430,6 +2704,7 @@ def _summarize_gaze_jsonl_with_samples(
         ),
         "gaze_publish_hz": _gaze_publish_hz_summary(accepted_samples),
         "fresh_gaze_publish_hz": _gaze_publish_hz_summary(fresh_samples),
+        "accepted_samples": accepted_samples,
     }
     return summary, tuple(latency_samples)
 
