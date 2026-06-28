@@ -1209,7 +1209,7 @@ def test_all_scenes_full_scene_frame_counts_fail_core_without_scene_contracts(
     assert report["overall_pass"] is False
     assert report["current_pc_core_gate_pass"] is False
     assert report["ga_gate_pass"] is False
-    assert report["ga_gate_status"] == module.GA_GATE_STATUS
+    assert report["ga_gate_status"] == module.GA_GATE_STATUS_PC_SIMULATED_FAIL
     assert report["report_scope"] == "current_pc_core_gate"
     assert report["overall_scope"] == "current_pc_core_gate"
     assert report["oracle_evaluated"] is True
@@ -1262,8 +1262,10 @@ def test_all_scenes_full_scene_frame_counts_fail_core_without_scene_contracts(
     }
     assert report["gates"]["ga"] == {
         "pass": False,
-        "status": module.GA_GATE_STATUS,
+        "scope": "pc_simulated_ga",
+        "status": module.GA_GATE_STATUS_PC_SIMULATED_FAIL,
     }
+    assert set(report["gates"]) == {"current_pc_core", "ga"}
     assert [
         (
             result["scene"],
@@ -1330,6 +1332,16 @@ def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> N
     assert report["slice_matrix_pass"] is True
     assert report["overall_pass"] is True
     assert report["current_pc_core_gate_pass"] is True
+    assert report["ga_gate_pass"] is True
+    assert report["ga_gate_status"] == module.GA_GATE_STATUS_PC_SIMULATED_PASS
+    assert report["gates"]["ga"] == {
+        "scope": "pc_simulated_ga",
+        "pass": True,
+        "status": module.GA_GATE_STATUS_PC_SIMULATED_PASS,
+    }
+    assert report["post_ga_validation_status"] == "out_of_scope"
+    assert report["post_ga_not_covered"] == module.POST_GA_NOT_COVERED
+    assert set(report["gates"]) == {"current_pc_core", "ga"}
     assert report["oracle_evaluated"] is True
     assert report["oracle_evaluation_passed"] is True
     assert "oracle" not in report["not_covered"]
@@ -1366,6 +1378,8 @@ def test_all_scenes_full_scene_botified_event_oracle_fails_missing_required(
     assert report["slice_matrix_pass"] is True
     assert report["overall_pass"] is False
     assert report["current_pc_core_gate_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert report["ga_gate_status"] == module.GA_GATE_STATUS_PC_SIMULATED_FAIL
     assert report["scene_results"][0]["slice_pass"] is True
     assert report["oracle_evaluated"] is True
     assert report["oracle_evaluation_passed"] is False
@@ -3547,7 +3561,9 @@ def test_fake_runner_failures_write_nonzero_report_and_cleanup(
         assert runner.started["gaze_subscriber"].stopped is True
 
 
-def test_report_never_claims_full_ga_pass(tmp_path: Path) -> None:
+def test_partial_smoke_does_not_claim_pc_simulated_or_real_robot_ga_pass(
+    tmp_path: Path,
+) -> None:
     module = import_runner_module()
     paths = make_case(tmp_path)
     runner = FakeRunner(
@@ -3572,6 +3588,11 @@ def test_report_never_claims_full_ga_pass(tmp_path: Path) -> None:
     assert report["overall_scope"] == "partial_smoke"
     assert report["gates"]["current_pc_core"]["pass"] is False
     assert report["gates"]["ga"]["pass"] is False
+    assert report["gates"]["ga"]["scope"] == "pc_simulated_ga"
+    assert report["post_ga_validation_status"] == "out_of_scope"
+    assert report["post_ga_not_covered"] == module.POST_GA_NOT_COVERED
+    assert set(report["gates"]) == {"current_pc_core", "ga"}
     assert '"full_pass": true' not in serialized
     assert '"ga_gate_pass": true' not in serialized
     assert '"current_pc_core_gate_pass": true' not in serialized
+    assert "real_robot_validation" in serialized

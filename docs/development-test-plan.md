@@ -4,7 +4,7 @@
 
 后续 GA 开发以 [GA 后续开发计划](ga-development-plan.md) 为准。本文保留早期总体设计背景，并已同步关键边界：机器人 CLI 只发布 DDS gaze target，不直接操纵运控。
 
-当前 GA acceptance/pass/fail authority 是 PC 本地模拟：synthetic DDS image/head-state publishers、runtime server/CLI、DDS gaze subscriber/stdout collector、`val-data` full PC E2E，以及必要轻量稳定性和 latency checks。真机实际运行、真实 robot camera DDS、真实 head-state source、physical head pointing、HIL/real closed loop、现场测试或 owner sign-off 不阻塞 GA；RK3588/board/real robot/field validation 属于 GA 之后的硬件适配/现场验证。只有直接保护运行边界或用户明确要求时才添加 governance/report/audit/gate 工作。
+当前 GA acceptance/pass/fail authority 是 PC 本地模拟：`tools/run_cli_local_e2e.py --full-scene --all-scenes --head-state stationary`、synthetic DDS image/head-state publishers、runtime server/CLI、DDS gaze subscriber/stdout collector、`val-data` full PC E2E、Botified event oracle，以及必要轻量稳定性和 latency checks。标准 PC gate 通过即可报告 PC-simulated GA pass；真机实际运行、真实 robot camera DDS、真实 head-state source、physical head pointing、HIL/real closed loop、现场测试或 owner sign-off 属于 post-GA validation，不阻塞 GA，也不能由 PC evidence 外推为通过。只有直接保护运行边界或用户明确要求时才添加 governance/report/audit/gate 工作。
 
 ## 1. 开发原则
 
@@ -191,7 +191,9 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 - 目标丢失、server 超时或 frame 过期时，250ms 内发布 invalid/stale sample；DDS lifespan 只作为后备失效保护。
 - frame header 标记头部运动或未知时，服务端暂停 `person_passing_by`、`person_approaching_robot`、`person_stopped_near_robot` 这类运动敏感事件。
 
-### M7 RK3588 Spike
+### M7 RK3588 Spike（post-GA / non-blocking）
+
+本段是 GA 之后的硬件适配预研，不是当前 PC-simulated GA gate 的阻塞项。
 
 产出：
 
@@ -286,7 +288,9 @@ RK3588：
 - 必须包含 decode/preprocess/postprocess/tracking。
 - 目标：E2E >= 10Hz。
 
-### 5.6 机器人测试
+### 5.6 机器人测试（post-GA / non-blocking）
+
+本段覆盖真实机器人/现场闭环验证，属于 post-GA validation，不阻塞当前 PC-simulated GA gate。
 
 覆盖：
 
@@ -329,7 +333,9 @@ gaze_target:
 
 不为每个规则开放大量配置。阈值先放在一个小配置块里，只有调试证明需要时再暴露。
 
-## 7. Handoff Checklist
+## 7. Handoff Checklist（post-GA / non-blocking）
+
+本 checklist 是后续 handoff/owner 对齐项，不作为当前 PC-simulated GA gate 的阻塞条件。
 
 开发前必须确认：
 

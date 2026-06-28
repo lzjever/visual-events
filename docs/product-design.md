@@ -310,7 +310,7 @@ header 示例：
 
 详细字段、坐标、错误、backpressure 和断线语义见 [protocol.md](../common/schema/protocol.md)。
 
-不使用 gRPC，不让服务端接 DDS，不通过 Botified 发送高频状态。GA 只发布一个高频 DDS gaze target，不发布完整 `visual_state` DDS：
+不使用 gRPC，不让服务端接 DDS，不通过 Botified 发送高频状态。当前 GA acceptance/pass/fail authority 是 PC 本地模拟门禁；GA runtime 只发布一个高频 DDS gaze target，不发布完整 `visual_state` DDS：
 
 ```text
 /visual_events/gaze_target  best_effort, keep_last=1, lifespan=250ms
@@ -323,7 +323,7 @@ header 示例：
 | RK3588 pose 端到端性能不足 | 首版就保留 backend 边界；单独做 RK3588 spike，实测 decode/preprocess/infer/postprocess/tracking |
 | 头部转动污染图像运动 | V1 frame header 包含可选 `head_motion`；CLI 从头部状态 DDS 生成该字段；服务端在头部运动或状态未知时暂停运动敏感规则 |
 | Botified 被事件刷屏 | 事件 rising-edge、cooldown、同 track 去重；高频状态永不进入 Botified |
-| CLI 越过安全边界直接控头 | CLI 只发布 DDS gaze target；release audit 必须证明不链接、不调用运控 SDK |
+| CLI 越过安全边界直接控头 | CLI 只发布 DDS gaze target；release audit 属于 post-GA validation，必须证明不链接、不调用运控 SDK |
 | 人脸/看向机器人判断不准 | V1 不输出看向机器人事件；必要时 V1.5 加人脸模型和弱 gaze 规则 |
 | 授权风险 | 产品化前确认 Ultralytics AGPL/Enterprise 授权 |
 
@@ -335,7 +335,7 @@ header 示例：
 - 输出 `visual_state`：稳定 >= 9Hz，连续 5 分钟不断线。
 - 服务端 GPU 模式延迟：从 server 收到完整 frame 到发出 `visual_state`，P95 < 120ms，P99 < 200ms。
 - 服务端显存：目标 < 4GB。
-- RK3588 预研目标：单路 640 pose E2E >= 10Hz。
+- RK3588 预研目标（post-GA / non-blocking）：单路 640 pose E2E >= 10Hz。
 
 感知：
 
@@ -359,7 +359,7 @@ Botified：
 - 每个新鲜 `visual_state` 派生一条 valid 或 invalid gaze target，目标 >=9Hz；CLI 不用重复旧 target 凑频率。server 断线或超时时，250ms 内发布 invalid/stale sample，之后不再发布过期有效目标。
 - 多人场景默认输出画面中最大稳定人物。
 - 目标短暂丢失时发布 `valid=false`；DDS lifespan 是下游失效的后备保护，不允许输出过期有效目标。
-- 真实头部动作验收属于 GA 之后的硬件/现场验证；GA 阶段本 repo 只验收 PC 模拟下 DDS target 正确性、时效性和失效语义。
+- 真实头部动作验收属于 post-GA 硬件/现场验证；GA 阶段本 repo 只验收 PC 模拟下 DDS target 正确性、时效性和失效语义，不能由 PC evidence 外推为真机/RK/field/release audit 通过。
 
 ## 11. 参考资料
 

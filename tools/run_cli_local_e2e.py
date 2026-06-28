@@ -83,7 +83,16 @@ FULL_MATRIX_NON_BLOCKING_GAPS = [
     "release_report",
 ]
 CURRENT_PC_CORE_GATE_SCOPE = "current_pc_core_gate"
-GA_GATE_STATUS = "not_evaluated_not_release_or_field_gate"
+GA_GATE_STATUS_NOT_EVALUATED = "not_evaluated"
+GA_GATE_STATUS_PC_SIMULATED_PASS = "pc_simulated_ga_pass"
+GA_GATE_STATUS_PC_SIMULATED_FAIL = "pc_simulated_ga_fail"
+GA_GATE_STATUS = GA_GATE_STATUS_NOT_EVALUATED
+POST_GA_NOT_COVERED = [
+    "real_robot_validation",
+    "rk3588_board_validation",
+    "field_validation",
+    "release_audit",
+]
 MANIFEST_UNREADABLE_OR_INVALID = "manifest_unreadable_or_invalid"
 MANIFEST_REPORT_KEYS = [
     "data_dir",
@@ -1279,6 +1288,11 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
         and oracle_contracts_present
     )
     current_pc_core_gate_pass = slice_matrix_pass and oracle_pass
+    ga_gate_status = (
+        GA_GATE_STATUS_PC_SIMULATED_PASS
+        if current_pc_core_gate_pass
+        else GA_GATE_STATUS_PC_SIMULATED_FAIL
+    )
     report = _base_report(
         manifest_report=config.manifest_report,
         status="full_scene_matrix_pass"
@@ -1294,6 +1308,8 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
             "slice_matrix_pass": slice_matrix_pass,
             "overall_pass": current_pc_core_gate_pass,
             "current_pc_core_gate_pass": current_pc_core_gate_pass,
+            "ga_gate_pass": current_pc_core_gate_pass,
+            "ga_gate_status": ga_gate_status,
             "report_scope": CURRENT_PC_CORE_GATE_SCOPE,
             "overall_scope": CURRENT_PC_CORE_GATE_SCOPE,
             "scene_replay_mode": "full_scene_matrix",
@@ -1313,6 +1329,7 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
                 slice_matrix_pass=slice_matrix_pass,
                 oracle_evaluated=oracle_evaluated,
                 oracle_pass=oracle_pass,
+                ga_gate_status=ga_gate_status,
             ),
         }
     )
@@ -1342,6 +1359,7 @@ def _full_scene_matrix_gates(
     slice_matrix_pass: bool,
     oracle_evaluated: bool,
     oracle_pass: bool,
+    ga_gate_status: str,
 ) -> dict[str, Any]:
     return {
         "current_pc_core": {
@@ -1360,8 +1378,9 @@ def _full_scene_matrix_gates(
             ),
         },
         "ga": {
-            "pass": False,
-            "status": GA_GATE_STATUS,
+            "scope": "pc_simulated_ga",
+            "pass": current_pc_core_gate_pass,
+            "status": ga_gate_status,
         },
     }
 
@@ -2297,6 +2316,8 @@ def _base_report(
         "current_pc_core_gate_pass": False,
         "ga_gate_pass": False,
         "ga_gate_status": GA_GATE_STATUS,
+        "post_ga_validation_status": "out_of_scope",
+        "post_ga_not_covered": list(POST_GA_NOT_COVERED),
         "report_scope": _report_scope_for_status(status),
         "pc_local_e2e_status": status,
         "failure_reasons": failure_reasons,
@@ -2327,6 +2348,7 @@ def _default_gates(status: str) -> dict[str, Any]:
         },
         "ga": {
             "pass": False,
+            "scope": "pc_simulated_ga",
             "status": GA_GATE_STATUS,
         },
     }

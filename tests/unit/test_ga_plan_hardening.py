@@ -199,7 +199,7 @@ def test_ga_plan_defines_current_pc_delivery_gate_and_deferred_hardware_gate():
             "`overall_scope=current_pc_core_gate`",
             "`current_pc_core_gate_pass`",
             "RK3588/board/real robot/field validation 是 GA 之后的硬件适配/现场验证，不是 deferred current PC core gate，也不阻塞当前 PC 本地核心功能门禁",
-            "PC evidence 只能声称 current PC core gate passed / PC-simulated core passed",
+            "PC evidence 只能声称 PC-simulated GA passed",
             "不得声称 `real robot validated`、`board compatible`、`RK supported`、`field GA passed` 或 release audit passed",
             "valid tracking 时头部物理指向目标",
             "invalid/stale 后不继续动",
@@ -490,8 +490,10 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
             "Botified event oracle",
             "`overall_scope=current_pc_core_gate`",
             "`current_pc_core_gate_pass`",
-            "`ga_gate_pass=false` 或 `ga_gate_status=out_of_scope`",
-            "post-GA hardware/field validation、release report/handoff audit、full fault matrix 和 long soak",
+            "`ga_gate_pass=true` 且 `ga_gate_status=pc_simulated_ga_pass`",
+            "失败时 `ga_gate_pass=false` 且 `ga_gate_status=pc_simulated_ga_fail`",
+            "partial smoke/preflight 为 `ga_gate_status=not_evaluated`",
+            "real robot/field/RK/release audit 未覆盖写入 `post_ga_not_covered`",
             "current PC core gate 已覆盖 PC 本地 DDS over-wire 核心路径",
             "CLI 当前 PC gate 必须有 unit、integration、PC local E2E 和必要轻量 fault checks",
             "真机 smoke/closed-loop 是 post-GA hardware/field validation",
@@ -503,7 +505,6 @@ def test_ga_plan_baseline_and_team_review_match_current_cli_state():
     assert "runner 仍不使用 val-data oracle 作为 full matrix" not in text
     assert "不证明 full PC gate、full event oracle、Botified 端到端业务" not in text
     assert "CLI 必须有 unit、integration、PC local E2E、fault matrix、真机 smoke" not in text
-    assert "`ga_gate_pass=true`" not in text
     assert "`overall_pass=true`" not in text
     assert "RK/board probe 已完成" not in text
     assert "真机 smoke 已完成" not in text
@@ -649,8 +650,10 @@ def test_ga_plan_records_step5_native_participants_and_current_pc_core_gate():
             "Botified event oracle 判定 stdout 事件",
             "`overall_scope=current_pc_core_gate`",
             "`current_pc_core_gate_pass`",
-            "`ga_gate_pass=false` 或 `ga_gate_status=out_of_scope`",
-            "`post_ga_not_covered` 或 `non_blocking_gaps`",
+            "`ga_gate_pass=true` 且 `ga_gate_status=pc_simulated_ga_pass`",
+            "失败时 `ga_gate_pass=false` 且 `ga_gate_status=pc_simulated_ga_fail`",
+            "partial smoke/preflight 为 `ga_gate_status=not_evaluated`",
+            "`post_ga_not_covered`",
             "历史 partial smoke 证据保留为背景",
             "不能再被解释为当前只有 partial smoke",
             "current PC core gate 的 manifest/oracle 必须列出 scene 名称",
@@ -662,12 +665,9 @@ def test_ga_plan_records_step5_native_participants_and_current_pc_core_gate():
     assert "不是 full PC gate" not in text
     assert "不证明 full PC gate、full event oracle、Botified 端到端业务" not in text
     assert "完整 PC 本地 DDS E2E GA gate 仍未完成" not in text
-    assert "`ga_gate_pass=true`" not in text
     assert "`overall_pass=true`" not in text
     assert "fault matrix 已完成" not in text
     assert "release report 已完成" not in text
-    assert "RK/board probe 已完成" not in text
-    assert "真机 smoke 已完成" not in text
 
 
 def test_protocol_pins_cli_frame_id_stale_watchdog_and_botified_allowlist():

@@ -25,4 +25,4 @@
 | yaw_vel_rad_s | float64 | Yaw angular rate in radians per second. |
 | pitch_vel_rad_s | float64 | Pitch angular rate in radians per second. |
 
-Consumers must treat stale or non-finite values as unknown. A deployment without `HeadStateV1_` cannot be considered full GA because visual decisions cannot be correlated with observed head state.
+Consumers must treat stale or non-finite values as unknown. The current GA acceptance gate uses PC-simulated `HeadStateV1_` input; real robot/RK/field/release validation must prove the same contract separately as post-GA validation and cannot be inferred from PC evidence.
