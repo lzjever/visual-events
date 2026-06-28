@@ -57,6 +57,8 @@ MIN_HEAD_STATE_HZ = 9.0
 MIN_GAZE_PUBLISH_HZ = 9.0
 MAX_GAZE_PUBLISH_HZ = 10.0
 MIN_PC_GA_ATTENTION_SWITCH_CONFIRM_MS = 750.0
+MAX_PC_GA_TARGET_NORM_JITTER_P95 = 0.04
+TARGET_NORM_CONSISTENCY_TOLERANCE = 1e-3
 MAX_CAPTURE_TO_GAZE_LATENCY_MS = 60_000.0
 PROCESS_COLLECTED_LINE_LIMIT = 4096
 PROCESS_READER_JOIN_TIMEOUT_S = 1.0
@@ -1689,11 +1691,13 @@ def _evaluate_gaze_attention_oracle(
         gaze = scene_report.get("gaze")
         if not isinstance(gaze, dict):
             gaze = {}
-        accepted_samples = _fresh_gaze_samples(gaze.get("accepted_samples"))
+        accepted_samples = _gaze_sample_dicts(gaze.get("accepted_samples"))
+        fresh_samples = _fresh_gaze_samples(accepted_samples)
         scene_diagnostics = _evaluate_gaze_attention_scene(
             scene=scene,
             windows=raw_windows,
-            accepted_samples=accepted_samples,
+            accepted_samples=fresh_samples,
+            dwell_samples=accepted_samples,
         )
         if scene_diagnostics["mismatches"]:
             failure_reasons.append(f"gaze_attention_oracle_mismatch:{scene}")
@@ -1714,8 +1718,10 @@ def _evaluate_gaze_attention_scene(
     scene: str,
     windows: list[Any],
     accepted_samples: list[dict[str, Any]],
+    dwell_samples: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     mismatches: list[dict[str, Any]] = []
+    window_diagnostics: list[dict[str, Any]] = []
     matched_windows = 0
 
     for index, window in enumerate(windows):
@@ -1766,7 +1772,16 @@ def _evaluate_gaze_attention_scene(
         ]
         if matching_samples:
             matched_windows += 1
+            norm_diagnostics, norm_mismatches = _target_norm_window_diagnostics(
+                window_index=index,
+                matching_samples=matching_samples,
+            )
+            window_diagnostics.append(norm_diagnostics)
+            mismatches.extend(norm_mismatches)
         else:
+            window_diagnostics.append(
+                _empty_target_norm_window_diagnostics(window_index=index)
+            )
             mismatches.append(
                 {
                     "window_index": index,
@@ -1776,21 +1791,287 @@ def _evaluate_gaze_attention_scene(
                 }
             )
 
+    switch_dwell_diagnostics, switch_dwell_mismatches = (
+        _target_switch_dwell_diagnostics(
+            accepted_samples if dwell_samples is None else dwell_samples
+        )
+    )
+    mismatches.extend(switch_dwell_mismatches)
+
     return {
         "scene": scene,
         "contract_present": True,
         "windows": len(windows),
         "matched_windows": matched_windows,
+        "window_diagnostics": window_diagnostics,
+        "diagnostics": {
+            "target_switch_dwell": switch_dwell_diagnostics,
+        },
         "mismatches": mismatches,
     }
 
 
-def _fresh_gaze_samples(value: Any) -> list[dict[str, Any]]:
+def _empty_target_norm_window_diagnostics(*, window_index: int) -> dict[str, Any]:
+    return {
+        "window_index": window_index,
+        "matching_sample_count": 0,
+        "target_norm_consistency": {
+            "checked": False,
+            "passed": None,
+            "invalid_count": 0,
+            "tolerance": TARGET_NORM_CONSISTENCY_TOLERANCE,
+        },
+        "target_norm_jitter": {
+            "available": False,
+            "sample_count": 0,
+            "p95": None,
+            "max_p95": MAX_PC_GA_TARGET_NORM_JITTER_P95,
+            "passed": None,
+        },
+    }
+
+
+def _target_norm_window_diagnostics(
+    *,
+    window_index: int,
+    matching_samples: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    mismatches: list[dict[str, Any]] = []
+    invalid_norms: list[dict[str, Any]] = []
+    for sample_index, sample in enumerate(matching_samples):
+        invalid_reason = _target_norm_inconsistency_reason(sample)
+        if invalid_reason is not None:
+            invalid_norms.append(
+                {
+                    "sample_index": sample_index,
+                    "reason": invalid_reason,
+                }
+            )
+
+    if invalid_norms:
+        mismatches.append(
+            {
+                "window_index": window_index,
+                "reason": "target_norm_inconsistent",
+                "sample_count": len(matching_samples),
+                "invalid_count": len(invalid_norms),
+                "invalid_samples": invalid_norms,
+            }
+        )
+
+    jitter_summary = _target_norm_jitter_summary(matching_samples)
+    if jitter_summary["passed"] is False:
+        mismatches.append(
+            {
+                "window_index": window_index,
+                "reason": "target_norm_jitter_above_max",
+                "sample_count": jitter_summary["sample_count"],
+                "p95": jitter_summary["p95"],
+                "max_p95": jitter_summary["max_p95"],
+            }
+        )
+
+    diagnostics = {
+        "window_index": window_index,
+        "matching_sample_count": len(matching_samples),
+        "target_norm_consistency": {
+            "checked": True,
+            "passed": not invalid_norms,
+            "invalid_count": len(invalid_norms),
+            "tolerance": TARGET_NORM_CONSISTENCY_TOLERANCE,
+        },
+        "target_norm_jitter": jitter_summary,
+    }
+    return diagnostics, mismatches
+
+
+def _target_norm_inconsistency_reason(sample: dict[str, Any]) -> str | None:
+    target_u = _finite_float(sample.get("target_u"))
+    target_v = _finite_float(sample.get("target_v"))
+    target_norm_x = _finite_float(sample.get("target_norm_x"))
+    target_norm_y = _finite_float(sample.get("target_norm_y"))
+    image_width = _finite_float(sample.get("image_width"))
+    image_height = _finite_float(sample.get("image_height"))
+    if (
+        target_u is None
+        or target_v is None
+        or target_norm_x is None
+        or target_norm_y is None
+        or image_width is None
+        or image_height is None
+    ):
+        return "missing_or_non_finite_fields"
+    if image_width <= 0 or image_height <= 0:
+        return "invalid_image_size"
+    if not (0 <= target_u <= image_width) or not (0 <= target_v <= image_height):
+        return "target_pixel_out_of_range"
+    if not (-0.5 <= target_norm_x <= 0.5) or not (-0.5 <= target_norm_y <= 0.5):
+        return "target_norm_out_of_range"
+    expected_norm_x = target_u / image_width - 0.5
+    expected_norm_y = target_v / image_height - 0.5
+    if (
+        abs(target_norm_x - expected_norm_x) > TARGET_NORM_CONSISTENCY_TOLERANCE
+        or abs(target_norm_y - expected_norm_y) > TARGET_NORM_CONSISTENCY_TOLERANCE
+    ):
+        return "target_norm_formula_mismatch"
+    return None
+
+
+def _target_norm_jitter_summary(
+    matching_samples: list[dict[str, Any]],
+) -> dict[str, Any]:
+    sample_count = len(matching_samples)
+    if sample_count < 2:
+        return {
+            "available": False,
+            "sample_count": sample_count,
+            "p95": None,
+            "max_p95": MAX_PC_GA_TARGET_NORM_JITTER_P95,
+            "passed": None,
+        }
+    first_norm_x = _finite_float(matching_samples[0].get("target_norm_x"))
+    first_norm_y = _finite_float(matching_samples[0].get("target_norm_y"))
+    if first_norm_x is None or first_norm_y is None:
+        return {
+            "available": False,
+            "sample_count": sample_count,
+            "p95": None,
+            "max_p95": MAX_PC_GA_TARGET_NORM_JITTER_P95,
+            "passed": None,
+        }
+    distances: list[float] = []
+    for sample in matching_samples:
+        target_norm_x = _finite_float(sample.get("target_norm_x"))
+        target_norm_y = _finite_float(sample.get("target_norm_y"))
+        if target_norm_x is None or target_norm_y is None:
+            return {
+                "available": False,
+                "sample_count": sample_count,
+                "p95": None,
+                "max_p95": MAX_PC_GA_TARGET_NORM_JITTER_P95,
+                "passed": None,
+            }
+        distances.append(
+            max(
+                abs(target_norm_x - first_norm_x),
+                abs(target_norm_y - first_norm_y),
+            )
+        )
+    p95 = _percentile_nearest_rank(distances, 95)
+    return {
+        "available": True,
+        "sample_count": sample_count,
+        "p95": p95,
+        "max_p95": MAX_PC_GA_TARGET_NORM_JITTER_P95,
+        "passed": p95 <= MAX_PC_GA_TARGET_NORM_JITTER_P95,
+    }
+
+
+def _target_switch_dwell_diagnostics(
+    accepted_samples: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    runs: list[dict[str, Any]] = []
+    violations: list[dict[str, Any]] = []
+    unavailable_transition_count = 0
+    transition_count = 0
+    current_run: dict[str, Any] | None = None
+
+    for sample in accepted_samples:
+        track_id = _sample_track_id(sample) if _is_tracking_gaze_sample(sample) else None
+        timestamp_ms = _sample_frame_or_publish_timestamp_ms(sample)
+        if track_id is None:
+            if current_run is not None:
+                runs.append(current_run)
+                current_run = None
+            continue
+
+        if current_run is None:
+            current_run = _new_target_switch_run(track_id, timestamp_ms)
+            continue
+
+        if current_run["target_track_id"] == track_id:
+            current_run["sample_count"] += 1
+            if timestamp_ms is None:
+                current_run["timestamp_unavailable"] = True
+            else:
+                current_run["last_timestamp_ms"] = timestamp_ms
+            continue
+
+        runs.append(current_run)
+        transition_count += 1
+        duration_ms = _target_switch_duration_ms(current_run, timestamp_ms)
+        if duration_ms is None:
+            unavailable_transition_count += 1
+        elif duration_ms < MIN_PC_GA_ATTENTION_SWITCH_CONFIRM_MS:
+            violations.append(
+                {
+                    "reason": "target_switch_dwell_below_min",
+                    "from_target_track_id": current_run["target_track_id"],
+                    "to_target_track_id": track_id,
+                    "duration_ms": duration_ms,
+                    "min_duration_ms": MIN_PC_GA_ATTENTION_SWITCH_CONFIRM_MS,
+                }
+            )
+        current_run = _new_target_switch_run(track_id, timestamp_ms)
+
+    if current_run is not None:
+        runs.append(current_run)
+
+    diagnostics = {
+        "available": transition_count > 0 and unavailable_transition_count == 0,
+        "run_count": len(runs),
+        "transition_count": transition_count,
+        "unavailable_transition_count": unavailable_transition_count,
+        "min_duration_ms": MIN_PC_GA_ATTENTION_SWITCH_CONFIRM_MS,
+        "violations": violations,
+    }
+    return diagnostics, violations
+
+
+def _new_target_switch_run(
+    target_track_id: int,
+    timestamp_ms: float | None,
+) -> dict[str, Any]:
+    return {
+        "target_track_id": target_track_id,
+        "sample_count": 1,
+        "first_timestamp_ms": timestamp_ms,
+        "last_timestamp_ms": timestamp_ms,
+        "timestamp_unavailable": timestamp_ms is None,
+    }
+
+
+def _target_switch_duration_ms(
+    previous_run: dict[str, Any],
+    next_first_timestamp_ms: float | None,
+) -> float | None:
+    if previous_run.get("timestamp_unavailable") is True:
+        return None
+    previous_first_timestamp_ms = _finite_float(previous_run.get("first_timestamp_ms"))
+    if previous_first_timestamp_ms is None or next_first_timestamp_ms is None:
+        return None
+    if next_first_timestamp_ms < previous_first_timestamp_ms:
+        return None
+    return next_first_timestamp_ms - previous_first_timestamp_ms
+
+
+def _sample_frame_or_publish_timestamp_ms(sample: dict[str, Any]) -> float | None:
+    frame_timestamp_ms = _finite_float(sample.get("frame_timestamp_ms"))
+    if frame_timestamp_ms is not None:
+        return frame_timestamp_ms
+    return _finite_float(sample.get("publish_timestamp_ms"))
+
+
+def _gaze_sample_dicts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
+    return [sample for sample in value if isinstance(sample, dict)]
+
+
+def _fresh_gaze_samples(value: Any) -> list[dict[str, Any]]:
     samples: list[dict[str, Any]] = []
     for sample in value:
-        if isinstance(sample, dict) and sample.get("state") != "stale":
+        if sample.get("state") != "stale":
             samples.append(sample)
     return samples
 

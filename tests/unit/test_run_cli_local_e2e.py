@@ -667,6 +667,41 @@ def gaze_jsonl(*payloads: dict[str, Any]) -> str:
     )
 
 
+def tracking_gaze_sample(
+    *,
+    target_track_id: int = 1,
+    target_u: float = 320.0,
+    target_v: float = 240.0,
+    image_width: float = 640.0,
+    image_height: float = 480.0,
+    frame_timestamp_ms: float = 990.0,
+    publish_timestamp_ms: float | None = None,
+    target_norm_x: float | None = None,
+    target_norm_y: float | None = None,
+) -> dict[str, Any]:
+    if publish_timestamp_ms is None:
+        publish_timestamp_ms = frame_timestamp_ms + 10.0
+    if target_norm_x is None:
+        target_norm_x = target_u / image_width - 0.5
+    if target_norm_y is None:
+        target_norm_y = target_v / image_height - 0.5
+    return {
+        "type": "gaze_target",
+        "camera": "front",
+        "state": "tracking",
+        "valid": True,
+        "target_track_id": target_track_id,
+        "target_u": target_u,
+        "target_v": target_v,
+        "target_norm_x": target_norm_x,
+        "target_norm_y": target_norm_y,
+        "image_width": image_width,
+        "image_height": image_height,
+        "frame_timestamp_ms": frame_timestamp_ms,
+        "publish_timestamp_ms": publish_timestamp_ms,
+    }
+
+
 def valid_gaze_stdout() -> str:
     return gaze_jsonl(
         {
@@ -705,15 +740,7 @@ def successful_full_scene_gaze_result() -> FakeResult:
     return FakeResult(
         0,
         stdout=gaze_jsonl(
-            {
-                "type": "gaze_target",
-                "camera": "front",
-                "state": "tracking",
-                "valid": True,
-                "target_track_id": 1,
-                "frame_timestamp_ms": 990,
-                "publish_timestamp_ms": 1000,
-            },
+            tracking_gaze_sample(frame_timestamp_ms=990, publish_timestamp_ms=1000),
             {
                 "type": "gaze_target",
                 "camera": "front",
@@ -1110,6 +1137,61 @@ def test_default_replay_mode_remains_partial_smoke_counts(tmp_path: Path) -> Non
     assert report["gaze"]["expected_count"] == 1
     assert report["overall_pass"] is False
     assert report["ga_gate_pass"] is False
+
+
+def test_default_replay_mode_partial_smoke_ignores_gaze_attention_hardening(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "scene-a": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+            ],
+        },
+    )
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "tracking",
+                        "valid": True,
+                        "target_track_id": 1,
+                        "frame_timestamp_ms": 990,
+                        "publish_timestamp_ms": 1000,
+                    },
+                ),
+            )
+        }
+    )
+
+    rc = module.main(base_argv(paths, "--head-state", "stationary"), runner=runner)
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["scene_replay_mode"] == "partial"
+    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
+    assert report["gaze_attention_oracle"] == {
+        "evaluated": False,
+        "passed": None,
+        "scenes": [],
+    }
+    assert "gaze_attention_oracle_not_evaluated" not in report["failure_reasons"]
+    assert all(
+        "gaze_attention_oracle_mismatch" not in reason
+        for reason in report["failure_reasons"]
+    )
 
 
 def test_full_scene_uses_duration_gaze_collection_not_frame_count(
@@ -1892,6 +1974,497 @@ def test_all_scenes_full_scene_gaze_attention_oracle_allows_switch_targets(
     assert scene_oracle["mismatches"] == []
 
 
+def test_all_scenes_full_scene_gaze_attention_oracle_fails_target_norm_jitter(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 1090,
+                    "target_track_id": 1,
+                },
+            ],
+        },
+    )
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    tracking_gaze_sample(
+                        target_u=320,
+                        target_v=240,
+                        frame_timestamp_ms=990,
+                        publish_timestamp_ms=1000,
+                    ),
+                    tracking_gaze_sample(
+                        target_u=352,
+                        target_v=240,
+                        frame_timestamp_ms=1090,
+                        publish_timestamp_ms=1100,
+                    ),
+                ),
+            )
+        },
+        process_results={"cli": FakeResult(0, stdout=botified_frame("person_waving"))},
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["gaze_attention_oracle"]["passed"] is False
+    assert "gaze_attention_oracle_mismatch:pic_hello" in report["failure_reasons"]
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 1
+    assert scene_oracle["mismatches"] == [
+        {
+            "window_index": 0,
+            "reason": "target_norm_jitter_above_max",
+            "sample_count": 2,
+            "p95": 0.050000000000000044,
+            "max_p95": 0.04,
+        }
+    ]
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_fails_norm_inconsistent(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+            ],
+        },
+    )
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    tracking_gaze_sample(
+                        target_u=320,
+                        target_v=240,
+                        target_norm_x=0.25,
+                        frame_timestamp_ms=990,
+                        publish_timestamp_ms=1000,
+                    ),
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "lost",
+                        "valid": False,
+                        "frame_timestamp_ms": 1090,
+                        "publish_timestamp_ms": 1100,
+                    },
+                ),
+            )
+        },
+        process_results={"cli": FakeResult(0, stdout=botified_frame("person_waving"))},
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["gaze_attention_oracle"]["passed"] is False
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 1
+    assert scene_oracle["mismatches"][0]["reason"] == "target_norm_inconsistent"
+    assert scene_oracle["mismatches"][0]["window_index"] == 0
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_fails_switch_dwell(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 1090,
+                    "target_track_id": 1,
+                },
+            ],
+        },
+    )
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=990,
+                        publish_timestamp_ms=1000,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1090,
+                        publish_timestamp_ms=1100,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=2,
+                        frame_timestamp_ms=1190,
+                        publish_timestamp_ms=1200,
+                    ),
+                ),
+            )
+        },
+        process_results={"cli": FakeResult(0, stdout=botified_frame("person_waving"))},
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["gaze_attention_oracle"]["passed"] is False
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 1
+    assert scene_oracle["mismatches"] == [
+        {
+            "reason": "target_switch_dwell_below_min",
+            "from_target_track_id": 1,
+            "to_target_track_id": 2,
+            "duration_ms": 200.0,
+            "min_duration_ms": 750.0,
+        }
+    ]
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_fails_single_sample_switch_dwell(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+            ],
+        },
+    )
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=990,
+                        publish_timestamp_ms=1000,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=2,
+                        frame_timestamp_ms=1090,
+                        publish_timestamp_ms=1100,
+                    ),
+                ),
+            )
+        },
+        process_results={"cli": FakeResult(0, stdout=botified_frame("person_waving"))},
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["gaze_attention_oracle"]["passed"] is False
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 1
+    assert scene_oracle["mismatches"] == [
+        {
+            "reason": "target_switch_dwell_below_min",
+            "from_target_track_id": 1,
+            "to_target_track_id": 2,
+            "duration_ms": 100.0,
+            "min_duration_ms": 750.0,
+        }
+    ]
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_allows_switch_after_dwell(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+            ],
+        },
+    )
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=990,
+                        publish_timestamp_ms=1000,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1090,
+                        publish_timestamp_ms=1100,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1190,
+                        publish_timestamp_ms=1200,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1290,
+                        publish_timestamp_ms=1300,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1390,
+                        publish_timestamp_ms=1400,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1490,
+                        publish_timestamp_ms=1500,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1590,
+                        publish_timestamp_ms=1600,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1690,
+                        publish_timestamp_ms=1700,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=2,
+                        frame_timestamp_ms=1790,
+                        publish_timestamp_ms=1800,
+                    ),
+                ),
+            )
+        },
+        process_results={"cli": FakeResult(0, stdout=botified_frame("person_waving"))},
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["gaze_attention_oracle"]["passed"] is True
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 1
+    assert scene_oracle["mismatches"] == []
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_ignores_lost_switch_interrupt(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 1090,
+                    "target_track_id": 1,
+                },
+                {
+                    "start_frame_timestamp_ms": 1290,
+                    "end_frame_timestamp_ms": 1390,
+                    "target_track_id": 2,
+                },
+            ],
+        },
+    )
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=990,
+                        publish_timestamp_ms=1000,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1090,
+                        publish_timestamp_ms=1100,
+                    ),
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "lost",
+                        "valid": False,
+                        "frame_timestamp_ms": 1190,
+                        "publish_timestamp_ms": 1200,
+                    },
+                    tracking_gaze_sample(
+                        target_track_id=2,
+                        frame_timestamp_ms=1290,
+                        publish_timestamp_ms=1300,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=2,
+                        frame_timestamp_ms=1390,
+                        publish_timestamp_ms=1400,
+                    ),
+                ),
+            )
+        },
+        process_results={"cli": FakeResult(0, stdout=botified_frame("person_waving"))},
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["gaze_attention_oracle"]["passed"] is True
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 2
+    assert scene_oracle["mismatches"] == []
+
+
+def test_all_scenes_full_scene_gaze_attention_oracle_ignores_stale_switch_interrupt(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 1090,
+                    "target_track_id": 1,
+                },
+                {
+                    "start_frame_timestamp_ms": 1290,
+                    "end_frame_timestamp_ms": 1390,
+                    "target_track_id": 2,
+                },
+            ],
+        },
+    )
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=990,
+                        publish_timestamp_ms=1000,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=1,
+                        frame_timestamp_ms=1090,
+                        publish_timestamp_ms=1100,
+                    ),
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "stale",
+                        "valid": True,
+                        "target_track_id": 1,
+                        "frame_timestamp_ms": 1140,
+                        "publish_timestamp_ms": 1150,
+                    },
+                    tracking_gaze_sample(
+                        target_track_id=2,
+                        frame_timestamp_ms=1190,
+                        publish_timestamp_ms=1200,
+                    ),
+                    tracking_gaze_sample(
+                        target_track_id=2,
+                        frame_timestamp_ms=1290,
+                        publish_timestamp_ms=1300,
+                    ),
+                ),
+            )
+        },
+        process_results={"cli": FakeResult(0, stdout=botified_frame("person_waving"))},
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["gaze_attention_oracle"]["passed"] is True
+    scene_oracle = report["gaze_attention_oracle"]["scenes"][0]
+    assert scene_oracle["matched_windows"] == 2
+    assert scene_oracle["mismatches"] == []
+
+
 def test_all_scenes_full_scene_gaze_attention_oracle_fails_target_point_tolerance(
     tmp_path: Path,
 ) -> None:
@@ -1919,17 +2492,12 @@ def test_all_scenes_full_scene_gaze_attention_oracle_fails_target_point_toleranc
             "gaze_subscriber": FakeResult(
                 0,
                 stdout=gaze_jsonl(
-                    {
-                        "type": "gaze_target",
-                        "camera": "front",
-                        "state": "tracking",
-                        "valid": True,
-                        "target_track_id": 1,
-                        "target_u": 100,
-                        "target_v": 100,
-                        "frame_timestamp_ms": 990,
-                        "publish_timestamp_ms": 1000,
-                    },
+                    tracking_gaze_sample(
+                        target_u=100,
+                        target_v=100,
+                        frame_timestamp_ms=990,
+                        publish_timestamp_ms=1000,
+                    ),
                     {
                         "type": "gaze_target",
                         "camera": "front",
