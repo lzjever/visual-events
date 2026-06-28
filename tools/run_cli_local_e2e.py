@@ -162,6 +162,15 @@ class HeadStateSegment:
 
 
 @dataclass(frozen=True)
+class CliFrameRequestLogRead:
+    records: tuple[dict[str, Any], ...]
+    parse_error_count: int
+    parse_errors: tuple[dict[str, Any], ...]
+    line_count: int
+    next_line_offset: int
+
+
+@dataclass(frozen=True)
 class SegmentSmokeResult:
     segment: HeadStateSegment
     head_result: CommandResult | None
@@ -169,6 +178,10 @@ class SegmentSmokeResult:
     gaze_result: CommandResult | None
     gaze_summary: dict[str, Any]
     gaze_latency_samples_ms: tuple[float, ...]
+    cli_frame_request_records: tuple[dict[str, Any], ...]
+    cli_frame_request_log_parse_error_count: int
+    cli_frame_request_log_parse_errors: tuple[dict[str, Any], ...]
+    cli_frame_request_log_line_count: int
     head_stdout_json: dict[str, Any] | None
     head_stdout_parse_error: str | None
     failure_reasons: list[str]
@@ -960,6 +973,7 @@ def _run_smoke_result(
     started_s = time.perf_counter()
     orchestration_env = os.environ.copy()
     runtime_env = runtime_provenance.runtime_execution_env(orchestration_env)
+    cli_request_log_path = _cli_frame_request_log_path(config)
     server_command = _server_command(config)
     cli_command = _cli_command(config)
     gaze_command = _gaze_subscriber_command(config)
@@ -988,6 +1002,7 @@ def _run_smoke_result(
     head_process: ProcessLike | None = None
     health_result: HealthCheckResult | None = None
     segment_results: list[SegmentSmokeResult] = []
+    cli_request_line_offset = 0
     gaze_summary = _summarize_gaze_jsonl("", config.logical_camera_name, config.gaze_count)
     botified_stdout = _summarize_botified_stdout_from_process(None)
 
@@ -995,6 +1010,7 @@ def _run_smoke_result(
         failure_reasons.append("head_state_hz_below_min")
 
     try:
+        _reset_cli_frame_request_log(cli_request_log_path)
         server_process = runner.start_process(
             server_command,
             cwd=REPO_ROOT,
@@ -1028,8 +1044,12 @@ def _run_smoke_result(
                 failure_reasons.append(
                     f"warmup_failed:{warmup_result.failure_reason or 'unknown'}"
                 )
+            cli_request_line_offset = _read_cli_frame_request_log(
+                cli_request_log_path
+            ).next_line_offset
             for segment in config.head_state_segments:
                 segment_suffix = f":segment={segment.state}"
+                segment_start_request_line_offset = cli_request_line_offset
                 gaze_process = runner.start_process(
                     gaze_command,
                     cwd=REPO_ROOT,
@@ -1125,6 +1145,21 @@ def _run_smoke_result(
                         segment_failure_reasons.append(
                             f"gaze_publish_hz_below_min{segment_suffix}"
                         )
+                segment_cli_request_log = _read_cli_frame_request_log(
+                    cli_request_log_path,
+                    line_offset=segment_start_request_line_offset,
+                )
+                segment_cli_request_records = segment_cli_request_log.records
+                cli_request_line_offset = segment_cli_request_log.next_line_offset
+                segment_failure_reasons.extend(
+                    _head_cli_request_failure_reasons(
+                        segment=segment,
+                        records=segment_cli_request_records,
+                        parse_error_count=(
+                            segment_cli_request_log.parse_error_count
+                        ),
+                    )
+                )
                 segment_results.append(
                     SegmentSmokeResult(
                         segment=segment,
@@ -1133,6 +1168,16 @@ def _run_smoke_result(
                         gaze_result=gaze_result,
                         gaze_summary=gaze_summary,
                         gaze_latency_samples_ms=gaze_latency_samples_ms,
+                        cli_frame_request_records=segment_cli_request_records,
+                        cli_frame_request_log_parse_error_count=(
+                            segment_cli_request_log.parse_error_count
+                        ),
+                        cli_frame_request_log_parse_errors=(
+                            segment_cli_request_log.parse_errors
+                        ),
+                        cli_frame_request_log_line_count=(
+                            segment_cli_request_log.line_count
+                        ),
                         head_stdout_json=head_stdout_json,
                         head_stdout_parse_error=head_stdout_parse_error,
                         failure_reasons=segment_failure_reasons,
@@ -2011,7 +2056,61 @@ def _cli_command(config: CliLocalE2EConfig) -> list[str]:
         config.head_state_topic,
         "--gaze-topic",
         config.gaze_topic,
+        "--log-jsonl",
+        os.fspath(_cli_frame_request_log_path(config)),
     ]
+
+
+def _cli_frame_request_log_path(config: CliLocalE2EConfig) -> Path:
+    return config.out.with_suffix(".cli-frame-requests.jsonl")
+
+
+def _reset_cli_frame_request_log(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _read_cli_frame_request_log(
+    path: Path,
+    *,
+    line_offset: int = 0,
+) -> CliFrameRequestLogRead:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        next_line_offset = max(0, int(line_offset))
+        return CliFrameRequestLogRead(
+            records=(),
+            parse_error_count=0,
+            parse_errors=(),
+            line_count=0,
+            next_line_offset=next_line_offset,
+        )
+
+    records: list[dict[str, Any]] = []
+    parse_errors: list[dict[str, Any]] = []
+    start = max(0, int(line_offset))
+    selected_lines = lines[start:]
+    for index, line in enumerate(selected_lines, start=start + 1):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            parse_errors.append({"line": index, "error": exc.msg})
+            continue
+        if not isinstance(payload, dict):
+            parse_errors.append({"line": index, "error": "expected JSON object"})
+            continue
+        if payload.get("type") == "frame_request":
+            records.append(payload)
+    return CliFrameRequestLogRead(
+        records=tuple(records),
+        parse_error_count=len(parse_errors),
+        parse_errors=tuple(parse_errors),
+        line_count=len(selected_lines),
+        next_line_offset=len(lines),
+    )
 
 
 def _wrapper_common_command(config: CliLocalE2EConfig, script_name: str) -> list[str]:
@@ -2190,6 +2289,31 @@ def _head_segment_failure_reasons(
     return reasons
 
 
+def _head_cli_request_failure_reasons(
+    *,
+    segment: HeadStateSegment,
+    records: tuple[dict[str, Any], ...],
+    parse_error_count: int,
+) -> list[str]:
+    if segment.state != "stationary":
+        return []
+
+    suffix = f":segment={segment.state}"
+    if parse_error_count > 0:
+        return [f"head_state_cli_request_log_parse_error{suffix}"]
+    if not records:
+        return [f"head_state_cli_request_evidence_missing{suffix}"]
+
+    for record in records:
+        head_motion = record.get("head_motion")
+        state = (
+            head_motion.get("state") if isinstance(head_motion, dict) else None
+        )
+        if state != "stationary":
+            return [f"head_state_cli_unknown_or_stale{suffix}"]
+    return []
+
+
 def _capture_to_gaze_publish_latency_failure_reasons(
     gaze_summary: dict[str, Any],
     *,
@@ -2265,6 +2389,7 @@ def _build_smoke_report(
             "dds_bridge_bin": os.fspath(config.dds_bridge_bin),
             "server_url": config.server_url.original,
             "healthz_url": config.server_url.healthz_url,
+            "cli_request_log_path": os.fspath(_cli_frame_request_log_path(config)),
             "commands": commands,
             "warmup": _warmup_report(warmup_result),
             "processes": {
@@ -2323,6 +2448,8 @@ def _build_smoke_report(
                 "stale_count": head_state_stale_count,
                 "unknown_ratio": head_state_unknown_ratio,
                 "evidence_source": "synthetic_publisher_stdout",
+                "cli_request_evidence_source": "cli_runtime_jsonl",
+                "cli_request_log_path": os.fspath(_cli_frame_request_log_path(config)),
                 "evidence_scope": config.scene_replay_mode,
                 "partial_smoke_only": config.scene_replay_mode != "full_scene",
             },
@@ -2570,6 +2697,21 @@ def _head_state_segment_reports(
                 "dds_valid": summary.get("dds_valid"),
                 "head_state_topic": summary.get("head_state_topic"),
                 "stale_count": summary.get("stale_count"),
+                "cli_frame_request_count": len(result.cli_frame_request_records),
+                "cli_frame_request_head_motion_states": [
+                    _head_motion_state(record)
+                    for record in result.cli_frame_request_records
+                ],
+                "cli_frame_request_records": list(result.cli_frame_request_records),
+                "cli_frame_request_log_parse_error_count": (
+                    result.cli_frame_request_log_parse_error_count
+                ),
+                "cli_frame_request_log_parse_errors": list(
+                    result.cli_frame_request_log_parse_errors
+                ),
+                "cli_frame_request_log_line_count": (
+                    result.cli_frame_request_log_line_count
+                ),
                 "stdout_json": result.head_stdout_json,
                 "stdout_parse_error": result.head_stdout_parse_error,
                 "failure_reasons": result.failure_reasons,
@@ -2596,6 +2738,13 @@ def _head_state_unknown_ratio(
     if sample_count == 0:
         return None
     return unknown_count / sample_count
+
+
+def _head_motion_state(record: dict[str, Any]) -> Any:
+    head_motion = record.get("head_motion")
+    if not isinstance(head_motion, dict):
+        return None
+    return head_motion.get("state")
 
 
 def _head_state_stale_count(segment_results: list[SegmentSmokeResult]) -> int | None:

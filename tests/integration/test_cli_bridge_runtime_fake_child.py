@@ -129,6 +129,109 @@ def test_fake_child_camera_head_to_service_to_gaze_stdin(
     _assert_process_closed(recorded_processes)
 
 
+def test_fake_child_stationary_head_state_reaches_service_request_and_jsonl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_bin, _stdin_path = _write_fake_bridge_child(
+        tmp_path,
+        monkeypatch,
+        mode="stationary",
+    )
+    log_path = tmp_path / "runtime" / "requests.jsonl"
+    recorded_processes: list[DdsBridgeProcess] = []
+    service = RecordingTrackingService()
+    factories = _runtime_factories(
+        bridge_bin=bridge_bin,
+        recorded_processes=recorded_processes,
+        service=service,
+    )
+    config = _bridge_config(
+        gaze_stale_ms=2_000,
+        head_stale_ms=1_000,
+        log_jsonl_path=log_path,
+    )
+
+    result = run_runtime(
+        config,
+        factories=factories,
+        max_ticks=80,
+        sleep_seconds=0,
+        clock_ms=AdvancingClock(step_ms=1),
+    )
+
+    assert result == 0
+    assert len(service.requests) == 1
+    header, _jpeg = service.requests[0]
+    assert header["head_motion"]["state"] == "stationary"
+    assert header["head_motion"]["yaw_vel_rad_s"] == pytest.approx(0.0)
+    assert header["head_motion"]["pitch_vel_rad_s"] == pytest.approx(0.0)
+
+    records = _read_jsonl(log_path)
+    frame_requests = [
+        record for record in records if record.get("type") == "frame_request"
+    ]
+    assert frame_requests == [
+        {
+            "type": "frame_request",
+            "frame_id": header["frame_id"],
+            "timestamp_ms": header["timestamp_ms"],
+            "camera": "logical-front",
+            "head_motion": header["head_motion"],
+        }
+    ]
+
+    _assert_process_closed(recorded_processes)
+
+
+def test_fake_child_stale_head_state_becomes_unknown_at_request_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge_bin, _stdin_path = _write_fake_bridge_child(
+        tmp_path,
+        monkeypatch,
+        mode="stale_head",
+    )
+    log_path = tmp_path / "runtime" / "requests.jsonl"
+    recorded_processes: list[DdsBridgeProcess] = []
+    service = RecordingTrackingService()
+    factories = _runtime_factories(
+        bridge_bin=bridge_bin,
+        recorded_processes=recorded_processes,
+        service=service,
+    )
+    config = _bridge_config(
+        gaze_stale_ms=2_000,
+        head_stale_ms=100,
+        log_jsonl_path=log_path,
+    )
+
+    result = run_runtime(
+        config,
+        factories=factories,
+        max_ticks=80,
+        sleep_seconds=0,
+        clock_ms=AdvancingClock(step_ms=1),
+    )
+
+    assert result == 0
+    assert len(service.requests) == 1
+    header, _jpeg = service.requests[0]
+    assert header["head_motion"]["state"] == "unknown"
+
+    frame_requests = [
+        record for record in _read_jsonl(log_path) if record.get("type") == "frame_request"
+    ]
+    assert len(frame_requests) == 1
+    frame_request = frame_requests[0]
+    assert frame_request["type"] == "frame_request"
+    assert frame_request["head_motion"] == header["head_motion"]
+    assert frame_request["head_motion"]["state"] == "unknown"
+
+    _assert_process_closed(recorded_processes)
+
+
 def test_fake_child_stale_publish_and_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -242,6 +345,7 @@ def _bridge_config(
     *,
     gaze_stale_ms: int = 250,
     head_stale_ms: int = 250,
+    log_jsonl_path: Path | None = None,
 ) -> Any:
     base = default_config()
     return replace(
@@ -254,6 +358,7 @@ def _bridge_config(
         head_state=replace(base.head_state, stale_ms=head_stale_ms),
         gaze_target=replace(base.gaze_target, stale_ms=gaze_stale_ms),
         botified=replace(base.botified, enabled=False, stdout=False),
+        logging=replace(base.logging, jsonl_path=log_jsonl_path),
     )
 
 
@@ -298,17 +403,21 @@ def _write_fake_bridge_child(
 
 
             def head_state() -> dict[str, object]:
+                stationary = MODE in {{"stationary", "stale_head"}}
+                received_monotonic_ns = time.monotonic_ns()
+                if MODE == "stale_head":
+                    received_monotonic_ns -= 10_000_000_000
                 return {{
                     "protocol_version": 1,
                     "type": "head_state",
                     "dds_timestamp_ns": time.time_ns(),
-                    "received_monotonic_ns": time.monotonic_ns(),
+                    "received_monotonic_ns": received_monotonic_ns,
                     "valid": True,
-                    "state": "moving",
-                    "yaw_rad": 0.1,
-                    "pitch_rad": -0.2,
-                    "yaw_vel_rad_s": 0.08,
-                    "pitch_vel_rad_s": -0.01,
+                    "state": "stationary" if stationary else "moving",
+                    "yaw_rad": 0.0 if stationary else 0.1,
+                    "pitch_rad": 0.0 if stationary else -0.2,
+                    "yaw_vel_rad_s": 0.0 if stationary else 0.08,
+                    "pitch_vel_rad_s": 0.0 if stationary else -0.01,
                 }}
 
 
@@ -330,7 +439,7 @@ def _write_fake_bridge_child(
 
             threading.Thread(target=capture_stdin, daemon=True).start()
 
-            if MODE in {{"tracking", "stale"}}:
+            if MODE in {{"tracking", "stale", "stationary", "stale_head"}}:
                 emit(head_state())
                 time.sleep(0.03)
                 emit(camera_jpeg())

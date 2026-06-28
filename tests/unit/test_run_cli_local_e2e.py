@@ -93,6 +93,8 @@ class FakeRunner:
         sync_results: dict[str, FakeResult | list[FakeResult]] | None = None,
         process_results: dict[str, FakeResult | list[FakeResult]] | None = None,
         initial_process_returncodes: dict[str, int] | None = None,
+        cli_request_head_states_by_segment: dict[str, list[str]] | None = None,
+        cli_request_log_lines_by_segment: dict[str, list[str]] | None = None,
     ) -> None:
         self.health = health or FakeHealth(
             passed=True,
@@ -102,6 +104,8 @@ class FakeRunner:
         self.sync_results = sync_results or {}
         self.process_results = process_results or {}
         self.initial_process_returncodes = initial_process_returncodes or {}
+        self.cli_request_head_states_by_segment = cli_request_head_states_by_segment
+        self.cli_request_log_lines_by_segment = cli_request_log_lines_by_segment
         self.events: list[tuple[str, str]] = []
         self.started: dict[str, FakeProcess] = {}
         self.commands: dict[str, list[str]] = {}
@@ -109,6 +113,7 @@ class FakeRunner:
         self.envs: dict[str, dict[str, str]] = {}
         self.health_urls: list[str] = []
         self._next_pid = 1001
+        self._cli_request_frame_id = 1
 
     def _lookup_result(
         self,
@@ -186,7 +191,9 @@ class FakeRunner:
         self.command_history.append((name, command))
         self.envs[name] = env
         self.events.append(("run_sync", name))
-        return self._lookup_result(self.sync_results, name) or FakeResult(0)
+        result = self._lookup_result(self.sync_results, name) or FakeResult(0)
+        self._write_cli_request_log_for_image_publish(name)
+        return result
 
     def wait_healthz(
         self,
@@ -225,6 +232,56 @@ class FakeRunner:
     def stop_process(self, process: FakeProcess) -> None:
         self.events.append(("stop", process.name))
         process.terminate()
+
+    def _write_cli_request_log_for_image_publish(self, name: str) -> None:
+        if not name.startswith("image_publisher:"):
+            return
+        cli_command = self.commands.get("cli")
+        if cli_command is None:
+            return
+        log_path = arg_value(cli_command, "--log-jsonl")
+        if log_path is None:
+            return
+
+        segment = name.split(":", 1)[1]
+        if (
+            self.cli_request_log_lines_by_segment is not None
+            and segment in self.cli_request_log_lines_by_segment
+        ):
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as stream:
+                for line in self.cli_request_log_lines_by_segment[segment]:
+                    stream.write(line + "\n")
+            return
+
+        states = None
+        if self.cli_request_head_states_by_segment is not None:
+            states = self.cli_request_head_states_by_segment.get(segment)
+        if states is None:
+            states = [segment]
+
+        path = Path(log_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            for state in states:
+                head_motion = {
+                    "state": state,
+                    "yaw_vel_rad_s": 0.0 if state == "stationary" else None,
+                    "pitch_vel_rad_s": 0.0 if state == "stationary" else None,
+                }
+                if state == "moving":
+                    head_motion["yaw_vel_rad_s"] = 0.08
+                    head_motion["pitch_vel_rad_s"] = -0.01
+                payload = {
+                    "type": "frame_request",
+                    "frame_id": self._cli_request_frame_id,
+                    "timestamp_ms": 1710000000000 + self._cli_request_frame_id,
+                    "camera": "front",
+                    "head_motion": head_motion,
+                }
+                self._cli_request_frame_id += 1
+                stream.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
 
 def import_runner_module() -> Any:
@@ -623,6 +680,27 @@ def valid_gaze_stdout() -> str:
     )
 
 
+def cli_frame_request_log_line(state: str, *, frame_id: int = 1) -> str:
+    head_motion = {
+        "state": state,
+        "yaw_vel_rad_s": 0.0 if state == "stationary" else None,
+        "pitch_vel_rad_s": 0.0 if state == "stationary" else None,
+    }
+    if state == "moving":
+        head_motion["yaw_vel_rad_s"] = 0.08
+        head_motion["pitch_vel_rad_s"] = -0.01
+    return json.dumps(
+        {
+            "type": "frame_request",
+            "frame_id": frame_id,
+            "timestamp_ms": 1710000000000 + frame_id,
+            "camera": "front",
+            "head_motion": head_motion,
+        },
+        separators=(",", ":"),
+    )
+
+
 def successful_full_scene_gaze_result() -> FakeResult:
     return FakeResult(
         0,
@@ -952,6 +1030,8 @@ def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Pat
         "/robot/head_state",
         "--gaze-topic",
         "/visual_events/gaze_target",
+        "--log-jsonl",
+        os.fspath(paths["out"].with_suffix(".cli-frame-requests.jsonl")),
     ]
     assert runner.commands["gaze_subscriber"] == [
         os.fspath(module.sys.executable),
@@ -2591,6 +2671,173 @@ def test_head_state_native_json_evidence_enforces_segment_mapping(
     assert rc != 0
     report = load_report(paths["out"])
     assert any(expected_reason in reason for reason in report["failure_reasons"])
+
+
+def test_stationary_segment_requires_cli_request_evidence(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=valid_gaze_stdout(),
+            )
+        },
+        cli_request_head_states_by_segment={"stationary": []},
+    )
+
+    rc = module.main(base_argv(paths, "--head-state", "stationary"), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert "head_state_cli_request_evidence_missing:segment=stationary" in report[
+        "failure_reasons"
+    ]
+    segment = report["head_state"]["segments"][0]
+    assert segment["requested_state"] == "stationary"
+    assert segment["cli_frame_request_count"] == 0
+    assert segment["cli_frame_request_records"] == []
+
+
+def test_stationary_segment_unknown_cli_request_state_fails_as_stale(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=valid_gaze_stdout(),
+            )
+        },
+        cli_request_head_states_by_segment={"stationary": ["unknown"]},
+    )
+
+    rc = module.main(base_argv(paths, "--head-state", "stationary"), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert "head_state_cli_unknown_or_stale:segment=stationary" in report[
+        "failure_reasons"
+    ]
+    segment = report["head_state"]["segments"][0]
+    assert segment["cli_frame_request_count"] == 1
+    assert segment["cli_frame_request_head_motion_states"] == ["unknown"]
+
+
+def test_stationary_segment_malformed_cli_request_log_fails_even_with_valid_record(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=valid_gaze_stdout(),
+            )
+        },
+        cli_request_log_lines_by_segment={
+            "stationary": [
+                "{not json",
+                cli_frame_request_log_line("stationary"),
+            ]
+        },
+    )
+
+    rc = module.main(base_argv(paths, "--head-state", "stationary"), runner=runner)
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert "head_state_cli_request_log_parse_error:segment=stationary" in report[
+        "failure_reasons"
+    ]
+    segment = report["head_state"]["segments"][0]
+    assert segment["cli_frame_request_count"] == 1
+    assert segment["cli_frame_request_head_motion_states"] == ["stationary"]
+    assert segment["cli_frame_request_log_line_count"] == 2
+    assert segment["cli_frame_request_log_parse_error_count"] == 1
+    assert segment["cli_frame_request_log_parse_errors"][0]["line"] == 1
+
+
+def test_cli_request_log_cursor_uses_line_offset_after_malformed_line(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=valid_gaze_stdout(),
+            )
+        },
+        cli_request_log_lines_by_segment={
+            "stationary": [
+                "{not json",
+                cli_frame_request_log_line("stationary", frame_id=1),
+            ],
+            "moving": [cli_frame_request_log_line("moving", frame_id=2)],
+        },
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state-segments", "stationary,moving"),
+        runner=runner,
+    )
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    stationary = next(
+        segment
+        for segment in report["head_state"]["segments"]
+        if segment["requested_state"] == "stationary"
+    )
+    moving = next(
+        segment
+        for segment in report["head_state"]["segments"]
+        if segment["requested_state"] == "moving"
+    )
+    assert stationary["cli_frame_request_log_parse_error_count"] == 1
+    assert stationary["cli_frame_request_log_parse_errors"][0]["line"] == 1
+    assert moving["cli_frame_request_log_parse_error_count"] == 0
+    assert moving["cli_frame_request_log_parse_errors"] == []
+    assert moving["cli_frame_request_log_line_count"] == 1
+    assert moving["cli_frame_request_count"] == 1
+    assert moving["cli_frame_request_head_motion_states"] == ["moving"]
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ("--head-state", "stationary"),
+        ("--full-scene", "--head-state", "stationary", "--gaze-count", "1"),
+    ],
+)
+def test_successful_fake_path_reports_stationary_cli_request_evidence(
+    tmp_path: Path,
+    extra_args: tuple[str, ...],
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(base_argv(paths, *extra_args), runner=runner)
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["slice_pass"] is True
+    assert report["failure_reasons"] == []
+    assert report["cli_request_log_path"] == os.fspath(
+        paths["out"].with_suffix(".cli-frame-requests.jsonl")
+    )
+    assert report["head_state"]["cli_request_evidence_source"] == "cli_runtime_jsonl"
+    segment = report["head_state"]["segments"][0]
+    assert segment["requested_state"] == "stationary"
+    assert segment["cli_frame_request_count"] == 1
+    assert segment["cli_frame_request_head_motion_states"] == ["stationary"]
+    assert segment["cli_frame_request_records"][0]["head_motion"]["state"] == "stationary"
 
 
 def test_legacy_scalar_fields_use_first_failing_segment(tmp_path: Path) -> None:

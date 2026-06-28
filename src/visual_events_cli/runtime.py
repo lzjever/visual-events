@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from visual_events_cli.botified_output import BotifiedPipeClosed
@@ -78,7 +80,10 @@ def run_runtime(
             resources,
         )
 
-        service_client = resources.register(runtime_factories.service_client(config))
+        service_client = _wrap_service_client_for_logging(
+            resources.register(runtime_factories.service_client(config)),
+            config,
+        )
         botified_writer = resources.register(runtime_factories.botified_writer(config))
         coordinator = RuntimeCoordinator(
             frame_source=image_subscriber,
@@ -290,6 +295,35 @@ class RuntimeCoordinator:
 
 def _wall_clock_ms() -> int:
     return time.time_ns() // 1_000_000
+
+
+def _wrap_service_client_for_logging(service_client: Any, config: Any) -> Any:
+    jsonl_path = getattr(getattr(config, "logging", None), "jsonl_path", None)
+    if jsonl_path is None:
+        return service_client
+    return _FrameRequestLoggingServiceClient(service_client, Path(jsonl_path))
+
+
+class _FrameRequestLoggingServiceClient:
+    def __init__(self, service_client: Any, jsonl_path: Path) -> None:
+        self._service_client = service_client
+        self._jsonl_path = jsonl_path
+        self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+
+    async def request_frame(self, header: dict[str, Any], jpeg: bytes) -> Any:
+        self._write_frame_request(header)
+        return await self._service_client.request_frame(header, jpeg)
+
+    def _write_frame_request(self, header: dict[str, Any]) -> None:
+        payload = {
+            "type": "frame_request",
+            "frame_id": header.get("frame_id"),
+            "timestamp_ms": header.get("timestamp_ms"),
+            "camera": header.get("camera"),
+            "head_motion": header.get("head_motion"),
+        }
+        with self._jsonl_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
 
 def _run_in_daemon_thread(function: Callable[[], None]) -> asyncio.Future[None]:
