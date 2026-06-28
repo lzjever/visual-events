@@ -864,6 +864,151 @@ def test_nearby_reacquired_track_dedupes_greeting_after_global_cooldown():
     assert "person_waving" not in event_names(reacquired)
 
 
+def test_scene_context_reports_reacquired_attention_target_alias():
+    subject = EventEngine()
+    first = subject.update(
+        frame(frame_id=1, timestamp_ms=1000),
+        [
+            track(
+                1,
+                timestamp_ms=1000,
+                first_seen_ms=600,
+                bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
+            )
+        ],
+        attention(1),
+    )
+
+    reacquired = subject.update(
+        frame(frame_id=2, timestamp_ms=2500),
+        [
+            track(
+                2,
+                timestamp_ms=2500,
+                first_seen_ms=2100,
+                bbox_xyxy=(410.0, 150.0, 610.0, 430.0),
+            )
+        ],
+        attention(2),
+    )
+
+    assert event_names(first) == ["person_appeared"]
+    assert "person_appeared" not in event_names(reacquired)
+    assert reacquired.scene_context["target_reacquired"] == {
+        "runtime_person_slot": 1,
+        "reacquired_from_track_id": 1,
+        "reacquired_to_track_id": 2,
+        "reacquire_elapsed_ms": 1500,
+        "reacquire_center_distance_px": pytest.approx(math.hypot(10.0, 10.0)),
+        "reacquire_area_ratio": pytest.approx(280.0 / 300.0),
+    }
+    assert_json_simple_and_finite(reacquired.scene_context["target_reacquired"])
+
+
+def test_scene_context_reacquired_is_one_frame_signal():
+    subject = EventEngine()
+    subject.update(
+        frame(frame_id=1, timestamp_ms=1000),
+        [
+            track(
+                1,
+                timestamp_ms=1000,
+                first_seen_ms=600,
+                bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
+            )
+        ],
+        attention(1),
+    )
+    reacquired = subject.update(
+        frame(frame_id=2, timestamp_ms=2500),
+        [
+            track(
+                2,
+                timestamp_ms=2500,
+                first_seen_ms=2100,
+                bbox_xyxy=(410.0, 150.0, 610.0, 430.0),
+            )
+        ],
+        attention(2),
+    )
+    next_frame = subject.update(
+        frame(frame_id=3, timestamp_ms=2800),
+        [
+            track(
+                2,
+                timestamp_ms=2800,
+                first_seen_ms=2100,
+                bbox_xyxy=(410.0, 150.0, 610.0, 430.0),
+                hits=3,
+            )
+        ],
+        attention(2),
+    )
+
+    assert reacquired.scene_context["target_reacquired"] is not None
+    assert next_frame.scene_context["target_reacquired"] is None
+
+
+def test_reacquired_event_evidence_includes_alias_source():
+    subject = EventEngine()
+    subject.update(
+        frame(frame_id=1, timestamp_ms=1000),
+        [
+            track(
+                1,
+                timestamp_ms=1000,
+                first_seen_ms=600,
+                bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
+            )
+        ],
+        attention(1),
+    )
+
+    emitted: list[dict] = []
+    for index, wrist_x in enumerate((460.0, 545.0, 465.0)):
+        timestamp_ms = 2500 + (index * 600)
+        emitted.extend(
+            subject.update(
+                frame(frame_id=2 + index, timestamp_ms=timestamp_ms),
+                [
+                    track(
+                        2,
+                        timestamp_ms=timestamp_ms,
+                        first_seen_ms=2100,
+                        bbox_xyxy=(410.0, 150.0, 610.0, 430.0),
+                        keypoints=keypoints(wrist_x=wrist_x),
+                        hits=2 + index,
+                    )
+                ],
+                attention(2),
+            ).semantic_events
+        )
+
+    waves = events_of(emitted, "person_waving")
+
+    assert len(waves) == 1
+    assert REQUIRED_EVIDENCE_KEYS["person_waving"] <= set(waves[0]["evidence"])
+    assert {
+        key: waves[0]["evidence"][key]
+        for key in (
+            "runtime_person_slot",
+            "reacquired_from_track_id",
+            "reacquired_to_track_id",
+            "reacquire_elapsed_ms",
+            "reacquire_center_distance_px",
+            "reacquire_area_ratio",
+        )
+    } == {
+        "runtime_person_slot": 1,
+        "reacquired_from_track_id": 1,
+        "reacquired_to_track_id": 2,
+        "reacquire_elapsed_ms": 1500,
+        "reacquire_center_distance_px": pytest.approx(math.hypot(10.0, 10.0)),
+        "reacquire_area_ratio": pytest.approx(280.0 / 300.0),
+    }
+    assert_json_simple_and_finite(waves[0]["evidence"])
+
+
 def test_nearby_aliased_track_can_emit_greeting_after_alias_window():
     subject = EventEngine()
 

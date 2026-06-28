@@ -173,6 +173,7 @@ Track 字段规则：
 - `scene_flags.has_person` 和 `scene_flags.person_count` 只统计当前帧匹配/可见的 track，即 `lost_ms == 0`。lost track 不计入人数。
 - `scene_context` 是必填 object，由 server `EventEngine` 随 `semantic_events` 一起输出，processor 只透传，不复算 engagement 业务规则。最小字段为 `engagement_state`、`attention_available`、`target_track_id`、`no_engage_reasons`、`target_reacquired`。
 - 当前最小 engagement 规则：无人时输出 `engagement_state="no_target"`、`attention_available=false`、`target_track_id=null`、`no_engage_reasons=["no_visible_person"]`、`target_reacquired=null`；有稳定、近距离、头部静止且非 fast passing 的 attention target 时输出 `engagement_state="available"`、`attention_available=true`、`target_track_id=<attention target id>`、`no_engage_reasons=[]`。有可见人但暂不可 engage 时输出 `engagement_state="no_engage_target"`，`no_engage_reasons` 可包含 `unstable`、`too_far`、`camera_motion_not_stationary`、`passing_fast`。
+- `scene_context.target_reacquired` 为 `null` 或一帧 reacquire object。object 只包含 `runtime_person_slot`、`reacquired_from_track_id`、`reacquired_to_track_id`、`reacquire_elapsed_ms`、`reacquire_center_distance_px`、`reacquire_area_ratio`。它是当前 server runtime 的短期 evidence，一帧 pulse，不代表长期身份，不跨 WebSocket 连接或 server 重启保留。
 - S5 可输出 `semantic_events`；无事件帧必须输出空数组 `[]`。
 - 每个 track object 必须包含：`track_id` integer、`class` string、`bbox_xyxy` number[4]、`bbox_area_ratio` number、`center_uv` number[2]、`head_uv` number[2]、`velocity_uv_s` number[2]、`age_ms` integer、`lost_ms` integer、`confidence` number、`pose_confidence` number。
 - `pose_confidence` 是 keypoint confidence 的平均值；没有 keypoint 或没有 confidence 时为 `0.0`。
@@ -247,6 +248,8 @@ V1 event 枚举：
 `person_appeared` 只对 salient target 触发：优先使用当前 `attention.target_track_id`；没有 attention 时，从 visible stable tracks 中选择面积和置信度最高的 person。它不会对背景中所有 person 逐个刷屏。
 
 所有对外输出的 semantic event 都是 confirmed 事实，必须带 `lifecycle_state: "confirmed"` 和 `evidence`。`evidence` 只包含 JSON 标量或简单 list/dict；数值必须是 finite，不输出 `NaN` 或 `Infinity`。
+
+当 semantic event 来自 alias 窗口内的 reacquired track 时，`evidence` 可选包含同一组 reacquire keys：`runtime_person_slot`、`reacquired_from_track_id`、`reacquired_to_track_id`、`reacquire_elapsed_ms`、`reacquire_center_distance_px`、`reacquire_area_ratio`。这些 key 是可选短期 runtime evidence，不加入下面的 event-specific required evidence table。
 
 v0.2 event-specific required evidence keys：
 

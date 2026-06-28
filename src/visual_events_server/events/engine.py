@@ -233,6 +233,8 @@ class EventEngine:
         self._next_person_slot = 1
         self._track_person_slots: dict[int, int] = {}
         self._track_alias_assigned_ms: dict[int, int] = {}
+        self._track_reacquire_evidence: dict[int, dict[str, object]] = {}
+        self._target_reacquired_pulse: dict[str, object] | None = None
         self._slot_last_seen_ms: dict[int, int] = {}
         self._slot_last_bbox: dict[int, BBoxXYXY] = {}
         self._slot_last_confidence: dict[int, float] = {}
@@ -336,13 +338,14 @@ class EventEngine:
         attention: AttentionResult | None,
         semantic_events: list[dict[str, object]],
     ) -> dict[str, object]:
+        target_reacquired = self._consume_target_reacquired_pulse()
         if not visible_tracks:
             return {
                 "engagement_state": "no_target",
                 "attention_available": False,
                 "target_track_id": None,
                 "no_engage_reasons": ["no_visible_person"],
-                "target_reacquired": None,
+                "target_reacquired": target_reacquired,
             }
 
         stable_attention_target = self._stable_attention_target(
@@ -372,7 +375,7 @@ class EventEngine:
                 "attention_available": True,
                 "target_track_id": stable_attention_target.track_id,
                 "no_engage_reasons": [],
-                "target_reacquired": None,
+                "target_reacquired": target_reacquired,
             }
         return {
             "engagement_state": "no_engage_target",
@@ -381,7 +384,7 @@ class EventEngine:
             if stable_attention_target is not None
             else None,
             "no_engage_reasons": reasons,
-            "target_reacquired": None,
+            "target_reacquired": target_reacquired,
         }
 
     def _stable_attention_target(
@@ -744,7 +747,9 @@ class EventEngine:
             "confidence": _clamp(float(proposal.confidence), 0.0, 1.0),
             "duration_ms": max(0, int(proposal.duration_ms)),
             "lifecycle_state": "confirmed",
-            "evidence": _clean_evidence(proposal.evidence),
+            "evidence": _clean_evidence(
+                self._evidence_with_reacquire(frame, proposal)
+            ),
             "text": _EVENT_TEXT[proposal.event],
         }
         self._next_event_number += 1
@@ -1000,6 +1005,11 @@ class EventEngine:
             self._track_person_slots[track.track_id] = slot
             if alias_slot is not None:
                 self._track_alias_assigned_ms[track.track_id] = now_ms
+                self._record_reacquired_track(
+                    frame,
+                    track,
+                    runtime_person_slot=alias_slot,
+                )
             assigned_visible_slots.add(slot)
 
     def _alias_slot_for_track(
@@ -1048,6 +1058,57 @@ class EventEngine:
             return (proposal.track_id, proposal.event)
         return (self._person_slot_for_track_id(proposal.track_id), proposal.event)
 
+    def _record_reacquired_track(
+        self,
+        frame: FrameMessage,
+        track: TrackSnapshot,
+        *,
+        runtime_person_slot: int,
+    ) -> None:
+        previous_track_id = self._slot_last_track_id.get(runtime_person_slot)
+        previous_seen_ms = self._slot_last_seen_ms.get(runtime_person_slot)
+        previous_bbox = self._slot_last_bbox.get(runtime_person_slot)
+        if previous_track_id is None or previous_seen_ms is None or previous_bbox is None:
+            return
+
+        payload = {
+            "runtime_person_slot": runtime_person_slot,
+            "reacquired_from_track_id": previous_track_id,
+            "reacquired_to_track_id": track.track_id,
+            "reacquire_elapsed_ms": max(0, int(frame.timestamp_ms) - previous_seen_ms),
+            "reacquire_center_distance_px": _finite_or_zero(
+                _center_distance(track.bbox_xyxy, previous_bbox)
+            ),
+            "reacquire_area_ratio": _bbox_area_ratio(previous_bbox, track.bbox_xyxy),
+        }
+        self._track_reacquire_evidence[track.track_id] = payload
+        self._target_reacquired_pulse = payload
+
+    def _consume_target_reacquired_pulse(self) -> dict[str, object] | None:
+        payload = self._target_reacquired_pulse
+        self._target_reacquired_pulse = None
+        return payload
+
+    def _evidence_with_reacquire(
+        self,
+        frame: FrameMessage,
+        proposal: _EventProposal,
+    ) -> dict[str, object]:
+        evidence = dict(proposal.evidence)
+        if proposal.event == "attention_target_changed":
+            return evidence
+
+        alias_assigned_ms = self._track_alias_assigned_ms.get(proposal.track_id)
+        reacquire_evidence = self._track_reacquire_evidence.get(proposal.track_id)
+        if (
+            alias_assigned_ms is not None
+            and reacquire_evidence is not None
+            and int(frame.timestamp_ms) - alias_assigned_ms
+            <= self.config.reacquire_alias_window_ms
+        ):
+            evidence.update(reacquire_evidence)
+        return evidence
+
 
 def _observation_from_track(
     track: TrackSnapshot,
@@ -1082,6 +1143,20 @@ def _center_distance(left: BBoxXYXY, right: BBoxXYXY) -> float:
         _center_x(left) - _center_x(right),
         _center_y(left) - _center_y(right),
     )
+
+
+def _bbox_area_ratio(left: BBoxXYXY, right: BBoxXYXY) -> float:
+    left_area = _finite_or_zero(bbox_area(left))
+    right_area = _finite_or_zero(bbox_area(right))
+    largest_area = max(left_area, right_area)
+    if largest_area <= 0.0:
+        return 0.0
+    return _clamp(min(left_area, right_area) / largest_area, 0.0, 1.0)
+
+
+def _finite_or_zero(value: float) -> float:
+    value = float(value)
+    return value if math.isfinite(value) else 0.0
 
 
 def _bbox_width(bbox: BBoxXYXY) -> float:
