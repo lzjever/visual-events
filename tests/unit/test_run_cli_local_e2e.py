@@ -3959,6 +3959,48 @@ def test_fresh_gaze_publish_hz_gate_ignores_stale_samples(
     assert report["evidence_summary"]["gaze"]["rate_pass"] is True
 
 
+def test_fresh_gaze_publish_hz_allows_pc_timer_jitter(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    gaze_stdout = gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 990,
+            "publish_timestamp_ms": 1000,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1089,
+            "publish_timestamp_ms": 1099,
+        },
+    )
+    runner = FakeRunner(
+        sync_results={"gaze_subscriber": FakeResult(0, stdout=gaze_stdout)}
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary", "--gaze-count", "2"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["failure_reasons"] == []
+    fresh_hz = report["gaze"]["fresh_gaze_publish_hz"]
+    assert fresh_hz["available"] is True
+    assert fresh_hz["hz"] == pytest.approx(1000 / 99)
+    assert fresh_hz["pass"] is True
+    assert report["evidence_summary"]["gaze"]["rate_pass"] is True
+
+
 def test_fresh_gaze_publish_hz_above_max_fails_with_segment_reason(
     tmp_path: Path,
 ) -> None:
@@ -4002,7 +4044,7 @@ def test_fresh_gaze_publish_hz_above_max_fails_with_segment_reason(
     assert fresh_hz["available"] is True
     assert fresh_hz["hz"] == pytest.approx(20.0)
     assert fresh_hz["min_hz"] == 9.0
-    assert fresh_hz["max_hz"] == 10.0
+    assert fresh_hz["max_hz"] == 10.5
     assert fresh_hz["pass"] is False
     assert report["evidence_summary"]["gaze"]["rate_pass"] is False
 
@@ -4070,7 +4112,7 @@ def test_non_monotonic_gaze_publish_timestamps_make_hz_unavailable_without_parti
         "last_publish_timestamp_ms": 1500.0,
         "hz": None,
         "min_hz": 9.0,
-        "max_hz": 10.0,
+        "max_hz": 10.5,
         "pass": None,
     }
     assert report["evidence_summary"]["gaze"]["rate_pass"] is None
