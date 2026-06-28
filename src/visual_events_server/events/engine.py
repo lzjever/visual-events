@@ -61,6 +61,8 @@ class EventConfig:
     wave_window_ms: int = 1800
     wave_min_x_span_px: float = 35.0
     wave_min_x_span_bbox_ratio: float = 0.12
+    reacquire_alias_window_ms: int = 5000
+    reacquire_center_distance_ratio: float = 0.08
 
     def __post_init__(self) -> None:
         integer_fields = (
@@ -73,6 +75,7 @@ class EventConfig:
             "approach_duration_ms",
             "passing_duration_ms",
             "wave_window_ms",
+            "reacquire_alias_window_ms",
         )
         for field_name in integer_fields:
             if int(getattr(self, field_name)) < 0:
@@ -90,6 +93,7 @@ class EventConfig:
             "passing_min_dx_ratio",
             "keypoint_min_conf",
             "wave_min_x_span_bbox_ratio",
+            "reacquire_center_distance_ratio",
         )
         for field_name in ratio_fields:
             if float(getattr(self, field_name)) < 0.0:
@@ -150,12 +154,13 @@ class EventEngine:
         self._observe_tracks(
             frame,
             visible_tracks=visible_tracks,
-            all_tracks=tracks,
         )
 
         salient = self._salient_track(frame, visible_tracks, attention)
         if salient is not None:
-            self._salient_track_ids.add(salient.track_id)
+            self._salient_person_slots.add(
+                self._person_slot_for_track_id(salient.track_id)
+            )
 
         proposals: list[_EventProposal] = []
         appeared = self._person_appeared_proposal(salient)
@@ -200,14 +205,19 @@ class EventEngine:
         self._last_frame_id: int | None = None
         self._histories: dict[int, list[_Observation]] = {}
         self._motion_histories: dict[int, list[_Observation]] = {}
-        self._last_seen_by_track: dict[int, int] = {}
-        self._last_confidence_by_track: dict[int, float] = {}
-        self._appeared_track_ids: set[int] = set()
-        self._salient_track_ids: set[int] = set()
-        self._left_emitted_track_ids: set[int] = set()
+        self._next_person_slot = 1
+        self._track_person_slots: dict[int, int] = {}
+        self._track_alias_assigned_ms: dict[int, int] = {}
+        self._slot_last_seen_ms: dict[int, int] = {}
+        self._slot_last_bbox: dict[int, BBoxXYXY] = {}
+        self._slot_last_confidence: dict[int, float] = {}
+        self._slot_last_track_id: dict[int, int] = {}
+        self._appeared_person_slots: set[int] = set()
+        self._salient_person_slots: set[int] = set()
+        self._left_emitted_person_slots: set[int] = set()
         self._active_conditions: set[tuple[int, str]] = set()
         self._last_event_by_type_ms: dict[str, int] = {}
-        self._last_track_event_ms: dict[tuple[int, str], int] = {}
+        self._last_person_event_ms: dict[tuple[int, str], int] = {}
         self._last_attention_track_id: int | None = None
 
     def _should_reset(self, frame: FrameMessage) -> bool:
@@ -223,18 +233,18 @@ class EventEngine:
         frame: FrameMessage,
         *,
         visible_tracks: list[TrackSnapshot],
-        all_tracks: list[TrackSnapshot],
     ) -> None:
         now_ms = int(frame.timestamp_ms)
         oldest_ms = now_ms - self.config.history_ms
-        for track in all_tracks:
-            self._last_confidence_by_track[track.track_id] = float(track.confidence)
-            if track.lost_ms == 0:
-                self._last_seen_by_track[track.track_id] = int(track.last_seen_ms)
-            elif track.track_id not in self._last_seen_by_track:
-                self._last_seen_by_track[track.track_id] = int(track.last_seen_ms)
+        self._assign_person_slots(frame, visible_tracks)
 
         for track in visible_tracks:
+            slot = self._person_slot_for_track_id(track.track_id)
+            self._slot_last_seen_ms[slot] = int(track.last_seen_ms)
+            self._slot_last_bbox[slot] = track.bbox_xyxy
+            self._slot_last_confidence[slot] = float(track.confidence)
+            self._slot_last_track_id[slot] = track.track_id
+
             observation = _observation_from_track(track, timestamp_ms=now_ms)
             history = self._histories.setdefault(track.track_id, [])
             history.append(observation)
@@ -297,7 +307,10 @@ class EventEngine:
         self,
         salient: TrackSnapshot | None,
     ) -> _EventProposal | None:
-        if salient is None or salient.track_id in self._appeared_track_ids:
+        if salient is None:
+            return None
+        slot = self._person_slot_for_track_id(salient.track_id)
+        if slot in self._appeared_person_slots:
             return None
         return _EventProposal(
             event="person_appeared",
@@ -313,31 +326,45 @@ class EventEngine:
         tracks_by_id: dict[int, TrackSnapshot],
     ) -> list[_EventProposal]:
         proposals: list[_EventProposal] = []
-        known_track_ids = sorted(self._appeared_track_ids | self._salient_track_ids)
-        for track_id in known_track_ids:
-            if track_id in self._left_emitted_track_ids:
+        known_slots = sorted(self._appeared_person_slots | self._salient_person_slots)
+        visible_slots = {
+            self._person_slot_for_track_id(track.track_id)
+            for track in tracks_by_id.values()
+            if track.class_name == "person" and int(track.lost_ms) == 0
+        }
+        for slot in known_slots:
+            if slot in self._left_emitted_person_slots:
+                continue
+            if slot in visible_slots:
                 continue
 
-            track = tracks_by_id.get(track_id)
-            if track is not None and track.lost_ms == 0:
-                continue
-
-            last_seen_ms = self._last_seen_by_track.get(track_id)
-            if track is not None:
-                last_seen_ms = int(track.last_seen_ms)
+            last_seen_ms = self._slot_last_seen_ms.get(slot)
             if last_seen_ms is None:
                 continue
 
+            slot_tracks = [
+                track
+                for track in tracks_by_id.values()
+                if self._track_person_slots.get(track.track_id) == slot
+            ]
+            for track in slot_tracks:
+                last_seen_ms = max(last_seen_ms, int(track.last_seen_ms))
             lost_duration_ms = max(0, now_ms - last_seen_ms)
-            track_lost_ms = int(track.lost_ms) if track is not None else 0
+            track_lost_ms = max(
+                (int(track.lost_ms) for track in slot_tracks),
+                default=0,
+            )
             duration_ms = max(lost_duration_ms, track_lost_ms)
             if duration_ms < self.config.left_lost_ms:
+                continue
+            track_id = self._slot_last_track_id.get(slot)
+            if track_id is None:
                 continue
             proposals.append(
                 _EventProposal(
                     event="person_left",
                     track_id=track_id,
-                    confidence=self._last_confidence_by_track.get(track_id, 0.8),
+                    confidence=self._slot_last_confidence.get(slot, 0.8),
                     duration_ms=duration_ms,
                     rising_edge=False,
                 )
@@ -530,8 +557,16 @@ class EventEngine:
         if last_type_ms is not None and now_ms - last_type_ms < self.config.cooldown_ms:
             return None
 
-        track_event_key = (proposal.track_id, proposal.event)
-        last_track_event_ms = self._last_track_event_ms.get(track_event_key)
+        person_event_key = self._person_event_key(proposal)
+        last_track_event_ms = self._last_person_event_ms.get(person_event_key)
+        alias_assigned_ms = self._track_alias_assigned_ms.get(proposal.track_id)
+        if (
+            proposal.event != "attention_target_changed"
+            and alias_assigned_ms is not None
+            and now_ms - alias_assigned_ms <= self.config.reacquire_alias_window_ms
+            and last_track_event_ms is not None
+        ):
+            return None
         if (
             last_track_event_ms is not None
             and now_ms - last_track_event_ms < self.config.cooldown_ms
@@ -550,16 +585,17 @@ class EventEngine:
         }
         self._next_event_number += 1
         self._last_event_by_type_ms[proposal.event] = now_ms
-        self._last_track_event_ms[track_event_key] = now_ms
+        self._last_person_event_ms[person_event_key] = now_ms
 
+        slot = person_event_key[0]
         if proposal.event == "person_appeared":
-            self._appeared_track_ids.add(proposal.track_id)
-            self._salient_track_ids.add(proposal.track_id)
+            self._appeared_person_slots.add(slot)
+            self._salient_person_slots.add(slot)
         elif proposal.event == "person_left":
-            self._left_emitted_track_ids.add(proposal.track_id)
+            self._left_emitted_person_slots.add(slot)
 
         if proposal.rising_edge:
-            self._active_conditions.add(track_event_key)
+            self._active_conditions.add(person_event_key)
         return event
 
     def _oldest_reference(
@@ -752,15 +788,91 @@ class EventEngine:
         )
 
     def _is_active(self, track_id: int, event: str) -> bool:
-        return (track_id, event) in self._active_conditions
+        return (
+            self._person_slot_for_track_id(track_id),
+            event,
+        ) in self._active_conditions
 
     def _clear_active(self, track_id: int, event: str) -> None:
-        self._active_conditions.discard((track_id, event))
+        self._active_conditions.discard(
+            (self._person_slot_for_track_id(track_id), event)
+        )
 
     def _clear_active_for_event(self, event: str) -> None:
         self._active_conditions = {
             item for item in self._active_conditions if item[1] != event
         }
+
+    def _assign_person_slots(
+        self,
+        frame: FrameMessage,
+        visible_tracks: list[TrackSnapshot],
+    ) -> None:
+        now_ms = int(frame.timestamp_ms)
+        assigned_visible_slots = {
+            self._track_person_slots[track.track_id]
+            for track in visible_tracks
+            if track.track_id in self._track_person_slots
+        }
+        for track in visible_tracks:
+            if track.track_id in self._track_person_slots:
+                continue
+            alias_slot = self._alias_slot_for_track(
+                frame,
+                track,
+                excluded_slots=assigned_visible_slots,
+            )
+            slot = alias_slot if alias_slot is not None else self._create_person_slot()
+            self._track_person_slots[track.track_id] = slot
+            if alias_slot is not None:
+                self._track_alias_assigned_ms[track.track_id] = now_ms
+            assigned_visible_slots.add(slot)
+
+    def _alias_slot_for_track(
+        self,
+        frame: FrameMessage,
+        track: TrackSnapshot,
+        *,
+        excluded_slots: set[int],
+    ) -> int | None:
+        now_ms = int(frame.timestamp_ms)
+        threshold_px = (
+            math.hypot(float(frame.width), float(frame.height))
+            * self.config.reacquire_center_distance_ratio
+        )
+        candidates: list[tuple[float, int, int]] = []
+        for slot, last_seen_ms in self._slot_last_seen_ms.items():
+            if slot in excluded_slots:
+                continue
+            elapsed_ms = now_ms - last_seen_ms
+            if elapsed_ms < 0 or elapsed_ms > self.config.reacquire_alias_window_ms:
+                continue
+            previous_bbox = self._slot_last_bbox.get(slot)
+            if previous_bbox is None:
+                continue
+            distance_px = _center_distance(track.bbox_xyxy, previous_bbox)
+            if distance_px <= threshold_px:
+                candidates.append((distance_px, elapsed_ms, slot))
+        if not candidates:
+            return None
+        return min(candidates)[2]
+
+    def _create_person_slot(self) -> int:
+        slot = self._next_person_slot
+        self._next_person_slot += 1
+        return slot
+
+    def _person_slot_for_track_id(self, track_id: int) -> int:
+        slot = self._track_person_slots.get(track_id)
+        if slot is None:
+            slot = self._create_person_slot()
+            self._track_person_slots[track_id] = slot
+        return slot
+
+    def _person_event_key(self, proposal: _EventProposal) -> tuple[int, str]:
+        if proposal.event == "attention_target_changed":
+            return (proposal.track_id, proposal.event)
+        return (self._person_slot_for_track_id(proposal.track_id), proposal.event)
 
 
 def _observation_from_track(
@@ -784,6 +896,18 @@ def _area_ratio(bbox: BBoxXYXY, *, image_area: float) -> float:
 def _center_x(bbox: BBoxXYXY) -> float:
     x1, _, x2, _ = bbox
     return (float(x1) + float(x2)) / 2.0
+
+
+def _center_y(bbox: BBoxXYXY) -> float:
+    _, y1, _, y2 = bbox
+    return (float(y1) + float(y2)) / 2.0
+
+
+def _center_distance(left: BBoxXYXY, right: BBoxXYXY) -> float:
+    return math.hypot(
+        _center_x(left) - _center_x(right),
+        _center_y(left) - _center_y(right),
+    )
 
 
 def _bbox_width(bbox: BBoxXYXY) -> float:

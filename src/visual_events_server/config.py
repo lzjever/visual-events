@@ -224,4 +224,16 @@ def _parse_event_config(data: dict[str, Any]) -> EventConfig:
                 defaults.wave_min_x_span_bbox_ratio,
             )
         ),
+        reacquire_alias_window_ms=int(
+            data.get(
+                "reacquire_alias_window_ms",
+                defaults.reacquire_alias_window_ms,
+            )
+        ),
+        reacquire_center_distance_ratio=float(
+            data.get(
+                "reacquire_center_distance_ratio",
+                defaults.reacquire_center_distance_ratio,
+            )
+        ),
     )

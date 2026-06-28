@@ -56,6 +56,8 @@ left_lost_ms = 1700
 stop_max_speed_px_s = 28.5
 passing_min_dx_ratio = 0.5
 wave_window_ms = 1600
+reacquire_alias_window_ms = 4200
+reacquire_center_distance_ratio = 0.06
 """.strip(),
         encoding="utf-8",
     )
@@ -90,6 +92,8 @@ wave_window_ms = 1600
     assert config.events.stop_max_speed_px_s == 28.5
     assert config.events.passing_min_dx_ratio == 0.5
     assert config.events.wave_window_ms == 1600
+    assert config.events.reacquire_alias_window_ms == 4200
+    assert config.events.reacquire_center_distance_ratio == 0.06
 
 
 def test_metrics_config_is_disabled_by_default():

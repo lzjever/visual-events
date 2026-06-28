@@ -603,20 +603,29 @@ def test_cooldown_suppresses_same_event_type_at_4999ms_and_allows_at_5000ms():
     subject = EventEngine()
 
     first = make_wave_history(subject, track_id=1, start_ms=1000)
-    suppressed = make_wave_history(
-        subject,
-        track_id=2,
-        start_ms=5600,
-        start_frame_id=4,
-    )
+    suppressed: list[dict] = []
+    for index, wrist_x in enumerate((60.0, 145.0, 65.0)):
+        timestamp_ms = 5600 + (index * 600)
+        suppressed = subject.update(
+            frame(frame_id=4 + index, timestamp_ms=timestamp_ms),
+            [
+                track(
+                    2,
+                    timestamp_ms=timestamp_ms,
+                    bbox_xyxy=(0.0, 150.0, 200.0, 450.0),
+                    keypoints=keypoints(wrist_x=wrist_x),
+                )
+            ],
+            attention(2),
+        )
     allowed = subject.update(
         frame(frame_id=7, timestamp_ms=7200),
         [
             track(
                 2,
                 timestamp_ms=7200,
-                bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
-                keypoints=keypoints(wrist_x=540.0),
+                bbox_xyxy=(0.0, 150.0, 200.0, 450.0),
+                keypoints=keypoints(wrist_x=140.0),
             )
         ],
         attention(2),
@@ -640,6 +649,125 @@ def test_same_track_same_event_dedupes_inside_cooldown_window():
 
     assert event_names(first) == ["person_waving"]
     assert "person_waving" not in event_names(duplicate)
+
+
+def test_nearby_reacquired_track_dedupes_greeting_after_global_cooldown():
+    subject = EventEngine()
+
+    first = make_wave_history(subject, track_id=1, start_ms=1000)
+    reacquired: list[dict] = []
+    for index, wrist_x in enumerate((460.0, 545.0, 465.0)):
+        timestamp_ms = 7000 + (index * 600)
+        reacquired.extend(
+            subject.update(
+                frame(frame_id=4 + index, timestamp_ms=timestamp_ms),
+                [
+                    track(
+                        2,
+                        timestamp_ms=timestamp_ms,
+                        bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
+                        keypoints=keypoints(wrist_x=wrist_x),
+                    )
+                ],
+                attention(2),
+            )
+        )
+
+    assert event_names(first) == ["person_waving"]
+    assert "person_appeared" not in event_names(reacquired)
+    assert "person_waving" not in event_names(reacquired)
+
+
+def test_nearby_aliased_track_can_emit_greeting_after_alias_window():
+    subject = EventEngine()
+
+    first = make_wave_history(subject, track_id=1, start_ms=1000)
+    reacquired: list[dict] = []
+    for index, wrist_x in enumerate((460.0, 545.0, 465.0)):
+        timestamp_ms = 7000 + (index * 600)
+        reacquired.extend(
+            subject.update(
+                frame(frame_id=4 + index, timestamp_ms=timestamp_ms),
+                [
+                    track(
+                        2,
+                        timestamp_ms=timestamp_ms,
+                        bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
+                        keypoints=keypoints(wrist_x=wrist_x),
+                    )
+                ],
+                attention(2),
+            )
+        )
+
+    subject.update(
+        frame(frame_id=7, timestamp_ms=9000),
+        [
+            track(
+                2,
+                timestamp_ms=9000,
+                bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
+                keypoints=keypoints(wrist_x=500.0, wrist_confidence=0.1),
+            )
+        ],
+        attention(2),
+    )
+    late: list[dict] = []
+    for index, wrist_x in enumerate((460.0, 545.0, 465.0)):
+        timestamp_ms = 12600 + (index * 600)
+        late.extend(
+            subject.update(
+                frame(frame_id=8 + index, timestamp_ms=timestamp_ms),
+                [
+                    track(
+                        2,
+                        timestamp_ms=timestamp_ms,
+                        bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
+                        keypoints=keypoints(wrist_x=wrist_x),
+                    )
+                ],
+                attention(2),
+            )
+        )
+
+    late_waves = events_of(late, "person_waving")
+
+    assert event_names(first) == ["person_waving"]
+    assert "person_waving" not in event_names(reacquired)
+    assert len(late_waves) == 1
+    assert late_waves[0]["track_id"] == 2
+
+
+def test_far_reacquired_track_can_emit_greeting_after_global_cooldown():
+    subject = EventEngine()
+
+    first = make_wave_history(subject, track_id=1, start_ms=1000)
+    emitted: list[dict] = []
+    for index, wrist_x in enumerate((60.0, 145.0, 65.0)):
+        timestamp_ms = 7000 + (index * 600)
+        emitted.extend(
+            subject.update(
+                frame(frame_id=4 + index, timestamp_ms=timestamp_ms),
+                [
+                    track(
+                        2,
+                        timestamp_ms=timestamp_ms,
+                        bbox_xyxy=(0.0, 150.0, 200.0, 450.0),
+                        keypoints=keypoints(wrist_x=wrist_x),
+                    )
+                ],
+                attention(2),
+            )
+        )
+
+    assert event_names(first) == ["person_waving"]
+    assert "person_appeared" in event_names(emitted)
+    assert "person_waving" in event_names(emitted)
+    assert {
+        event["track_id"]
+        for event in emitted
+        if event["event"] in {"person_appeared", "person_waving"}
+    } == {2}
 
 
 def test_event_id_increments_and_reset_does_not_reuse_already_sent_ids():
@@ -852,3 +980,13 @@ def test_event_config_defaults_are_documented_thresholds():
     assert config.wave_window_ms == 1800
     assert config.wave_min_x_span_px == 35
     assert config.wave_min_x_span_bbox_ratio == 0.12
+    assert config.reacquire_alias_window_ms == 5000
+    assert config.reacquire_center_distance_ratio == 0.08
+
+
+def test_event_config_rejects_invalid_reacquire_alias_thresholds():
+    with pytest.raises(ValueError, match="reacquire_alias_window_ms"):
+        EventConfig(reacquire_alias_window_ms=-1)
+
+    with pytest.raises(ValueError, match="reacquire_center_distance_ratio"):
+        EventConfig(reacquire_center_distance_ratio=-0.01)
