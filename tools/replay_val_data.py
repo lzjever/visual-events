@@ -79,6 +79,18 @@ _SCENE_EVENT_ORDER_REQUIREMENTS = {
         ("person_approaching_robot", "person_stopped_near_robot"),
     ),
 }
+# Botified notification expectations intentionally differ from raw server
+# semantic-event expectations: low-value/default-suppressed facts should not
+# require an agent wake-up.
+_BOTIFIED_EVENT_ORACLE_REQUIRED_EVENTS = {
+    "pci_stand": {"person_stopped_near_robot"},
+    "pic_hello": {"person_waving"},
+    "pic_persone_walk_in": {"person_approaching_robot"},
+    "pic_walk_in_stop": {
+        "person_approaching_robot",
+        "person_stopped_near_robot",
+    },
+}
 _SCENE_DUPLICATE_GREETING_CONTRACTS = {
     "pic_hello": (
         {
@@ -92,7 +104,7 @@ _BOTIFIED_EVENT_ORACLE_IGNORED_EVENTS = {"attention_target_changed"}
 
 
 def botified_event_oracle_facts(scene: str, head_motion: str) -> dict[str, Any]:
-    required_events = set(_SCENE_EXPECTED_EVENTS.get(scene, set()))
+    required_events = set(_BOTIFIED_EVENT_ORACLE_REQUIRED_EVENTS.get(scene, set()))
     required_events -= _BOTIFIED_EVENT_ORACLE_IGNORED_EVENTS
     if head_motion != "stationary":
         required_events -= _MOTION_SENSITIVE_EVENT_TYPES

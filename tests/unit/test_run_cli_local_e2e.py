@@ -3175,6 +3175,146 @@ def test_all_scenes_full_scene_botified_event_oracle_fails_missing_required_with
     ]
 
 
+def test_all_scenes_full_scene_botified_event_oracle_allows_no_frame_for_pic_leave(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_leave"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_leave": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+                {
+                    "start_frame_timestamp_ms": 1090,
+                    "end_frame_timestamp_ms": 1090,
+                    "no_target": True,
+                },
+            ],
+        },
+    )
+    runner = successful_full_scene_matrix_runner(cli_stdout="")
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["current_pc_core_gate_pass"] is True
+    assert report["oracle_evaluation_passed"] is True
+    assert "botified_event_oracle_no_allowed_event:pic_leave" not in report[
+        "failure_reasons"
+    ]
+    assert report["botified_event_oracle"]["missing_required_events"] == []
+    assert report["botified_event_oracle"]["blocking_failure_reasons"] == []
+    scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["contract_present"] is True
+    assert scene_oracle["observed"] == {}
+    assert scene_oracle["required"] == []
+    assert scene_oracle["missing"] == []
+    assert scene_oracle["forbidden_present"] == {}
+    assert scene_oracle["blocking_failure_reasons"] == []
+
+
+def test_all_scenes_full_scene_botified_event_oracle_does_not_require_person_appeared(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pci_stand"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pci_stand": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+                {
+                    "start_frame_timestamp_ms": 1090,
+                    "end_frame_timestamp_ms": 1090,
+                    "no_target": True,
+                },
+            ],
+        },
+    )
+    runner = successful_full_scene_matrix_runner(
+        cli_stdout=botified_frame(
+            "person_stopped_near_robot",
+            event_id="front:evt_000458",
+            track_id=1,
+        )
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["botified_event_oracle"]["passed"] is True
+    assert report["botified_event_oracle"]["missing_required_events"] == []
+    scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["required"] == ["person_stopped_near_robot"]
+    assert scene_oracle["missing"] == []
+    assert scene_oracle["observed"] == {"person_stopped_near_robot": 1}
+
+
+def test_all_scenes_full_scene_botified_event_oracle_does_not_require_passing_by(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_1_r_to_l"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_1_r_to_l": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+                {
+                    "start_frame_timestamp_ms": 1090,
+                    "end_frame_timestamp_ms": 1090,
+                    "no_target": True,
+                },
+            ],
+        },
+    )
+    runner = successful_full_scene_matrix_runner(cli_stdout="")
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["botified_event_oracle"]["passed"] is True
+    assert "botified_event_oracle_no_allowed_event:pic_1_r_to_l" not in report[
+        "failure_reasons"
+    ]
+    scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["contract_present"] is True
+    assert scene_oracle["required"] == []
+    assert scene_oracle["missing"] == []
+    assert scene_oracle["observed"] == {}
+
+
 def test_all_scenes_full_scene_botified_event_oracle_records_missing_required_without_blocking(
     tmp_path: Path,
 ) -> None:
@@ -3230,8 +3370,7 @@ def test_all_scenes_full_scene_botified_event_oracle_fails_forbidden_present(
     paths = make_case(tmp_path)
     replace_scenes(paths, ["pic_leave"])
     runner = successful_full_scene_matrix_runner(
-        cli_stdout=botified_frame("person_left")
-        + botified_frame("person_waving", event_id="front:evt_000457")
+        cli_stdout=botified_frame("person_waving", event_id="front:evt_000457")
     )
 
     rc = module.main(
@@ -3249,6 +3388,9 @@ def test_all_scenes_full_scene_botified_event_oracle_fails_forbidden_present(
     assert scene_oracle["contract_present"] is True
     assert scene_oracle["missing"] == []
     assert scene_oracle["forbidden_present"] == {"person_waving": 1}
+    assert "botified_event_oracle_no_allowed_event:pic_leave" not in report[
+        "failure_reasons"
+    ]
 
 
 def test_all_scenes_full_scene_botified_event_oracle_fails_order_violation(
