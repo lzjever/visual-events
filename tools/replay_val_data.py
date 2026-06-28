@@ -79,6 +79,15 @@ _SCENE_EVENT_ORDER_REQUIREMENTS = {
         ("person_approaching_robot", "person_stopped_near_robot"),
     ),
 }
+_SCENE_DUPLICATE_GREETING_CONTRACTS = {
+    "pic_hello": (
+        {
+            "person_label": "primary_person",
+            "event": "person_waving",
+            "max_count": 1,
+        },
+    ),
+}
 _BOTIFIED_EVENT_ORACLE_IGNORED_EVENTS = {"attention_target_changed"}
 
 
@@ -109,6 +118,10 @@ def botified_event_oracle_facts(scene: str, head_motion: str) -> dict[str, Any]:
         "required_events": sorted(required_events),
         "forbidden_events": sorted(forbidden_events),
         "order_requirements": sorted(order_requirements),
+        "duplicate_greeting_contracts": _active_duplicate_greeting_contracts(
+            scene,
+            head_motion,
+        ),
     }
 
 
@@ -182,6 +195,10 @@ class ReplayStats:
     )
     semantic_event_order_violations: int = 0
     semantic_event_order_diagnostics: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+    semantic_event_duplicate_greeting_violation_count: int = 0
+    semantic_event_duplicate_greeting_violations: list[dict[str, Any]] = field(
         default_factory=list
     )
     semantic_event_timeline_violations: list[dict[str, Any]] = field(
@@ -497,6 +514,12 @@ async def replay_scene(
         semantic_event_order_diagnostics=semantic_event_summary[
             "semantic_event_order_diagnostics"
         ],
+        semantic_event_duplicate_greeting_violation_count=semantic_event_summary[
+            "semantic_event_duplicate_greeting_violation_count"
+        ],
+        semantic_event_duplicate_greeting_violations=semantic_event_summary[
+            "semantic_event_duplicate_greeting_violations"
+        ],
         semantic_event_timeline_violations=semantic_event_summary[
             "semantic_event_timeline_violations"
         ],
@@ -761,6 +784,12 @@ def stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str, 
         ),
         "semantic_event_order_violations": item.semantic_event_order_violations,
         "semantic_event_order_diagnostics": item.semantic_event_order_diagnostics,
+        "semantic_event_duplicate_greeting_violation_count": (
+            item.semantic_event_duplicate_greeting_violation_count
+        ),
+        "semantic_event_duplicate_greeting_violations": (
+            item.semantic_event_duplicate_greeting_violations
+        ),
         "semantic_event_timeline_violations": (
             item.semantic_event_timeline_violations
         ),
@@ -852,6 +881,7 @@ def _events_stats_passed(item: ReplayStats) -> bool:
         and item.semantic_event_unexpected_by_scene == 0
         and item.semantic_event_trigger_timing_errors == 0
         and item.semantic_event_order_violations == 0
+        and item.semantic_event_duplicate_greeting_violation_count == 0
     )
     if not base_pass:
         return False
@@ -871,12 +901,35 @@ def _active_expected_first_frames(scene: str, head_motion: str) -> dict[str, int
     return dict(sorted(expected.items()))
 
 
+def _active_duplicate_greeting_contracts(
+    scene: str,
+    head_motion: str,
+) -> list[dict[str, Any]]:
+    contracts: list[dict[str, Any]] = []
+    for contract in _SCENE_DUPLICATE_GREETING_CONTRACTS.get(scene, ()):
+        event = str(contract["event"])
+        if head_motion != "stationary" and event in _MOTION_SENSITIVE_EVENT_TYPES:
+            continue
+        contracts.append(
+            {
+                "person_label": str(contract["person_label"]),
+                "event": event,
+                "max_count": int(contract["max_count"]),
+            }
+        )
+    return sorted(
+        contracts,
+        key=lambda item: (item["person_label"], item["event"]),
+    )
+
+
 def _semantic_event_contract_summary(
     *,
     scene: str,
     head_motion: str,
     counts_by_type: dict[str, int],
     first_frame_by_type: dict[str, int],
+    event_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
     expected_events = set(_SCENE_EXPECTED_EVENTS.get(scene, set()))
     if head_motion in {"moving", "unknown"}:
@@ -963,6 +1016,12 @@ def _semantic_event_contract_summary(
             }
         )
 
+    duplicate_greeting_diagnostics = duplicate_greeting_violations(
+        scene=scene,
+        head_motion=head_motion,
+        event_records=event_records,
+    )
+
     return {
         "semantic_event_expected_missing": sum(
             1 for event in expected_events if counts_by_type.get(event, 0) == 0
@@ -977,8 +1036,63 @@ def _semantic_event_contract_summary(
         "semantic_event_forbidden_events_by_type": forbidden_events_by_type,
         "semantic_event_order_violations": order_violations,
         "semantic_event_order_diagnostics": order_diagnostics,
+        "semantic_event_duplicate_greeting_violation_count": len(
+            duplicate_greeting_diagnostics
+        ),
+        "semantic_event_duplicate_greeting_violations": (
+            duplicate_greeting_diagnostics
+        ),
         "semantic_event_timeline_violations": timeline_violations,
     }
+
+
+def duplicate_greeting_violations(
+    *,
+    scene: str,
+    head_motion: str,
+    event_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    for contract in _active_duplicate_greeting_contracts(scene, head_motion):
+        event = contract["event"]
+        records = [record for record in event_records if record.get("event") == event]
+        observed_count = len(records)
+        max_count = contract["max_count"]
+        if observed_count <= max_count:
+            continue
+
+        frames = _int_record_values(records, "frame")
+        timestamps_ms = _int_record_values(records, "timestamp")
+        lines = _int_record_values(records, "line")
+        violation = {
+            "scene": scene,
+            "person_label": contract["person_label"],
+            "event": event,
+            "max_count": max_count,
+            "observed_count": observed_count,
+            "track_ids": sorted(set(_int_record_values(records, "track_id"))),
+            "event_ids": [
+                record["event_id"]
+                for record in records
+                if isinstance(record.get("event_id"), str)
+            ],
+        }
+        if frames:
+            violation["frames"] = frames
+        if timestamps_ms:
+            violation["timestamps_ms"] = timestamps_ms
+        if lines:
+            violation["lines"] = lines
+        violations.append(violation)
+    return violations
+
+
+def _int_record_values(records: list[dict[str, Any]], key: str) -> list[int]:
+    return [
+        value
+        for record in records
+        if isinstance((value := record.get(key)), int) and not isinstance(value, bool)
+    ]
 
 
 @dataclass
@@ -1006,6 +1120,7 @@ class _SemanticEventStatsAccumulator:
         self._seen_event_ids: set[str] = set()
         self._last_track_event_ms: dict[tuple[int, str], int] = {}
         self._last_event_type_ms: dict[str, int] = {}
+        self._event_records: list[dict[str, Any]] = []
 
     def observe(self, response: dict[str, Any]) -> None:
         raw_events = response.get("semantic_events", [])
@@ -1032,6 +1147,15 @@ class _SemanticEventStatsAccumulator:
             event_name = str(raw_event["event"])
             event_id = str(raw_event["event_id"])
             track_id = int(raw_event["track_id"])
+            self._event_records.append(
+                {
+                    "event": event_name,
+                    "frame": frame_index,
+                    "timestamp": timestamp,
+                    "track_id": track_id,
+                    "event_id": event_id,
+                }
+            )
             self._counts_by_type[event_name] = self._counts_by_type.get(event_name, 0) + 1
             self._first_frame_by_type.setdefault(event_name, frame_index)
 
@@ -1086,6 +1210,7 @@ class _SemanticEventStatsAccumulator:
             head_motion=self.head_motion,
             counts_by_type=self._counts_by_type,
             first_frame_by_type=self._first_frame_by_type,
+            event_records=self._event_records,
         )
         return {
             "semantic_event_frames": self.semantic_event_frames,

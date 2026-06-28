@@ -1179,7 +1179,7 @@ async def test_events_gate_fails_same_event_type_across_tracks_within_cooldown(t
 
 @pytest.mark.asyncio
 async def test_events_gate_uses_configured_semantic_event_cooldown(tmp_path):
-    scene = tmp_path / "pic_hello"
+    scene = tmp_path / "custom_scene"
     write_scene_frames(scene, 15)
     response_events = [[] for _ in range(15)]
     response_events[12] = [
@@ -1226,6 +1226,74 @@ async def test_events_gate_uses_configured_semantic_event_cooldown(tmp_path):
     assert stats.semantic_event_cooldown_ms == 50
     assert stats.semantic_event_type_cooldown_errors == 0
     assert _stats_passed(stats, gate="events") is True
+
+
+@pytest.mark.asyncio
+async def test_events_gate_rejects_duplicate_pic_hello_greeting_across_tracks(
+    tmp_path,
+):
+    scene = tmp_path / "pic_hello"
+    write_scene_frames(scene, 15)
+    response_events = [[] for _ in range(15)]
+    response_events[12] = [
+        event_payload(
+            "person_waving",
+            event_id="front:evt_000001",
+            track_id=1,
+        )
+    ]
+    response_events[14] = [
+        event_payload(
+            "person_waving",
+            event_id="front:evt_000002",
+            track_id=2,
+        )
+    ]
+    connector = SequenceResponseConnect(
+        [
+            [
+                track_payload(1, age_ms=400 + index * 100),
+                track_payload(
+                    2,
+                    age_ms=400 + index * 100,
+                    bbox_xyxy=[300.0, 20.0, 400.0, 220.0],
+                ),
+            ]
+            for index in range(15)
+        ],
+        response_events=response_events,
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+        semantic_event_cooldown_ms=50,
+    )
+    summary = stats_to_summary(stats, gate="events")
+
+    assert stats.semantic_event_cooldown_ms == 50
+    assert stats.semantic_event_type_cooldown_errors == 0
+    assert stats.semantic_event_duplicate_greeting_violation_count == 1
+    assert summary["semantic_event_duplicate_greeting_violations"] == [
+        {
+            "scene": "pic_hello",
+            "person_label": "primary_person",
+            "event": "person_waving",
+            "max_count": 1,
+            "observed_count": 2,
+            "track_ids": [1, 2],
+            "event_ids": ["front:evt_000001", "front:evt_000002"],
+            "frames": [12, 14],
+            "timestamps_ms": [1710000001200, 1710000001400],
+        }
+    ]
+    assert _stats_passed(stats, gate="events") is False
 
 
 @pytest.mark.asyncio
@@ -1537,6 +1605,8 @@ async def test_async_main_writes_summary_json(tmp_path, monkeypatch):
             "semantic_event_forbidden_events_by_type": {},
             "semantic_event_order_violations": 0,
             "semantic_event_order_diagnostics": [],
+            "semantic_event_duplicate_greeting_violation_count": 0,
+            "semantic_event_duplicate_greeting_violations": [],
             "semantic_event_timeline_violations": [],
             "tracking_pass": False,
             "attention_pass": False,

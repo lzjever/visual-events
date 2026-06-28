@@ -68,6 +68,7 @@ BOTIFIED_ALLOWED_EVENTS = {
     "person_waving",
 }
 BOTIFIED_EVENT_RE = re.compile(r"\bevent=([A-Za-z0-9_]+)\b")
+BOTIFIED_TRACK_ID_RE = re.compile(r"\btrack_id=(\d+)\b")
 NOT_COVERED = [
     "full_scene_matrix",
     "oracle",
@@ -1777,7 +1778,13 @@ def _evaluate_botified_event_oracle(
         required = list(facts["required_events"])
         forbidden = list(facts["forbidden_events"])
         order_requirements = list(facts["order_requirements"])
-        contract_present = bool(required or forbidden or order_requirements)
+        duplicate_greeting_contracts = list(facts["duplicate_greeting_contracts"])
+        contract_present = bool(
+            required
+            or forbidden
+            or order_requirements
+            or duplicate_greeting_contracts
+        )
 
         missing = [event for event in required if observed.get(event, 0) <= 0]
         forbidden_present = {
@@ -1789,6 +1796,11 @@ def _evaluate_botified_event_oracle(
             sequence,
             order_requirements,
         )
+        duplicate_greeting_violations = replay_val_data.duplicate_greeting_violations(
+            scene=scene,
+            head_motion=head_motion,
+            event_records=sequence,
+        )
 
         for event in missing:
             failure_reasons.append(f"botified_event_oracle_missing:{scene}:{event}")
@@ -1798,6 +1810,11 @@ def _evaluate_botified_event_oracle(
             failure_reasons.append(
                 "botified_event_oracle_order:"
                 f"{scene}:{violation['before_event']}_before_{violation['after_event']}"
+            )
+        for violation in duplicate_greeting_violations:
+            failure_reasons.append(
+                "botified_event_oracle_duplicate_greeting:"
+                f"{scene}:{violation['person_label']}:{violation['event']}"
             )
         if not contract_present:
             failure_reasons.append(f"botified_event_oracle_missing_scene_contract:{scene}")
@@ -1811,6 +1828,7 @@ def _evaluate_botified_event_oracle(
                 "missing": missing,
                 "forbidden_present": forbidden_present,
                 "order_violations": order_violations,
+                "duplicate_greeting_violations": duplicate_greeting_violations,
             }
         )
 
@@ -1856,7 +1874,17 @@ def _event_sequence(value: Any) -> list[dict[str, Any]]:
         line = item.get("line")
         event = item.get("event")
         if isinstance(line, int) and not isinstance(line, bool) and isinstance(event, str):
-            sequence.append({"line": line, "event": event})
+            sequence_item: dict[str, Any] = {"line": line, "event": event}
+            event_id = item.get("event_id")
+            if isinstance(event_id, str):
+                sequence_item["event_id"] = event_id
+            track_id = item.get("track_id")
+            if isinstance(track_id, int) and not isinstance(track_id, bool):
+                sequence_item["track_id"] = track_id
+            frame = item.get("frame")
+            if isinstance(frame, int) and not isinstance(frame, bool):
+                sequence_item["frame"] = frame
+            sequence.append(sequence_item)
     return sequence
 
 
@@ -2904,7 +2932,14 @@ def _summarize_botified_stdout(
 
         allowed_frame_count += 1
         event_counts[event] = event_counts.get(event, 0) + 1
-        event_sequence.append({"line": line_number, "event": event})
+        sequence_item: dict[str, Any] = {"line": line_number, "event": event}
+        event_id = _botified_event_id(payload)
+        if event_id is not None:
+            sequence_item["event_id"] = event_id
+        track_id = _botified_track_id(payload)
+        if track_id is not None:
+            sequence_item["track_id"] = track_id
+        event_sequence.append(sequence_item)
 
     return {
         "source": "cli_stdout",
@@ -2966,6 +3001,24 @@ def _botified_contract_event(payload: dict[str, Any]) -> tuple[str | None, str |
     if event not in BOTIFIED_ALLOWED_EVENTS:
         return None, f"unsupported Botified event {event}"
     return event, None
+
+
+def _botified_event_id(payload: dict[str, Any]) -> str | None:
+    frame_id = payload.get("id")
+    if not isinstance(frame_id, str) or not frame_id.startswith("visual:"):
+        return None
+    event_id = frame_id[len("visual:") :]
+    return event_id or None
+
+
+def _botified_track_id(payload: dict[str, Any]) -> int | None:
+    request = payload.get("request")
+    if not isinstance(request, str):
+        return None
+    match = BOTIFIED_TRACK_ID_RE.search(request)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def _botified_stdout_failure_reasons(summary: dict[str, Any]) -> list[str]:

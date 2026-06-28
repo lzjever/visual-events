@@ -539,12 +539,17 @@ def successful_runner(
     )
 
 
-def botified_frame(event: str = "person_waving", event_id: str = "front:evt_000456") -> str:
+def botified_frame(
+    event: str = "person_waving",
+    event_id: str = "front:evt_000456",
+    *,
+    track_id: int = 7,
+) -> str:
     payload = {
         "id": f"visual:{event_id}",
         "urgency": "normal",
         "timeout_secs": 8,
-        "request": f"event={event} camera=front track_id=7 confidence=0.86",
+        "request": f"event={event} camera=front track_id={track_id} confidence=0.86",
         "expect": "ack",
     }
     inner = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -1253,6 +1258,7 @@ def test_all_scenes_full_scene_frame_counts_fail_core_without_scene_contracts(
                 "missing": [],
                 "forbidden_present": {},
                 "order_violations": [],
+                "duplicate_greeting_violations": [],
             },
             {
                 "scene": "scene-b",
@@ -1262,6 +1268,7 @@ def test_all_scenes_full_scene_frame_counts_fail_core_without_scene_contracts(
                 "missing": [],
                 "forbidden_present": {},
                 "order_violations": [],
+                "duplicate_greeting_violations": [],
             },
         ],
     }
@@ -1402,6 +1409,74 @@ def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> N
             "missing": [],
             "forbidden_present": {},
             "order_violations": [],
+            "duplicate_greeting_violations": [],
+        }
+    ]
+
+
+def test_all_scenes_full_scene_botified_event_oracle_fails_duplicate_greeting(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pic_hello"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pic_hello": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "allowed_target_track_ids": [1, 2],
+                },
+            ],
+        },
+    )
+    runner = successful_full_scene_matrix_runner(
+        cli_stdout=botified_frame(
+            "person_waving",
+            event_id="front:evt_000456",
+            track_id=1,
+        )
+        + botified_frame(
+            "person_waving",
+            event_id="front:evt_000457",
+            track_id=2,
+        )
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["slice_matrix_pass"] is True
+    assert report["current_pc_core_gate_pass"] is False
+    assert report["oracle_evaluation_passed"] is False
+    assert (
+        "botified_event_oracle_duplicate_greeting:"
+        "pic_hello:primary_person:person_waving"
+        in report["failure_reasons"]
+    )
+    scene_oracle = report["botified_event_oracle"]["scenes"][0]
+    assert scene_oracle["contract_present"] is True
+    assert scene_oracle["observed"] == {"person_waving": 2}
+    assert scene_oracle["missing"] == []
+    assert scene_oracle["forbidden_present"] == {}
+    assert scene_oracle["order_violations"] == []
+    assert scene_oracle["duplicate_greeting_violations"] == [
+        {
+            "scene": "pic_hello",
+            "person_label": "primary_person",
+            "event": "person_waving",
+            "max_count": 1,
+            "observed_count": 2,
+            "track_ids": [1, 2],
+            "event_ids": ["front:evt_000456", "front:evt_000457"],
+            "lines": [1, 2],
         }
     ]
 
@@ -1644,6 +1719,7 @@ def test_all_scenes_full_scene_botified_event_oracle_fails_missing_required(
     assert scene_oracle["missing"] == ["person_waving"]
     assert scene_oracle["forbidden_present"] == {}
     assert scene_oracle["order_violations"] == []
+    assert scene_oracle["duplicate_greeting_violations"] == []
 
 
 def test_all_scenes_full_scene_botified_event_oracle_fails_forbidden_present(
@@ -3492,7 +3568,14 @@ def test_botified_stdout_valid_frame_is_reported_without_required_count(tmp_path
     assert botified["frame_count"] == 1
     assert botified["allowed_frame_count"] == 1
     assert botified["event_counts"] == {"person_waving": 1}
-    assert botified["event_sequence"] == [{"line": 1, "event": "person_waving"}]
+    assert botified["event_sequence"] == [
+        {
+            "line": 1,
+            "event": "person_waving",
+            "event_id": "front:evt_000456",
+            "track_id": 7,
+        }
+    ]
     assert botified["pollution_count"] == 0
     assert botified["parse_error_count"] == 0
     assert botified["forbidden_event_count"] == 0
