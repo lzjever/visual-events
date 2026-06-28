@@ -8,8 +8,6 @@ from typing import Any
 import pytest
 
 from tests.jpeg_fixtures import JPEG_1280X720
-from visual_events_cli.dds.types import CameraJpegMessage
-from visual_events_cli.frame_pump import InputFrame
 from visual_events_cli.target_mapper import GazeTargetPayload
 
 
@@ -39,27 +37,22 @@ def camera_line(**overrides: Any) -> str:
     return json.dumps(payload)
 
 
-def test_camera_base64_decodes_to_message_and_input_frame_with_logical_camera():
+def test_camera_base64_decodes_to_bridge_frame_with_logical_camera():
     module = import_bridge_protocol()
 
-    message = module.decode_bridge_line(
+    frame = module.decode_bridge_line(
         camera_line(camera_name="dds-source"),
         logical_camera_name="logical-front",
     )
 
-    assert isinstance(message, CameraJpegMessage)
-    assert message.camera == "logical-front"
-    assert message.timestamp_ms == 1_710_000_000_123
-    assert message.width == 1280
-    assert message.height == 720
-    assert message.encoding == "JPEG"
-    assert message.data == JPEG_1280X720
-
-    frame = message.to_input_frame()
-    assert isinstance(frame, InputFrame)
+    assert isinstance(frame, module.BridgeCameraJpegFrame)
+    assert frame.dds_timestamp_ns == 1_710_000_000_123_456_789
+    assert frame.received_monotonic_ns == 99_000_000
     assert frame.camera == "logical-front"
-    assert frame.timestamp_ms == 1_710_000_000_123
-    assert frame.jpeg == JPEG_1280X720
+    assert frame.width == 1280
+    assert frame.height == 720
+    assert frame.encoding == "JPEG"
+    assert frame.data == JPEG_1280X720
 
 
 @pytest.mark.parametrize(
@@ -80,20 +73,25 @@ def test_camera_decode_rejects_size_mismatch_raw_bytes_and_bad_base64(
         module.decode_bridge_line(camera_line(**overrides), logical_camera_name="front")
 
 
-def test_camera_decode_allows_protocol_frame_but_jpeg_validator_rejects_bad_jpeg():
+def test_camera_decode_allows_protocol_frame_with_bad_jpeg_bytes():
     module = import_bridge_protocol()
     bad_jpeg = b"\xff\xd8bad-jpeg\xff\xd9"
 
-    message = module.decode_bridge_line(
+    frame = module.decode_bridge_line(
         camera_line(
+            width=1280,
+            height=720,
             data_size_bytes=len(bad_jpeg),
             data_base64=base64.b64encode(bad_jpeg).decode("ascii"),
         ),
         logical_camera_name="front",
     )
 
-    assert isinstance(message, CameraJpegMessage)
-    assert message.to_input_frame() is None
+    assert isinstance(frame, module.BridgeCameraJpegFrame)
+    assert frame.camera == "front"
+    assert frame.width == 1280
+    assert frame.height == 720
+    assert frame.data == bad_jpeg
 
 
 def test_head_state_decode_preserves_bridge_timestamps_and_motion_fields():

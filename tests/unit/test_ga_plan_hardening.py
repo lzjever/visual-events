@@ -333,6 +333,11 @@ def test_ga_plan_defines_ga_thresholds_and_equivalent_closed_loop():
 
 def test_ga_plan_pins_review_followup_contract_boundaries():
     text = read_text(GA_PLAN)
+    step7 = section_between(
+        text,
+        "### Step 7：PC 本地核心功能门禁",
+        "### Step 8：Post-GA hardware/field validation",
+    )
 
     assert_contains_all(
         text,
@@ -375,7 +380,6 @@ def test_ga_plan_pins_review_followup_contract_boundaries():
             "JSON 字段",
             "ttl/timeout 语义",
             "错误/ack 期望",
-            "manifest 中所有 GA scene",
             "计划不硬编码 scene 数量",
             "Current PC core gate config 是 tracked `configs/pc-ga-server.toml`",
             "`attention.switch_confirm_ms >=750`",
@@ -387,6 +391,17 @@ def test_ga_plan_pins_review_followup_contract_boundaries():
     assert "signal/process cleanup path" not in text
     assert "BrokenPipe during shutdown publish stale then nonzero" not in text
     assert "同一物理人短暂 lost/恢复期间不得产生新的招呼型事件序列" not in text
+    assert_contains_all(
+        step7,
+        [
+            "manifest",
+            "所有 GA scene",
+            "scene 名称",
+            "sha256",
+            "frame count",
+            "fps",
+        ],
+    )
 
 
 def test_ga_plan_pins_botified_backpressure_and_broken_pipe_semantics():
@@ -426,6 +441,11 @@ def test_ga_plan_pins_botified_backpressure_and_broken_pipe_semantics():
 
 def test_ga_plan_pins_final_review_contracts_without_expanding_scope():
     text = read_text(GA_PLAN)
+    step8 = section_between(
+        text,
+        "### Step 8：Post-GA hardware/field validation",
+        "### Step 9：Release 和 handoff",
+    )
 
     assert_contains_all(
         text,
@@ -436,7 +456,6 @@ def test_ga_plan_pins_final_review_contracts_without_expanding_scope():
             "非 loopback 网络必须显式传入 `--allow-non-loopback-dds`",
             "Step 3 不直接链接真实 DDS SDK",
             "native bridge runtime/wiring 属于 Step 4",
-            "expected attention target timeline/rule（target label/track、allowed switch windows、no-target windows）",
             "现场 checklist 必须验证 expected attention target timeline/rule",
             "进入、路过、靠近、停留、挥手等每类事件有 expected occurrence 和允许延迟窗口",
             "负例不得触发",
@@ -452,6 +471,15 @@ def test_ga_plan_pins_final_review_contracts_without_expanding_scope():
     assert "测试 runner 默认必须使用 `DDS_NETWORK=lo`" not in text
     assert "E2E 默认使用 `DDS_NETWORK=lo`" not in text
     assert "真实 DDS adapters：DDS image/head state/gaze target 的 runtime adapter" not in text
+    assert_contains_all(
+        step8,
+        [
+            "expected attention target timeline/rule",
+            "target label/track",
+            "allowed switch windows",
+            "no-target windows",
+        ],
+    )
 
 
 def test_ga_plan_baseline_and_team_review_match_current_cli_state():
@@ -658,7 +686,15 @@ def test_ga_plan_records_step5_native_participants_and_current_pc_core_gate():
             "`post_ga_not_covered`",
             "历史 partial smoke 证据保留为背景",
             "不能再被解释为当前只有 partial smoke",
-            "current PC core gate 的 manifest/oracle 必须列出 scene 名称",
+        ],
+    )
+    assert_contains_all(
+        step5,
+        [
+            "current PC core gate",
+            "manifest/oracle",
+            "必须列出",
+            "scene 名称",
         ],
     )
 

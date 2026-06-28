@@ -1780,9 +1780,9 @@ def test_native_abi_harness_outputs_camera_head_and_accepts_python_gaze(
     native_abi_build,
     gaze_state: str,
 ):
+    from visual_events_cli.dds.bridge_protocol import BridgeCameraJpegFrame
     from visual_events_cli.dds.bridge_protocol import BridgeHeadStateFrame
     from visual_events_cli.dds.bridge_protocol import decode_bridge_line, encode_gaze_target_line
-    from visual_events_cli.dds.types import CameraJpegMessage
     from visual_events_cli.target_mapper import GazeTargetPayload
 
     payload = GazeTargetPayload(
@@ -1826,7 +1826,7 @@ def test_native_abi_harness_outputs_camera_head_and_accepts_python_gaze(
 
     camera = decode_bridge_line(stdout_lines[0], logical_camera_name="front")
     head = decode_bridge_line(stdout_lines[1], logical_camera_name="front")
-    assert isinstance(camera, CameraJpegMessage)
+    assert isinstance(camera, BridgeCameraJpegFrame)
     assert camera.camera == "front"
     assert camera.data
     assert isinstance(head, BridgeHeadStateFrame)
@@ -1959,9 +1959,9 @@ def _canonical_gaze_target_jsonl(state: str = "tracking", valid: bool | None = N
 def test_native_runtime_loop_fake_harness_emits_samples_and_publishes_gaze(
     native_runtime_loop_fake_build,
 ):
+    from visual_events_cli.dds.bridge_protocol import BridgeCameraJpegFrame
     from visual_events_cli.dds.bridge_protocol import BridgeHeadStateFrame
     from visual_events_cli.dds.bridge_protocol import decode_bridge_line
-    from visual_events_cli.dds.types import CameraJpegMessage
 
     result = subprocess.run(
         [
@@ -1988,7 +1988,7 @@ def test_native_runtime_loop_fake_harness_emits_samples_and_publishes_gaze(
 
     camera = decode_bridge_line(stdout_lines[0], logical_camera_name="front")
     head = decode_bridge_line(stdout_lines[1], logical_camera_name="front")
-    assert isinstance(camera, CameraJpegMessage)
+    assert isinstance(camera, BridgeCameraJpegFrame)
     assert camera.camera == "front"
     assert camera.data == b"\xff\xd8\xff\xd9"
     assert isinstance(head, BridgeHeadStateFrame)
@@ -2115,9 +2115,9 @@ def test_native_runtime_loop_fake_harness_invalid_gaze_is_fatal_jsonl(
 def test_native_mapping_harness_maps_camera_and_head_dds_to_jsonl_abi(
     native_full_bridge_mapping_build,
 ):
+    from visual_events_cli.dds.bridge_protocol import BridgeCameraJpegFrame
     from visual_events_cli.dds.bridge_protocol import BridgeHeadStateFrame
     from visual_events_cli.dds.bridge_protocol import decode_bridge_line
-    from visual_events_cli.dds.types import CameraJpegMessage
 
     result = subprocess.run(
         [os.fspath(native_full_bridge_mapping_build / "visual_events_dds_bridge_mapping_harness")],
@@ -2148,7 +2148,7 @@ def test_native_mapping_harness_maps_camera_and_head_dds_to_jsonl_abi(
     assert raw_frames[0]["data_size_bytes"] == 4
 
     camera = decode_bridge_line(stdout_lines[0], logical_camera_name="front")
-    assert isinstance(camera, CameraJpegMessage)
+    assert isinstance(camera, BridgeCameraJpegFrame)
     assert camera.camera == "front"
     assert camera.data == b"\xff\xd8\xff\xd9"
 
