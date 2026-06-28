@@ -86,8 +86,8 @@ class FakeRunner:
         self,
         *,
         health: FakeHealth | None = None,
-        sync_results: dict[str, FakeResult] | None = None,
-        process_results: dict[str, FakeResult] | None = None,
+        sync_results: dict[str, FakeResult | list[FakeResult]] | None = None,
+        process_results: dict[str, FakeResult | list[FakeResult]] | None = None,
         initial_process_returncodes: dict[str, int] | None = None,
     ) -> None:
         self.health = health or FakeHealth(
@@ -101,19 +101,34 @@ class FakeRunner:
         self.events: list[tuple[str, str]] = []
         self.started: dict[str, FakeProcess] = {}
         self.commands: dict[str, list[str]] = {}
+        self.command_history: list[tuple[str, list[str]]] = []
         self.envs: dict[str, dict[str, str]] = {}
         self.health_urls: list[str] = []
         self._next_pid = 1001
 
     def _lookup_result(
         self,
-        results: dict[str, FakeResult],
+        results: dict[str, FakeResult | list[FakeResult]],
         name: str,
     ) -> FakeResult | None:
         if name in results:
-            return results[name]
+            return self._consume_result(results, name)
         base_name = name.split(":", 1)[0]
-        return results.get(base_name)
+        if base_name in results:
+            return self._consume_result(results, base_name)
+        return None
+
+    def _consume_result(
+        self,
+        results: dict[str, FakeResult | list[FakeResult]],
+        name: str,
+    ) -> FakeResult | None:
+        result = results[name]
+        if isinstance(result, list):
+            if not result:
+                return None
+            return result.pop(0)
+        return result
 
     def _default_head_result(self, name: str) -> FakeResult | None:
         if not name.startswith("head_publisher:"):
@@ -147,6 +162,7 @@ class FakeRunner:
         self._next_pid += 1
         self.started[name] = process
         self.commands[name] = command
+        self.command_history.append((name, command))
         self.envs[name] = env
         self.events.append(("start", name))
         return process
@@ -162,6 +178,7 @@ class FakeRunner:
     ) -> FakeResult:
         del cwd, timeout_s
         self.commands[name] = command
+        self.command_history.append((name, command))
         self.envs[name] = env
         self.events.append(("run_sync", name))
         return self._lookup_result(self.sync_results, name) or FakeResult(0)
@@ -921,6 +938,213 @@ def test_full_scene_default_gaze_count_shortfall_fails_slice(tmp_path: Path) -> 
     assert "gaze_target_count_shortfall:segment=stationary" in report["failure_reasons"]
     assert report["pc_local_e2e_status"] == "partial_smoke_failed"
     assert report["slice_pass"] is False
+
+
+def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    write_frame(paths["data_dir"] / "scene-a" / "002.jpg")
+    write_frame(paths["data_dir"] / "scene-a" / "003.jpeg")
+    write_frame(paths["data_dir"] / "scene-b" / "002.jpg")
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": [
+                FakeResult(
+                    0,
+                    stdout=gaze_jsonl(
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "tracking",
+                            "valid": True,
+                        },
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "lost",
+                            "valid": False,
+                        },
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "tracking",
+                            "valid": True,
+                        },
+                    ),
+                ),
+                FakeResult(
+                    0,
+                    stdout=gaze_jsonl(
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "tracking",
+                            "valid": True,
+                        },
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "lost",
+                            "valid": False,
+                        },
+                    ),
+                ),
+            ]
+        }
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    image_commands = [
+        command
+        for name, command in runner.command_history
+        if name == "image_publisher:stationary"
+    ]
+    head_commands = [
+        command
+        for name, command in runner.command_history
+        if name == "head_publisher:stationary"
+    ]
+    gaze_commands = [
+        command for name, command in runner.command_history if name == "gaze_subscriber"
+    ]
+    assert [arg_value(command, "--input") for command in image_commands] == [
+        os.fspath(paths["data_dir"] / "scene-a"),
+        os.fspath(paths["data_dir"] / "scene-b"),
+    ]
+    assert [arg_value(command, "--count") for command in image_commands] == ["3", "2"]
+    assert [arg_value(command, "--count") for command in head_commands] == ["3", "2"]
+    assert [arg_value(command, "--count") for command in gaze_commands] == ["3", "2"]
+
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "full_scene_matrix_pass"
+    assert report["scene_replay_mode"] == "full_scene_matrix"
+    assert report["slice_pass"] is True
+    assert report["overall_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert report["oracle_evaluated"] is False
+    assert report["oracle_evaluation_passed"] is None
+    assert "full_scene_matrix" not in report["not_covered"]
+    for gap in ["oracle", "latency_p95_p99", "fault_matrix", "soak", "release_report"]:
+        assert gap in report["not_covered"]
+    assert [
+        (
+            result["scene"],
+            result["selected_scene_frame_count"],
+            result["published_frames"],
+            result["slice_pass"],
+            result["failure_reasons"],
+            result["gaze"]["expected_count"],
+            result["head_state"]["count"],
+            result["botified_stdout"]["source"],
+        )
+        for result in report["scene_results"]
+    ] == [
+        ("scene-a", 3, 3, True, [], 3, 3, "cli_stdout"),
+        ("scene-b", 2, 2, True, [], 2, 2, "cli_stdout"),
+    ]
+
+
+def test_all_scenes_requires_full_scene(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(base_argv(paths, "--all-scenes"), runner=runner)
+
+    assert rc == 2
+    assert runner.events == []
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert any("--all-scenes requires --full-scene" in reason for reason in report["failure_reasons"])
+
+
+def test_all_scenes_rejects_explicit_scene(tmp_path: Path) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--scene", "scene-a"),
+        runner=runner,
+    )
+
+    assert rc == 2
+    assert runner.events == []
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert any("--all-scenes cannot be combined with --scene" in reason for reason in report["failure_reasons"])
+
+
+def test_all_scenes_matrix_failure_identifies_scene_and_keeps_other_results(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    write_frame(paths["data_dir"] / "scene-a" / "002.jpg")
+    write_frame(paths["data_dir"] / "scene-a" / "003.jpeg")
+    write_frame(paths["data_dir"] / "scene-b" / "002.jpg")
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": [
+                FakeResult(
+                    0,
+                    stdout=gaze_jsonl(
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "tracking",
+                            "valid": True,
+                        }
+                    ),
+                ),
+                FakeResult(
+                    0,
+                    stdout=gaze_jsonl(
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "tracking",
+                            "valid": True,
+                        },
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "lost",
+                            "valid": False,
+                        },
+                    ),
+                ),
+            ]
+        }
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "full_scene_matrix_failed"
+    assert report["scene_replay_mode"] == "full_scene_matrix"
+    assert report["slice_pass"] is False
+    assert "scene_failed:scene-a" in report["failure_reasons"]
+    assert [result["scene"] for result in report["scene_results"]] == [
+        "scene-a",
+        "scene-b",
+    ]
+    scene_a, scene_b = report["scene_results"]
+    assert scene_a["slice_pass"] is False
+    assert any("gaze_target_count_shortfall" in reason for reason in scene_a["failure_reasons"])
+    assert scene_b["slice_pass"] is True
+    assert scene_b["failure_reasons"] == []
 
 
 def test_runtime_server_and_cli_do_not_inherit_ambient_python_env(

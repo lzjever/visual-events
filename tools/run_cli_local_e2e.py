@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -144,6 +144,12 @@ class SegmentSmokeResult:
     head_stdout_json: dict[str, Any] | None
     head_stdout_parse_error: str | None
     failure_reasons: list[str]
+
+
+@dataclass(frozen=True)
+class SmokeRunResult:
+    report: dict[str, Any]
+    rc: int
 
 
 class ProcessLike(Protocol):
@@ -404,6 +410,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--logical-camera-name", default="front")
     parser.add_argument("--scene", default=None)
     parser.add_argument("--full-scene", action="store_true")
+    parser.add_argument("--all-scenes", action="store_true")
     parser.add_argument("--frame-count", type=_positive_int, default=None)
     parser.add_argument("--image-hz", type=_positive_float, default=10.0)
     parser.add_argument(
@@ -593,6 +600,8 @@ def main(
         return 2
 
     active_runner = runner or LocalProcessRunner()
+    if args.all_scenes:
+        return _run_full_scene_matrix(config, active_runner)
     return _run_smoke(config, active_runner)
 
 
@@ -699,7 +708,19 @@ def _build_config(
     out: Path,
     manifest_report: dict[str, Any],
 ) -> CliLocalE2EConfig:
+    if args.all_scenes:
+        if not args.full_scene:
+            raise PreflightError("--all-scenes requires --full-scene")
+        if args.scene is not None:
+            raise PreflightError("--all-scenes cannot be combined with --scene")
+        if args.frame_count is not None:
+            raise PreflightError("--all-scenes cannot be combined with --frame-count")
     data_dir = Path(manifest_report["data_dir"])
+    if args.all_scenes:
+        _all_scene_names_from_effective_manifest(
+            data_dir=data_dir,
+            effective_manifest=manifest_report.get("effective_manifest"),
+        )
     server_bin = _preflight_executable(args.server_bin, name="server-bin")
     cli_bin = _preflight_executable(args.cli_bin, name="cli-bin")
     server_config = _resolve_path(args.server_config) if args.server_config else None
@@ -824,6 +845,16 @@ def _preflight_manifest_contract(manifest_report: dict[str, Any]) -> None:
 
 
 def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
+    result = _run_smoke_result(config, runner)
+    _write_report(config.out, result.report)
+    print(str(config.out))
+    return result.rc
+
+
+def _run_smoke_result(
+    config: CliLocalE2EConfig,
+    runner: ProcessRunner,
+) -> SmokeRunResult:
     started_at = _utc_now()
     started_s = time.perf_counter()
     orchestration_env = os.environ.copy()
@@ -1021,9 +1052,92 @@ def _run_smoke(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
         gaze_summary=gaze_summary,
         botified_stdout=botified_stdout,
     )
+    return SmokeRunResult(report=report, rc=0 if slice_pass else 1)
+
+
+def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> int:
+    scene_names = _all_scene_names_from_effective_manifest(
+        data_dir=config.data_dir,
+        effective_manifest=config.manifest_report.get("effective_manifest"),
+    )
+    scene_reports: list[dict[str, Any]] = []
+    failure_reasons: list[str] = []
+
+    for scene_name in scene_names:
+        scene_config = _config_for_full_scene(config, scene_name)
+        result = _run_smoke_result(scene_config, runner)
+        scene_report = result.report
+        scene_reports.append(_matrix_scene_result(scene_report))
+        if result.rc != 0:
+            failure_reasons.append(f"scene_failed:{scene_name}")
+            failure_reasons.extend(
+                f"{scene_name}:{reason}"
+                for reason in scene_report.get("failure_reasons", [])
+            )
+
+    matrix_pass = bool(scene_reports) and all(
+        result.get("slice_pass") is True for result in scene_reports
+    )
+    report = _base_report(
+        manifest_report=config.manifest_report,
+        status="full_scene_matrix_pass" if matrix_pass else "full_scene_matrix_failed",
+        failure_reasons=[] if matrix_pass else _dedupe(failure_reasons),
+    )
+    report.update(
+        {
+            "slice_pass": matrix_pass,
+            "scene_replay_mode": "full_scene_matrix",
+            "scene_results": scene_reports,
+            "not_covered": [
+                gap for gap in NOT_COVERED if gap != "full_scene_matrix"
+            ],
+        }
+    )
     _write_report(config.out, report)
     print(str(config.out))
-    return 0 if slice_pass else 1
+    return 0 if matrix_pass else 1
+
+
+def _config_for_full_scene(
+    base_config: CliLocalE2EConfig,
+    scene_name: str,
+) -> CliLocalE2EConfig:
+    scene_dir = base_config.data_dir / scene_name
+    if not scene_dir.exists():
+        raise PreflightError(f"scene directory not found: {scene_dir}")
+    if not scene_dir.is_dir():
+        raise PreflightError(f"scene is not a directory: {scene_dir}")
+    frame_count = len(cli_local_e2e_manifest.jpeg_files(scene_dir))
+    if frame_count <= 0:
+        raise PreflightError(f"scene has no JPEG frames: {scene_name}")
+    head_state_segments = tuple(
+        replace(segment, frame_count=frame_count)
+        for segment in base_config.head_state_segments
+    )
+    return replace(
+        base_config,
+        selected_scene=scene_name,
+        scene_dir=scene_dir,
+        scene_replay_mode="full_scene",
+        selected_scene_frame_count=frame_count,
+        frame_count=frame_count,
+        gaze_count=frame_count,
+        head_state_segments=head_state_segments,
+    )
+
+
+def _matrix_scene_result(scene_report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scene": scene_report.get("selected_scene"),
+        "selected_scene_frame_count": scene_report.get("selected_scene_frame_count"),
+        "published_frames": scene_report.get("published_frames"),
+        "slice_pass": scene_report.get("slice_pass"),
+        "failure_reasons": scene_report.get("failure_reasons", []),
+        "gaze": scene_report.get("gaze"),
+        "head_state": scene_report.get("head_state"),
+        "botified_stdout": scene_report.get("botified_stdout"),
+        "report": scene_report,
+    }
 
 
 def _server_command(config: CliLocalE2EConfig) -> list[str]:
@@ -2096,6 +2210,42 @@ def _select_scene(
     if not scene_path.exists():
         raise PreflightError(f"selected scene directory not found: {scene_path}")
     return name
+
+
+def _all_scene_names_from_effective_manifest(
+    *,
+    data_dir: Path,
+    effective_manifest: Any,
+) -> list[str]:
+    if not isinstance(effective_manifest, dict):
+        raise PreflightError("effective manifest is not an object")
+    scenes = effective_manifest.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        raise PreflightError("effective manifest has no scenes")
+
+    names: list[str] = []
+    for index, scene in enumerate(scenes):
+        if not isinstance(scene, dict):
+            raise PreflightError(f"effective manifest scene {index} is invalid")
+        name = scene.get("scene_name")
+        if not isinstance(name, str):
+            name = scene.get("name")
+        if not isinstance(name, str) or name == "":
+            raise PreflightError(f"effective manifest scene {index} has no scene name")
+        scene_path = Path(name)
+        if scene_path.is_absolute() or len(scene_path.parts) != 1:
+            raise PreflightError(f"effective manifest scene name is invalid: {name}")
+        if name in names:
+            raise PreflightError(f"effective manifest duplicate scene: {name}")
+        full_scene_path = data_dir / name
+        if not full_scene_path.exists():
+            raise PreflightError(f"selected scene directory not found: {full_scene_path}")
+        if not full_scene_path.is_dir():
+            raise PreflightError(f"scene is not a directory: {full_scene_path}")
+        if not cli_local_e2e_manifest.jpeg_files(full_scene_path):
+            raise PreflightError(f"scene has no JPEG frames: {name}")
+        names.append(name)
+    return names
 
 
 def _parse_server_url(value: str) -> ParsedServerUrl:
