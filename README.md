@@ -2,7 +2,7 @@
 
 视觉事件推理服务。当前 repo 已包含 S0-S8 server baseline：WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay/E2E 工具、S2 推理 backend 边界和 Ultralytics pose adapter、S3 项目内 ByteTrack-style IoU/TTL tracker baseline、S4 attention selector、S5 semantic events、支持 S6/S6.1/S6.3/S8 E2E/perf/soak、semantic event first-trigger/timeline gate 和 opt-in server metrics evidence 的 `tools/run_val_data_e2e.py`，以及 release/runtime smoke verification 工具 `tools/run_runtime_smoke.py`。首个产品场景是商店门口揽客机器人。
 
-当前 GA acceptance/pass/fail authority 是 PC 本地模拟门禁：`tools/run_cli_local_e2e.py --full-scene --all-scenes --head-state stationary`，覆盖 synthetic DDS image/head-state publishers、runtime server/CLI、DDS gaze subscriber/stdout collector、`val-data` full-scene matrix、Botified event oracle、stdout pollution、fresh gaze Hz/rate 和 basic finite latency sanity。标准命令通过时可报告 PC-simulated GA pass（`ga_gate_pass=true`）；端到端 P95/P99 latency report 是 non-blocking evidence / 后续 handoff evidence，除非后续单独实现 blocking latency gate。manifest/evidence/strict gate 等已有工作只作为有限证据保留。这只证明当前 PC 模拟核心功能通过，不等于 real robot/field/RK/release audit pass；真机实际运行、真实 robot camera DDS、真实 head-state source、physical head pointing、HIL/real closed loop、现场测试或 owner sign-off 属于 post-GA validation，不阻塞 GA，也不能由 PC evidence 外推为通过。
+当前 GA acceptance/pass/fail authority 是 PC 本地模拟门禁：`tools/run_cli_local_e2e.py --full-scene --all-scenes --head-state stationary --server-config configs/pc-ga-server.toml`，覆盖 synthetic DDS image/head-state publishers、runtime server/CLI、DDS gaze subscriber/stdout collector、`val-data` full-scene matrix、Botified event oracle、stdout pollution、fresh gaze Hz/rate 和 basic finite latency sanity。标准命令通过时可报告 PC-simulated GA pass（`ga_gate_pass=true`）；端到端 P95/P99 latency report 是 non-blocking evidence / 后续 handoff evidence，除非后续单独实现 blocking latency gate。manifest/evidence/strict gate 等已有工作只作为有限证据保留。这只证明当前 PC 模拟核心功能通过，不等于 real robot/field/RK/release audit pass；真机实际运行、真实 robot camera DDS、真实 head-state source、physical head pointing、HIL/real closed loop、现场测试或 owner sign-off 属于 post-GA validation，不阻塞 GA，也不能由 PC evidence 外推为通过。
 
 本 repo 计划包含两个运行单元，并包含开发/验证工具：
 
@@ -43,7 +43,7 @@ DDS JPEG @10Hz
 - 开发/验证目录：`tools/`、`tests/`。
 - 输入/输出频率：10Hz。
 - 模型：`YOLOv8n-pose` 作为 V1 baseline。
-- 真实推理依赖：开发使用 `uv sync --group dev --extra inference`；release 使用 `uv sync --frozen --no-dev --no-editable --extra inference --reinstall-package visual-events-server`，确保交付验证时当前项目 wheel 刷新到 `runtime/venv`。当前 extra 使用 PyTorch cu128 wheel，面向 5090D GPU server；当前 handoff 验证配置路径为 `runtime/config/s2.toml`。
+- 真实推理依赖：开发使用 `uv sync --group dev --extra inference`；release 使用 `uv sync --frozen --no-dev --no-editable --extra inference --reinstall-package visual-events-server`，确保交付验证时当前项目 wheel 刷新到 `runtime/venv`。当前 extra 使用 PyTorch cu128 wheel，面向 5090D GPU server；当前 PC GA 验证使用 tracked `configs/pc-ga-server.toml`，runtime 本地配置如存在只作为本机派生/部署文件，不作为 Git 证据。
 - Inference release note：模型权重默认 `runtime/models/yolov8n-pose.pt`，不入 Git，必须由 release/runtime 外部准备；真实 backend 只加载显式 `model_path`，缺失时启动失败而不会隐式下载。
 - 追踪：项目内 ByteTrack-style IoU/TTL tracker baseline，不使用 Ultralytics `model.track()`。
 - 高频通道：WebSocket streaming + CLI 发布 DDS gaze target。

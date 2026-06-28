@@ -1,5 +1,6 @@
 import os
 import sys
+import tomllib
 import types
 from pathlib import Path
 
@@ -9,6 +10,9 @@ from visual_events_server.config import InferenceConfig, load_config
 from visual_events_server.inference.factory import create_infer_backend
 from visual_events_server.inference.mock import MockInferBackend
 from visual_events_server.inference.ultralytics_pose import InferenceConfigError
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_load_config_parses_inference_section_and_default_model_path(tmp_path):
@@ -92,6 +96,19 @@ def test_metrics_config_is_disabled_by_default():
     config = load_config()
 
     assert config.metrics.jsonl_path is None
+
+
+def test_pc_ga_server_config_sets_750ms_attention_switch_dwell():
+    config_path = REPO_ROOT / "configs" / "pc-ga-server.toml"
+
+    with config_path.open("rb") as file:
+        raw_config = tomllib.load(file)
+    config = load_config(config_path)
+
+    assert raw_config["attention"]["switch_confirm_ms"] >= 750
+    assert config.attention.switch_confirm_ms == raw_config["attention"][
+        "switch_confirm_ms"
+    ]
 
 
 def test_load_config_parses_metrics_jsonl_path(tmp_path):

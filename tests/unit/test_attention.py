@@ -185,6 +185,55 @@ def test_challenger_must_exceed_area_ratio_for_confirm_duration_before_switch():
     assert switched.target_track_id == 2
 
 
+def test_attention_config_750ms_switch_dwell_boundary():
+    subject = AttentionSelector(
+        config=AttentionConfig(
+            stable_min_hits=1,
+            stable_min_age_ms=0,
+            switch_area_ratio=1.25,
+            switch_confirm_ms=750,
+        )
+    )
+
+    initial = subject.update(
+        frame(frame_id=1, timestamp_ms=1000),
+        [
+            track(1, timestamp_ms=1000, bbox_xyxy=(0.0, 0.0, 10.0, 10.0)),
+            track(2, timestamp_ms=1000, bbox_xyxy=(50.0, 0.0, 59.0, 10.0)),
+        ],
+    )
+    challenger_seen = subject.update(
+        frame(frame_id=2, timestamp_ms=1001),
+        [
+            track(1, timestamp_ms=1001, bbox_xyxy=(0.0, 0.0, 10.0, 10.0)),
+            track(2, timestamp_ms=1001, bbox_xyxy=(50.0, 0.0, 70.0, 10.0)),
+        ],
+    )
+    not_yet = subject.update(
+        frame(frame_id=3, timestamp_ms=1750),
+        [
+            track(1, timestamp_ms=1750, bbox_xyxy=(0.0, 0.0, 10.0, 10.0)),
+            track(2, timestamp_ms=1750, bbox_xyxy=(50.0, 0.0, 70.0, 10.0)),
+        ],
+    )
+    switched = subject.update(
+        frame(frame_id=4, timestamp_ms=1751),
+        [
+            track(1, timestamp_ms=1751, bbox_xyxy=(0.0, 0.0, 10.0, 10.0)),
+            track(2, timestamp_ms=1751, bbox_xyxy=(50.0, 0.0, 70.0, 10.0)),
+        ],
+    )
+
+    assert initial is not None
+    assert initial.target_track_id == 1
+    assert challenger_seen is not None
+    assert challenger_seen.target_track_id == 1
+    assert not_yet is not None
+    assert not_yet.target_track_id == 1
+    assert switched is not None
+    assert switched.target_track_id == 2
+
+
 def test_current_target_short_lost_hold_then_timeout_or_new_stable_target():
     held_subject = selector(stable_min_hits=1, stable_min_age_ms=0, lost_hold_ms=600)
     held_subject.update(

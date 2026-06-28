@@ -1,0 +1,11 @@
+[server]
+host = "127.0.0.1"
+port = 8765
+runtime_dir = "runtime"
+
+[inference]
+backend = "ultralytics"
+model_path = "runtime/models/yolov8n-pose.pt"
+
+[attention]
+switch_confirm_ms = 750
