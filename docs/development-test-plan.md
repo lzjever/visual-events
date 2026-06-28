@@ -4,6 +4,8 @@
 
 后续 GA 开发以 [GA 后续开发计划](ga-development-plan.md) 为准。本文保留早期总体设计背景，并已同步关键边界：机器人 CLI 只发布 DDS gaze target，不直接操纵运控。
 
+当前阶段优先核心 server/CLI MVP runtime path：真实 server、正式 CLI runtime、DDS image/head/gaze、Botified event 输出，以及 PC local DDS E2E with `val-data`。直接验证这条路径的必要轻量稳定性和 latency 检查仍是当前核心工作；release report、handoff audit、full fault matrix、long soak、field/real robot gate 属于核心 runtime path 跑通后的交付审计/硬件层。只有直接保护运行边界或用户明确要求时才添加 governance/report/audit/gate 工作。
+
 ## 1. 开发原则
 
 这些原则是实现约束，不是口号：
@@ -14,6 +16,7 @@
 - 可替换但不抽象过度：只为推理 backend 定一个小接口，服务 RK3588 迁移；其他地方先按 V1 需求直接实现。
 - 高频状态和低频事件分离：10Hz 状态用于生成 DDS gaze target 和调试，Botified frame 只承载语义事件。
 - 失败时降级：服务断开、帧过期、无人、目标丢失时，CLI 不输出误导性事件，并在 250ms 内发布 invalid/stale gaze target；DDS lifespan 只作为后备失效保护。
+- TDD 只覆盖核心功能和高风险集成；不要为测试工具、报告骨架或文档文字继续堆测试。
 
 ## 2. Repo 结构
 
@@ -203,6 +206,8 @@ stdout 默认只输出 Botified frame。日志、状态和调试信息走 stderr
 ## 5. 测试计划
 
 ### 5.1 单元测试
+
+单元测试优先覆盖 runtime 核心逻辑和高风险边界。测试工具、报告骨架和纯文档 wording 不需要再做“测试测试”。
 
 覆盖：
 

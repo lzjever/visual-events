@@ -4,7 +4,7 @@
 
 ## 1. 目标
 
-本计划覆盖 `visual-events` 从当前 server S0-S8 baseline 走到 GA 的剩余工作：服务端收口改进、正式机器人端 CLI、DDS gaze 输出契约、PC 完全本地化端到端测试、真机验证和 release handoff。
+本计划覆盖 `visual-events` 从当前 server S0-S8 baseline 走到 GA 的剩余工作。当前阶段优先做核心 server/CLI MVP runtime path：真实 server、正式 CLI runtime、DDS image/head/gaze、Botified event 输出，以及 PC local DDS E2E with `val-data`。直接验证这条路径的必要轻量稳定性和 latency 检查仍是当前核心工作；release report、handoff audit、full fault matrix、long soak、field/real robot gate 属于核心 MVP 路径跑通后的交付审计/硬件层。
 
 首个 GA 场景是商店门口揽客机器人。系统必须在 nominal 10Hz DDS image 输入下稳定观察前方画面，识别人、追踪人、生成低频语义事件，并在有新鲜 `visual_state` 的区间以 nominal 10Hz 输出 gaze target（实际目标 >=9Hz 且 <=10Hz），让机器人可以注视画面中最大且稳定的人。断线或状态过期后，CLI 在 250ms 内发布一次 invalid/stale gaze target，然后依赖 DDS lifespan 失效，不承诺断线期间继续 >=9Hz heartbeat。
 
@@ -30,8 +30,10 @@
 - 本体安全边界清晰：CLI 只发布目标事实和有效期，不发布速度/位置命令，不直接控制硬件。
 - 可测试优先：PC 本地 DDS 端到端测试是当前阶段 delivery gate，不是 demo；硬件/现场证据延后到 deferred gate。
 - 运行隔离：继续使用 `uv`；开发环境和 release/runtime 环境分开；不污染系统和用户目录；模型、cache、artifacts 不进 Git。
-- Artifact 可追溯：`val-data/` 不进 Git，但每次 PC/release report 必须记录数据 manifest hash、模型/runtime/config hash 和关键 report hash。
+- Artifact 可追溯：`val-data/` 不进 Git；当前只保留能直接保护核心 runtime path 的有限 evidence，如 manifest 身份、runtime/config hash 和关键 PC E2E 摘要。不要把 release report/handoff audit 当成当前实现切片。
 - 输出隔离：CLI stdout 是 Botified allowlist 输出，不是调试通道；高频 attention/gaze 状态不得泄漏到 Botified。
+- 治理克制：governance/report/audit/gate 层只能在直接保护核心运行边界或用户明确要求时添加。已完成的 manifest/evidence/strict gate 工作保留为有限 evidence，不再继续扩张，不能替代 MVP runtime path。
+- TDD 边界：只对核心功能和高风险集成做 TDD；不要为测试工具、报告骨架、文档文字再堆“测试测试”。
 
 ## 3. 当前基线
 
@@ -65,7 +67,7 @@ Step 5 CLI runtime + mock visual_state server integration slice 已完成：`tes
 
 当前 repo 已完成 Step 4 first slice/unit core：纯 Python SDK-neutral DDS adapter core/fakes 位于 `visual_events_cli.dds.qos`、`visual_events_cli.dds.types`、`visual_events_cli.dds.protocols`、`visual_events_cli.dds.fake`，覆盖 QoS constants、CameraJpegMessage JPEG SOF dimension validation、fake image latest-only、Fake DDS adapters lifecycle unit core（start/close idempotent；close 后拒绝使用/重启）、HeadStateSample stationary/moving/unknown stale/future timestamp mapping、FakeDdsGazeTargetPublisher lifecycle、protocol names，并有 no-motion/no-real-DDS import audit；该层不 import 真实 DDS SDK/ML/运控依赖。Step 4 Python JSONL bridge client/facade slice 已完成：`bridge_protocol.py`、`bridge_process.py`、`bridge_adapters.py`、`runtime_factories.py` 和 explicit `bridge_runtime_factories()` 覆盖 JSONL protocol/base64/canonical gaze fields、subprocess lifecycle、three thin facade wiring 和 no DDS/native import audit tests。Step 4 Python JSONL bridge runtime integration slice 已完成，formal CLI bridge runtime opt-in slice 已完成：默认仍 fail_fast，不因 env 隐式切 bridge；显式 `[dds].runtime="bridge"`/`--dds-runtime bridge` 才走 `bridge_runtime_factories()`。真实 subprocess fake JSONL child + `bridge_runtime_factories()`/`run_runtime` 覆盖 camera/head -> service -> gaze stdin、logical camera、stale/cleanup、child nonzero/fatal；该 slice 不覆盖真实 DDS runtime，未完成边界统一见 Step 4 剩余缺口。Step 4 native DDS bridge build/probe foundation slice 已完成：新增 `native/dds_bridge` CMake project、`visual_events_dds_bridge_probe` probe target、Unitree SDK2 + `CameraFrame_` build inputs、camera/head/gaze topic/type/QoS constants、单行 JSONL status frame（`protocol_version=1,type=status,code=probe_ok,message=...`）和 `tools/build_dds_bridge.py` split gate；foundation check/build/probe 只要求 SDK root、video publisher dir 和 `CameraFrame_` inputs，可在无 IDL generator 时成功，并在 report 写入 `foundation_ready=true`、`visual_events_codegen_ready=false`、`visual_events_codegen_error="not required for foundation check"`。Step 4 DDS C++ idlc repo-local prepare/oracle hardening slice 已完成：`tools/prepare_dds_codegen_toolchain.py` 保持 CycloneDDS/CycloneDDS-CXX 0.10.2 pinned 和 repo-local ignored `build/tools/cyclonedds-cxx-idlc-0.10.2/`；`--check`/`--dry-run` 不下载、不构建、不写系统或用户目录，只做版本、路径、显式 `idlc` 和 cxx backend 文本检查，并报告 `probe_codegen=false`、`oracle_ok=false`；`--probe-codegen` 是显式非 dry-run oracle，默认验证 repo Head/Gaze IDL codegen oracle only，会在 repo `build/` 下分别运行 `idlc -l cxx -o <probe-output-dir> common/schema/dds/head_state_v1.idl` 和 `common/schema/dds/gaze_target_v1.idl`，拒绝 `cannot load generator`/`cannot load generator cxx`、任一 IDL 缺 `.hpp` 或缺 `.cpp`，并报告每个 probed IDL、expected `.hpp/.cpp`、`generated_files`、per-IDL presence、`expected_generated_files_present`、`cxx_backend_available` 和 `oracle_ok`。`--prepare` 是显式非 dry-run toolchain 编排，固定 ignored `build/tools/cyclonedds-cxx-idlc-0.10.2/` layout，验证 git tag commit、运行 CMake Makefiles install、创建 `bin/idlc-cxx` wrapper、要求 installed idlc/idlcxx/ddsc artifacts，并自动复用同一个 Head/Gaze codegen oracle；它不接受 `--idlc` 且不使用 `VISUAL_EVENTS_IDLC`。fake git/cmake/idlc 覆盖成功生成、0.11.0 fail、missing cxx generator 但 rc=0 fail、只生成 `.hpp` fail、clone/artifact/oracle failure；`tools/build_dds_bridge.py --check-full-bridge` 不再搜索 PATH，只接受显式 `--idlc` 或 `VISUAL_EVENTS_IDLC`，并复用同一个 codegen probe，只有 Head/Gaze expected `.hpp/.cpp` 都写出时才报告 `visual_events_codegen_ready=true`。Step 4 native full-bridge generated Head/Gaze C++ type-support compile/probe slice 已完成：`tools/build_dds_bridge.py --check --check-full-bridge --build --probe` 会运行 Head/Gaze IDL codegen oracle，CMake full-bridge 编译 `head_state_v1.hpp/.cpp` 和 `gaze_target_v1.hpp/.cpp`，native probe 检查 `CameraFrame_`、`HeadStateV1_`、`GazeTargetV1_` type props 并输出一行 JSONL status；Foundation 路径仍然 CameraFrame-only。Step 4 native JSONL ABI/runtime skeleton slice 已完成：`visual_events_dds_bridge` target 存在，`--probe` 单行 JSONL status；ABI-only 不带参数运行仍 explicit fatal `dds_runtime_not_implemented`；`visual_events_dds_bridge_abi_harness` test harness 复用同一 core 产出 fake camera/head，并消费 Python canonical `gaze_target`；parser 严格 canonical fields + state 闭集。Step 4 native generated DDS type/ABI mapping construction slice 已完成：覆盖 `CameraFrame_ -> CameraJpegFrame`、`HeadStateV1_ -> HeadStateFrame`、`GazeTargetFrame -> GazeTargetV1_`、camera/head/gaze field mapping、head state derived stationary/moving/unknown、gaze valid/state consistency 和 finite/range checks；mapping harness 不启 DDS 网络、不调用 Unitree Channel，不证明真实 DDS over-wire 端到端发布订阅 gate、PC E2E、RK/真机。Step 4 native Unitree Channel construction harness/smoke slice 已完成：`visual_events_dds_bridge_construction_harness` 是 full-bridge only construction harness；`runtime_options` pure env parser；`--print-options` 单行 JSONL，`--print-options` 不启 DDS；`--construct-once` 解析 env，执行 Unitree ChannelFactory Init(domain/network)，构造 `CameraFrame_` subscriber、构造 `HeadStateV1_` subscriber、构造 `GazeTargetV1_` publisher，CloseChannel 后 Release。Step 4 native runtime loop core/full-bridge wiring/fake harness/build include fix slice 已完成：`runtime_loop` core；`visual_events_dds_bridge_runtime_loop_harness` fake harness；full-bridge `visual_events_dds_bridge` 无参数路径进入 Unitree DDS runtime loop；ABI-only 路径仍 explicit fatal `dds_runtime_not_implemented`；stdout emitter latest-slot 输出 camera_jpeg/head_state；stdin 读取 canonical `gaze_target` JSONL 并经 backend 发布 DDS gaze；async backend fatal 不被 stdin 阻塞；shutdown late fatal 仍输出 fatal JSONL；full-bridge 构建显式传入 repo-local CycloneDDS C++ include dir。该 slice 只证明 native runtime loop，不证明完整 PC local E2E GA gate、release report、RK/board 或真机闭环。外部源码/build/install/probe 输出不进 Git；未完成边界统一见 Step 4 剩余缺口。
 
-后续开发不能重写 server 主线。Server 已完成的 GA 收口只做防回归和继续跑 gates；CLI 工作从现有 package/entrypoint/config/纯逻辑模块继续补齐 runtime 能力。
+后续开发不能重写 server 主线。Server 已完成的 GA 收口只做防回归和继续跑 gates；CLI 工作从现有 package/entrypoint/config/纯逻辑模块继续补齐 runtime 能力。后续实现切片必须优先推进实际运行能力；没有当前验收收益的治理/report overhead 延后。
 
 ## 4. 产品边界
 
@@ -503,7 +505,7 @@ CLI 单元测试必须覆盖：
 - CLI tests 不依赖真实机器人，但 DDS over-wire 和 serialization/QoS 行为必须被测试。
 - 真机 smoke 不能替代 production runner/lifecycle unit core、PC DDS E2E/over-wire gate 和 serialization/QoS 测试。
 
-### Step 7：PC 本地 GA gate
+### Step 7：PC 本地 GA gate（当前优先）
 
 产出：
 
@@ -563,6 +565,8 @@ CLI 单元测试必须覆盖：
 - 真机 handoff 不能只有本 repo 自测通过；必须有 camera DDS、gaze consumer/运控、Botified 三方 owner sign-off artifact。
 
 ### Step 9：Release 和 handoff
+
+Release/handoff 是交付审计层。只有 Step 7 的核心 server/CLI runtime path 跑通后，才补完整 release report、handoff audit、full fault matrix、long soak 和 field/real robot gate 汇总；当前阶段保留直接验证核心路径的 PC local DDS E2E、必要轻量稳定性和 latency 检查，不要为 release report skeleton 单独扩张代码、schema 或测试。
 
 产出：
 

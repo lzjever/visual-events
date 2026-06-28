@@ -2,6 +2,8 @@
 
 视觉事件推理服务。当前 repo 已包含 S0-S8 server baseline：WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay/E2E 工具、S2 推理 backend 边界和 Ultralytics pose adapter、S3 项目内 ByteTrack-style IoU/TTL tracker baseline、S4 attention selector、S5 semantic events、支持 S6/S6.1/S6.3/S8 E2E/perf/soak、semantic event first-trigger/timeline gate 和 opt-in server metrics evidence 的 `tools/run_val_data_e2e.py`，以及 release/runtime smoke verification 工具 `tools/run_runtime_smoke.py`。首个产品场景是商店门口揽客机器人。
 
+当前阶段优先推进核心 server/CLI MVP runtime path：真实 server、正式 CLI runtime、DDS image/head/gaze、Botified event 输出，以及 PC local DDS E2E with `val-data`。直接验证这条路径的必要轻量稳定性和 latency 检查仍是当前核心工作；manifest/evidence/strict gate 等已有工作只作为有限证据保留。Release report、handoff audit、full fault matrix、long soak、field/real robot gate 属于核心路径跑通后的交付审计/硬件层，不能替代实际 runtime E2E。
+
 本 repo 计划包含两个运行单元，并包含开发/验证工具：
 
 - `visual-events-server`: 已有 S0-S8 baseline。局域网推理服务，接收机器人侧 JPEG 帧，输出 10Hz `visual_state` 和低频 `semantic_events`；metrics 默认关闭，显式配置后写 ignored JSONL。
@@ -56,4 +58,5 @@ DDS JPEG @10Hz
 - KISS：一个输入源、一个服务协议、一个高频状态 schema、一个 DDS gaze target 输出、一个低频事件出口。
 - DRY：schema、几何计算、事件冷却和注视目标选择只实现一次。
 - YAGNI：不训练模型，不做通用动作识别，不做人脸识别，不做多摄像头融合，不做后台治理平台。
+- 治理克制：只在直接保护核心运行边界或用户明确要求时添加 report/audit/gate；TDD 只覆盖核心功能和高风险集成，不为测试工具、报告骨架、文档文字堆测试。
 - 低频事件交给 agent 决策；高频注视 target 由 CLI 发布 DDS，真实头部动作由运控/头控 owner 本地闭环完成。
