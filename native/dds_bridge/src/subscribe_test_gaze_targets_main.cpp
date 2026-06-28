@@ -16,9 +16,17 @@
 
 namespace {
 
+enum class CollectionMode {
+    kCount,
+    kDuration,
+};
+
 struct Args {
     int64_t count = 0;
     int64_t timeout_ms = -1;
+    int64_t duration_ms = 0;
+    int64_t min_count = 0;
+    CollectionMode mode = CollectionMode::kCount;
 };
 
 struct State {
@@ -31,7 +39,7 @@ struct State {
 
 constexpr const char* kUsage =
     "usage: visual_events_dds_bridge_subscribe_test_gaze_targets "
-    "--count <n> --timeout-ms <ms>";
+    "(--count <n> --timeout-ms <ms> | --duration-ms <ms> --min-count <n>)";
 
 bool NeedValue(int index, int argc, const char* flag, std::string* error) {
     if (index + 1 < argc) {
@@ -65,15 +73,52 @@ bool ParseArgs(int argc, char** argv, Args* args, std::string* error) {
                     error)) {
                 return false;
             }
+        } else if (std::strcmp(argv[i], "--duration-ms") == 0) {
+            if (!NeedValue(i, argc, argv[i], error)) {
+                return false;
+            }
+            if (!visual_events::dds_bridge::pc_test_tools::ParsePositiveInt64(
+                    argv[++i],
+                    "--duration-ms",
+                    &args->duration_ms,
+                    error)) {
+                return false;
+            }
+        } else if (std::strcmp(argv[i], "--min-count") == 0) {
+            if (!NeedValue(i, argc, argv[i], error)) {
+                return false;
+            }
+            if (!visual_events::dds_bridge::pc_test_tools::ParsePositiveInt64(
+                    argv[++i],
+                    "--min-count",
+                    &args->min_count,
+                    error)) {
+                return false;
+            }
         } else {
             *error = std::string("unknown argument: ") + argv[i];
             return false;
         }
     }
 
-    if (args->count <= 0 || args->timeout_ms < 0) {
+    const bool count_mode = args->count > 0 || args->timeout_ms >= 0;
+    const bool duration_mode = args->duration_ms > 0 || args->min_count > 0;
+    if (count_mode == duration_mode) {
         *error = kUsage;
         return false;
+    }
+    if (count_mode) {
+        if (args->count <= 0 || args->timeout_ms < 0) {
+            *error = kUsage;
+            return false;
+        }
+        args->mode = CollectionMode::kCount;
+    } else {
+        if (args->duration_ms <= 0 || args->min_count <= 0) {
+            *error = kUsage;
+            return false;
+        }
+        args->mode = CollectionMode::kDuration;
     }
     return true;
 }
@@ -174,7 +219,8 @@ int main(int argc, char** argv) {
         });
 
         bool completed = false;
-        {
+        int64_t received_count = 0;
+        if (args.mode == CollectionMode::kCount) {
             std::unique_lock<std::mutex> lock(state.mutex);
             const auto done = [&state, &args] {
                 return state.failed || state.received >= args.count;
@@ -192,17 +238,46 @@ int main(int argc, char** argv) {
                 error = state.error;
                 completed = false;
             }
+            received_count = state.received;
+        } else {
+            std::unique_lock<std::mutex> lock(state.mutex);
+            state.cv.wait_for(
+                lock,
+                std::chrono::milliseconds(args.duration_ms),
+                [&state] { return state.failed; });
+            if (state.failed) {
+                error = state.error;
+                completed = false;
+            } else {
+                completed = state.received >= args.min_count;
+            }
+            received_count = state.received;
         }
 
         subscriber.CloseChannel();
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            if (state.failed && error.empty()) {
+                error = state.error;
+                completed = false;
+            }
+            received_count = state.received;
+        }
         if (!error.empty()) {
             return tools::EmitFatal("gaze_target_callback_failed", error);
         }
         if (!completed) {
             std::ostringstream message;
-            message << "timed out waiting for " << args.count << " gaze_target sample(s) on "
-                    << parsed_options.options.gaze_topic;
-            return tools::EmitFatal("timeout", message.str());
+            if (args.mode == CollectionMode::kCount) {
+                message << "timed out waiting for " << args.count
+                        << " gaze_target sample(s) on "
+                        << parsed_options.options.gaze_topic;
+                return tools::EmitFatal("timeout", message.str());
+            }
+            message << "collected " << received_count << " gaze_target sample(s) in "
+                    << args.duration_ms << "ms; expected at least " << args.min_count
+                    << " on " << parsed_options.options.gaze_topic;
+            return tools::EmitFatal("insufficient_samples", message.str());
         }
         return 0;
     } catch (const std::exception& exc) {

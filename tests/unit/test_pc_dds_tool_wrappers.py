@@ -292,6 +292,42 @@ def test_child_returncode_stdout_stderr_pass_through_without_wrapper_pollution(
     assert captured.err == "native stderr line\n"
 
 
+def test_gaze_subscriber_wrapper_passes_duration_collection_args(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = WRAPPERS["subscribe_test_gaze_targets"]
+    module = _import_module(spec["module"])
+    build_dir = _make_build_dir(tmp_path, spec["binary"])
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append({"command": command, "kwargs": kwargs})
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    rc = _call_main(
+        module,
+        [
+            "--duration-ms",
+            "800",
+            "--min-count",
+            "1",
+            *_common_args(build_dir),
+        ],
+    )
+
+    assert rc == 0
+    assert calls[0]["command"] == [
+        os.fspath((build_dir / spec["binary"]).resolve()),
+        "--duration-ms",
+        "800",
+        "--min-count",
+        "1",
+    ]
+
+
 def test_wrappers_do_not_import_dds_sdk_or_visual_events_cli() -> None:
     denied_imports = [
         "visual_events_cli",

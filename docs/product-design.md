@@ -156,7 +156,7 @@ V1 baseline 使用 `YOLOv8n-pose + 项目内 ByteTrack-style IoU/TTL tracker bas
 
 - 只保留最新状态，允许丢帧。
 - CLI 和服务端都使用 keep-latest backpressure，禁止无界排队。
-- V1 WebSocket 每个连接只允许一个 in-flight frame：CLI 发送一帧后等待对应 `visual_state` 或 timeout；等待期间 DDS 输入只保留最新帧。
+- V1 WebSocket 每个连接只允许一个 in-flight frame：CLI 发送一帧后等待对应 `visual_state` 或 timeout；等待期间 DDS 输入只保留最新帧，被覆盖/丢弃的旧 DDS 输入帧不补发 gaze target。
 - 超过 stale 阈值的状态不得用于头部控制。
 - 不通过 Botified frame 发送。
 
@@ -356,7 +356,7 @@ Botified：
 注视：
 
 - CLI 只发布 DDS gaze target，不直接操纵运控。
-- 有新鲜 `visual_state` 时，CLI 每帧发布一条 valid 或 invalid gaze target，目标 >=9Hz；server 断线或超时时，250ms 内发布 invalid/stale sample，之后不再发布过期有效目标。
+- 每个新鲜 `visual_state` 派生一条 valid 或 invalid gaze target，目标 >=9Hz；CLI 不用重复旧 target 凑频率。server 断线或超时时，250ms 内发布 invalid/stale sample，之后不再发布过期有效目标。
 - 多人场景默认输出画面中最大稳定人物。
 - 目标短暂丢失时发布 `valid=false`；DDS lifespan 是下游失效的后备保护，不允许输出过期有效目标。
 - 真实头部动作验收属于 GA 之后的硬件/现场验证；GA 阶段本 repo 只验收 PC 模拟下 DDS target 正确性、时效性和失效语义。

@@ -375,7 +375,9 @@ class CliLocalE2EConfig:
     head_state_mode: str
     head_state_segments: tuple[HeadStateSegment, ...]
     head_state_hz: float
+    gaze_collection_mode: str
     gaze_count: int
+    gaze_duration_ms: int | None
     gaze_timeout_ms: int
     health_timeout_s: float
     health_interval_s: float
@@ -764,11 +766,25 @@ def _build_config(
     scene_replay_mode = "full_scene" if args.full_scene else "partial"
     if args.full_scene:
         frame_count = selected_scene_frame_count
-        default_gaze_count = selected_scene_frame_count
+        if args.gaze_count is None:
+            gaze_collection_mode = "duration"
+            gaze_count = 1
+        else:
+            gaze_collection_mode = "count"
+            gaze_count = args.gaze_count
     else:
         frame_count = args.frame_count or 5
-        default_gaze_count = 1
-    gaze_count = args.gaze_count if args.gaze_count is not None else default_gaze_count
+        gaze_collection_mode = "count"
+        gaze_count = args.gaze_count if args.gaze_count is not None else 1
+    gaze_duration_ms = (
+        _full_scene_gaze_duration_ms(
+            frame_count=frame_count,
+            image_hz=args.image_hz,
+            settle_grace_s=args.startup_grace_s,
+        )
+        if gaze_collection_mode == "duration"
+        else None
+    )
     head_state_segment_names = _parse_head_state_segment_names(
         head_state=args.head_state,
         head_state_segments=args.head_state_segments,
@@ -809,7 +825,9 @@ def _build_config(
             for state in head_state_segment_names
         ),
         head_state_hz=args.head_state_hz,
+        gaze_collection_mode=gaze_collection_mode,
         gaze_count=gaze_count,
+        gaze_duration_ms=gaze_duration_ms,
         gaze_timeout_ms=args.gaze_timeout_ms,
         health_timeout_s=args.health_timeout_s,
         health_interval_s=args.health_interval_s,
@@ -963,7 +981,7 @@ def _run_smoke_result(
                 gaze_result = runner.wait_process(
                     gaze_process,
                     name="gaze_subscriber",
-                    timeout_s=(config.gaze_timeout_ms / 1000.0) + STOP_TIMEOUT_S,
+                    timeout_s=_gaze_subscriber_timeout_s(config),
                 )
                 if gaze_result.returncode != 0:
                     segment_failure_reasons.append(
@@ -985,8 +1003,15 @@ def _run_smoke_result(
                     segment_failure_reasons.append(
                         f"gaze_target_count_shortfall{segment_suffix}"
                     )
-                gaze_publish_hz = gaze_summary["gaze_publish_hz"]
+                gaze_publish_hz = gaze_summary["fresh_gaze_publish_hz"]
                 if (
+                    config.gaze_collection_mode == "duration"
+                    and not gaze_publish_hz["available"]
+                ):
+                    segment_failure_reasons.append(
+                        f"fresh_gaze_publish_hz_unavailable{segment_suffix}"
+                    )
+                elif (
                     gaze_publish_hz["available"]
                     and gaze_publish_hz["pass"] is False
                 ):
@@ -1121,7 +1146,13 @@ def _config_for_full_scene(
         scene_replay_mode="full_scene",
         selected_scene_frame_count=frame_count,
         frame_count=frame_count,
-        gaze_count=frame_count,
+        gaze_duration_ms=_full_scene_gaze_duration_ms(
+            frame_count=frame_count,
+            image_hz=base_config.image_hz,
+            settle_grace_s=base_config.startup_grace_s,
+        )
+        if base_config.gaze_collection_mode == "duration"
+        else base_config.gaze_duration_ms,
         head_state_segments=head_state_segments,
     )
 
@@ -1194,15 +1225,27 @@ def _wrapper_common_command(config: CliLocalE2EConfig, script_name: str) -> list
 
 
 def _gaze_subscriber_command(config: CliLocalE2EConfig) -> list[str]:
-    return [
-        *_wrapper_common_command(config, "subscribe_test_gaze_targets.py"),
-        "--count",
-        str(config.gaze_count),
-        "--timeout-ms",
-        str(config.gaze_timeout_ms),
-        "--gaze-topic",
-        config.gaze_topic,
-    ]
+    command = _wrapper_common_command(config, "subscribe_test_gaze_targets.py")
+    if config.gaze_collection_mode == "duration":
+        command.extend(
+            [
+                "--duration-ms",
+                str(config.gaze_duration_ms),
+                "--min-count",
+                str(config.gaze_count),
+            ]
+        )
+    else:
+        command.extend(
+            [
+                "--count",
+                str(config.gaze_count),
+                "--timeout-ms",
+                str(config.gaze_timeout_ms),
+            ]
+        )
+    command.extend(["--gaze-topic", config.gaze_topic])
+    return command
 
 
 def _image_publisher_command(config: CliLocalE2EConfig) -> list[str]:
@@ -1264,6 +1307,23 @@ def _parse_head_state_segment_names(
 
 def _publisher_timeout_s(frame_count: int, hz: float) -> float:
     return max(STOP_TIMEOUT_S, (frame_count / hz) + STOP_TIMEOUT_S)
+
+
+def _full_scene_gaze_duration_ms(
+    *,
+    frame_count: int,
+    image_hz: float,
+    settle_grace_s: float,
+) -> int:
+    duration_s = (frame_count / image_hz) + settle_grace_s
+    return max(1, math.ceil(duration_s * 1000.0))
+
+
+def _gaze_subscriber_timeout_s(config: CliLocalE2EConfig) -> float:
+    if config.gaze_collection_mode == "duration":
+        duration_ms = config.gaze_duration_ms or 0
+        return (duration_ms / 1000.0) + STOP_TIMEOUT_S
+    return (config.gaze_timeout_ms / 1000.0) + STOP_TIMEOUT_S
 
 
 def _parse_head_publisher_stdout(stdout: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -1571,7 +1631,7 @@ def _gaze_evidence_summary(gaze_segments: Any) -> dict[str, Any]:
         total_invalid_count += _int_count(summary.get("invalid_count"))
         total_rejected_count += _int_count(summary.get("rejected_count"))
 
-        publish_hz = summary.get("gaze_publish_hz")
+        publish_hz = summary.get("fresh_gaze_publish_hz")
         if not isinstance(publish_hz, dict) or publish_hz.get("available") is not True:
             continue
         hz = _finite_float(publish_hz.get("hz"))
@@ -1863,6 +1923,9 @@ def _summarize_gaze_jsonl_with_samples(
     latency_samples, invalid_latency_sample_count = _gaze_latency_samples(
         accepted_samples
     )
+    fresh_samples = [
+        sample for sample in accepted_samples if sample.get("state") != "stale"
+    ]
     summary = {
         "expected_count": expected_count,
         "received_lines": len(lines),
@@ -1879,6 +1942,7 @@ def _summarize_gaze_jsonl_with_samples(
             invalid_sample_count=invalid_latency_sample_count,
         ),
         "gaze_publish_hz": _gaze_publish_hz_summary(accepted_samples),
+        "fresh_gaze_publish_hz": _gaze_publish_hz_summary(fresh_samples),
     }
     return summary, tuple(latency_samples)
 

@@ -807,7 +807,7 @@ def test_default_replay_mode_remains_partial_smoke_counts(tmp_path: Path) -> Non
     assert report["ga_gate_pass"] is False
 
 
-def test_full_scene_derives_frame_and_default_gaze_count_from_selected_scene(
+def test_full_scene_uses_duration_gaze_collection_not_frame_count(
     tmp_path: Path,
 ) -> None:
     module = import_runner_module()
@@ -825,18 +825,24 @@ def test_full_scene_derives_frame_and_default_gaze_count_from_selected_scene(
                         "camera": "front",
                         "state": "tracking",
                         "valid": True,
+                        "frame_timestamp_ms": 990,
+                        "publish_timestamp_ms": 1000,
                     },
                     {
                         "type": "gaze_target",
                         "camera": "front",
                         "state": "lost",
                         "valid": False,
+                        "frame_timestamp_ms": 1090,
+                        "publish_timestamp_ms": 1100,
                     },
                     {
                         "type": "gaze_target",
                         "camera": "front",
                         "state": "tracking",
                         "valid": True,
+                        "frame_timestamp_ms": 1190,
+                        "publish_timestamp_ms": 1200,
                     },
                 ),
             )
@@ -858,12 +864,14 @@ def test_full_scene_derives_frame_and_default_gaze_count_from_selected_scene(
     assert rc == 0
     assert arg_value(runner.commands["image_publisher:stationary"], "--count") == "3"
     assert arg_value(runner.commands["head_publisher:stationary"], "--count") == "3"
-    assert arg_value(runner.commands["gaze_subscriber"], "--count") == "3"
+    assert arg_value(runner.commands["gaze_subscriber"], "--count") is None
+    assert arg_value(runner.commands["gaze_subscriber"], "--duration-ms") == "800"
+    assert arg_value(runner.commands["gaze_subscriber"], "--min-count") == "1"
     report = load_report(paths["out"])
     assert report["scene_replay_mode"] == "full_scene"
     assert report["selected_scene_frame_count"] == 3
     assert report["published_frames"] == 3
-    assert report["gaze"]["expected_count"] == 3
+    assert report["gaze"]["expected_count"] == 1
     assert report["pc_local_e2e_status"] == "partial_smoke_pass"
     assert report["overall_pass"] is False
     assert report["ga_gate_pass"] is False
@@ -889,7 +897,9 @@ def test_full_scene_rejects_explicit_frame_count(tmp_path: Path) -> None:
     )
 
 
-def test_full_scene_default_gaze_count_shortfall_fails_slice(tmp_path: Path) -> None:
+def test_full_scene_fresh_rate_pass_allows_less_gaze_than_frame_count(
+    tmp_path: Path,
+) -> None:
     module = import_runner_module()
     paths = make_case(tmp_path)
     write_frame(paths["data_dir"] / "scene-a" / "002.jpg")
@@ -904,12 +914,66 @@ def test_full_scene_default_gaze_count_shortfall_fails_slice(tmp_path: Path) -> 
                         "camera": "front",
                         "state": "tracking",
                         "valid": True,
+                        "frame_timestamp_ms": 990,
+                        "publish_timestamp_ms": 1000,
                     },
                     {
                         "type": "gaze_target",
                         "camera": "front",
                         "state": "lost",
                         "valid": False,
+                        "frame_timestamp_ms": 1090,
+                        "publish_timestamp_ms": 1100,
+                    },
+                ),
+            )
+        }
+    )
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--full-scene",
+            "--scene",
+            "scene-a",
+            "--head-state",
+            "stationary",
+        ),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["scene_replay_mode"] == "full_scene"
+    assert report["selected_scene_frame_count"] == 3
+    assert report["published_frames"] == 3
+    assert report["gaze"]["expected_count"] == 1
+    assert report["gaze"]["accepted_count"] == 2
+    assert "gaze_target_count_shortfall:segment=stationary" not in report["failure_reasons"]
+    assert report["gaze"]["fresh_gaze_publish_hz"]["pass"] is True
+    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
+    assert report["slice_pass"] is True
+
+
+def test_full_scene_duration_requires_available_fresh_gaze_rate(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    write_frame(paths["data_dir"] / "scene-a" / "002.jpg")
+    write_frame(paths["data_dir"] / "scene-a" / "003.jpeg")
+    runner = FakeRunner(
+        sync_results={
+            "gaze_subscriber": FakeResult(
+                0,
+                stdout=gaze_jsonl(
+                    {
+                        "type": "gaze_target",
+                        "camera": "front",
+                        "state": "tracking",
+                        "valid": True,
+                        "frame_timestamp_ms": 990,
+                        "publish_timestamp_ms": 1000,
                     },
                 ),
             )
@@ -931,11 +995,14 @@ def test_full_scene_default_gaze_count_shortfall_fails_slice(tmp_path: Path) -> 
     assert rc != 0
     report = load_report(paths["out"])
     assert report["scene_replay_mode"] == "full_scene"
-    assert report["selected_scene_frame_count"] == 3
-    assert report["published_frames"] == 3
-    assert report["gaze"]["expected_count"] == 3
-    assert report["gaze"]["accepted_count"] == 2
-    assert "gaze_target_count_shortfall:segment=stationary" in report["failure_reasons"]
+    assert report["gaze"]["expected_count"] == 1
+    assert report["gaze"]["accepted_count"] == 1
+    fresh_hz = report["gaze"]["fresh_gaze_publish_hz"]
+    assert fresh_hz["available"] is False
+    assert fresh_hz["sample_count"] == 1
+    assert "fresh_gaze_publish_hz_unavailable:segment=stationary" in report[
+        "failure_reasons"
+    ]
     assert report["pc_local_e2e_status"] == "partial_smoke_failed"
     assert report["slice_pass"] is False
 
@@ -959,18 +1026,24 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
                             "camera": "front",
                             "state": "tracking",
                             "valid": True,
+                            "frame_timestamp_ms": 990,
+                            "publish_timestamp_ms": 1000,
                         },
                         {
                             "type": "gaze_target",
                             "camera": "front",
                             "state": "lost",
                             "valid": False,
+                            "frame_timestamp_ms": 1090,
+                            "publish_timestamp_ms": 1100,
                         },
                         {
                             "type": "gaze_target",
                             "camera": "front",
                             "state": "tracking",
                             "valid": True,
+                            "frame_timestamp_ms": 1190,
+                            "publish_timestamp_ms": 1200,
                         },
                     ),
                 ),
@@ -982,12 +1055,16 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
                             "camera": "front",
                             "state": "tracking",
                             "valid": True,
+                            "frame_timestamp_ms": 990,
+                            "publish_timestamp_ms": 1000,
                         },
                         {
                             "type": "gaze_target",
                             "camera": "front",
                             "state": "lost",
                             "valid": False,
+                            "frame_timestamp_ms": 1090,
+                            "publish_timestamp_ms": 1100,
                         },
                     ),
                 ),
@@ -1020,7 +1097,12 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
     ]
     assert [arg_value(command, "--count") for command in image_commands] == ["3", "2"]
     assert [arg_value(command, "--count") for command in head_commands] == ["3", "2"]
-    assert [arg_value(command, "--count") for command in gaze_commands] == ["3", "2"]
+    assert [arg_value(command, "--count") for command in gaze_commands] == [None, None]
+    assert [arg_value(command, "--duration-ms") for command in gaze_commands] == [
+        "800",
+        "700",
+    ]
+    assert [arg_value(command, "--min-count") for command in gaze_commands] == ["1", "1"]
 
     report = load_report(paths["out"])
     assert report["pc_local_e2e_status"] == "full_scene_matrix_pass"
@@ -1046,8 +1128,8 @@ def test_all_scenes_full_scene_runs_each_manifest_scene_with_scene_frame_counts(
         )
         for result in report["scene_results"]
     ] == [
-        ("scene-a", 3, 3, True, [], 3, 3, "cli_stdout"),
-        ("scene-b", 2, 2, True, [], 2, 2, "cli_stdout"),
+        ("scene-a", 3, 3, True, [], 1, 3, "cli_stdout"),
+        ("scene-b", 2, 2, True, [], 1, 2, "cli_stdout"),
     ]
 
 
@@ -1094,7 +1176,7 @@ def test_all_scenes_matrix_failure_identifies_scene_and_keeps_other_results(
         sync_results={
             "gaze_subscriber": [
                 FakeResult(
-                    0,
+                    1,
                     stdout=gaze_jsonl(
                         {
                             "type": "gaze_target",
@@ -1112,12 +1194,16 @@ def test_all_scenes_matrix_failure_identifies_scene_and_keeps_other_results(
                             "camera": "front",
                             "state": "tracking",
                             "valid": True,
+                            "frame_timestamp_ms": 990,
+                            "publish_timestamp_ms": 1000,
                         },
                         {
                             "type": "gaze_target",
                             "camera": "front",
                             "state": "lost",
                             "valid": False,
+                            "frame_timestamp_ms": 1090,
+                            "publish_timestamp_ms": 1100,
                         },
                     ),
                 ),
@@ -1142,7 +1228,7 @@ def test_all_scenes_matrix_failure_identifies_scene_and_keeps_other_results(
     ]
     scene_a, scene_b = report["scene_results"]
     assert scene_a["slice_pass"] is False
-    assert any("gaze_target_count_shortfall" in reason for reason in scene_a["failure_reasons"])
+    assert any("gaze_subscriber_failed" in reason for reason in scene_a["failure_reasons"])
     assert scene_b["slice_pass"] is True
     assert scene_b["failure_reasons"] == []
 
@@ -1927,6 +2013,10 @@ def test_missing_or_invalid_gaze_timestamps_are_unavailable_without_failure(
     assert publish_hz["sample_count"] == 1
     assert publish_hz["hz"] is None
     assert publish_hz["pass"] is None
+    fresh_hz = report["gaze"]["fresh_gaze_publish_hz"]
+    assert fresh_hz["available"] is False
+    assert fresh_hz["sample_count"] == 1
+    assert fresh_hz["pass"] is None
     assert report["evidence_summary"]["gaze"]["rate_pass"] is None
     assert report["latency"]["capture_to_gaze_publish_ms"] == latency
     assert report["latency"]["capture_to_botified_stdout_ms"] == {
@@ -1999,6 +2089,58 @@ def test_huge_gaze_timestamp_delta_is_unavailable_without_partial_failure(
     assert report["evidence_summary"]["gaze"]["rate_pass"] is True
     assert report["latency"]["capture_to_gaze_publish_ms"] == latency
     assert report["evidence_summary"]["latency"] == report["latency"]
+
+
+def test_fresh_gaze_publish_hz_gate_ignores_stale_samples(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    gaze_stdout = gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "stale",
+            "valid": False,
+            "frame_timestamp_ms": 0,
+            "publish_timestamp_ms": 0,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 990,
+            "publish_timestamp_ms": 1000,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "lost",
+            "valid": False,
+            "frame_timestamp_ms": 1090,
+            "publish_timestamp_ms": 1100,
+        },
+    )
+    runner = FakeRunner(
+        sync_results={"gaze_subscriber": FakeResult(0, stdout=gaze_stdout)}
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary", "--gaze-count", "3"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["failure_reasons"] == []
+    assert report["gaze"]["gaze_publish_hz"]["pass"] is False
+    fresh_hz = report["gaze"]["fresh_gaze_publish_hz"]
+    assert fresh_hz["available"] is True
+    assert fresh_hz["sample_count"] == 2
+    assert fresh_hz["hz"] == pytest.approx(10.0)
+    assert fresh_hz["pass"] is True
+    assert report["evidence_summary"]["gaze"]["rate_pass"] is True
 
 
 def test_non_monotonic_gaze_publish_timestamps_make_hz_unavailable_without_partial_failure(
@@ -2112,6 +2254,10 @@ def test_low_available_gaze_publish_hz_fails_with_segment_reason(
     assert publish_hz["available"] is True
     assert publish_hz["hz"] == pytest.approx(1.0)
     assert publish_hz["pass"] is False
+    fresh_hz = report["gaze"]["fresh_gaze_publish_hz"]
+    assert fresh_hz["available"] is True
+    assert fresh_hz["hz"] == pytest.approx(1.0)
+    assert fresh_hz["pass"] is False
     assert report["evidence_summary"]["gaze"]["rate_pass"] is False
 
 
