@@ -119,6 +119,13 @@ V1 规则：`moving` 或 `unknown` 时，服务端暂停 `person_passing_by`、`
     "reason": "largest_stable_person",
     "confidence": 0.86
   },
+  "scene_context": {
+    "engagement_state": "available",
+    "attention_available": true,
+    "target_track_id": 7,
+    "no_engage_reasons": [],
+    "target_reacquired": null
+  },
   "scene_flags": {
     "has_person": true,
     "person_count": 1,
@@ -142,6 +149,13 @@ V1 规则：`moving` 或 `unknown` 时，服务端暂停 `person_passing_by`、`
   "image_size": [1280, 720],
   "tracks": [],
   "attention": null,
+  "scene_context": {
+    "engagement_state": "no_target",
+    "attention_available": false,
+    "target_track_id": null,
+    "no_engage_reasons": ["no_visible_person"],
+    "target_reacquired": null
+  },
   "scene_flags": {
     "has_person": false,
     "person_count": 0,
@@ -157,6 +171,8 @@ Track 字段规则：
 - `tracks` 是必填数组；S3 只包含 `class="person"` 的 track。
 - `tracks` 可以包含当前帧未匹配但仍在 lost TTL 内保留的 track。这类 track 的 `lost_ms > 0`，`bbox_xyxy`、`center_uv`、`head_uv`、`confidence`、`pose_confidence` 使用最近一次有效观测值；超过 TTL 后从数组移除。
 - `scene_flags.has_person` 和 `scene_flags.person_count` 只统计当前帧匹配/可见的 track，即 `lost_ms == 0`。lost track 不计入人数。
+- `scene_context` 是必填 object，由 server `EventEngine` 随 `semantic_events` 一起输出，processor 只透传，不复算 engagement 业务规则。最小字段为 `engagement_state`、`attention_available`、`target_track_id`、`no_engage_reasons`、`target_reacquired`。
+- 当前最小 engagement 规则：无人时输出 `engagement_state="no_target"`、`attention_available=false`、`target_track_id=null`、`no_engage_reasons=["no_visible_person"]`、`target_reacquired=null`；有稳定、近距离、头部静止且非 fast passing 的 attention target 时输出 `engagement_state="available"`、`attention_available=true`、`target_track_id=<attention target id>`、`no_engage_reasons=[]`。有可见人但暂不可 engage 时输出 `engagement_state="no_engage_target"`，`no_engage_reasons` 可包含 `unstable`、`too_far`、`camera_motion_not_stationary`、`passing_fast`。
 - S5 可输出 `semantic_events`；无事件帧必须输出空数组 `[]`。
 - 每个 track object 必须包含：`track_id` integer、`class` string、`bbox_xyxy` number[4]、`bbox_area_ratio` number、`center_uv` number[2]、`head_uv` number[2]、`velocity_uv_s` number[2]、`age_ms` integer、`lost_ms` integer、`confidence` number、`pose_confidence` number。
 - `pose_confidence` 是 keypoint confidence 的平均值；没有 keypoint 或没有 confidence 时为 `0.0`。
@@ -197,6 +213,15 @@ Attention 字段规则：
   "track_id": 7,
   "confidence": 0.86,
   "duration_ms": 900,
+  "lifecycle_state": "confirmed",
+  "evidence": {
+    "runtime_person_slot": 3,
+    "wrist_x_span_px": 84.0,
+    "wrist_x_span_bbox_ratio": 0.42,
+    "wrist_y_relative_to_shoulder_px": 18.0,
+    "wave_duration_ms": 900,
+    "keypoint_min_confidence": 0.72
+  },
   "text": "有人在机器人前方挥手"
 }
 ```
@@ -220,6 +245,22 @@ V1 event 枚举：
 这些事件只在 `head_motion.state=stationary` 时触发。`moving`、`unknown` 或缺失 `head_motion` 时，服务端不累积这些运动敏感事件的条件。
 
 `person_appeared` 只对 salient target 触发：优先使用当前 `attention.target_track_id`；没有 attention 时，从 visible stable tracks 中选择面积和置信度最高的 person。它不会对背景中所有 person 逐个刷屏。
+
+所有对外输出的 semantic event 都是 confirmed 事实，必须带 `lifecycle_state: "confirmed"` 和 `evidence`。`evidence` 只包含 JSON 标量或简单 list/dict；数值必须是 finite，不输出 `NaN` 或 `Infinity`。
+
+v0.2 event-specific required evidence keys：
+
+| 事件 | required evidence keys |
+| --- | --- |
+| `person_appeared` | `runtime_person_slot`、`visible_duration_ms`、`bbox_area_ratio`、`salient_reason` |
+| `person_left` | `runtime_person_slot`、`lost_duration_ms`、`last_bbox_area_ratio` |
+| `person_passing_by` | `runtime_person_slot`、`dx_ratio`、`avg_vx_px_s`、`crossed_side_bands`、`camera_motion_state`、`passing_speed_class` |
+| `person_approaching_robot` | `runtime_person_slot`、`bbox_area_ratio_start`、`bbox_area_ratio_end`、`area_growth_ratio`、`area_delta`、`camera_motion_state` |
+| `person_stopped_near_robot` | `runtime_person_slot`、`bbox_area_ratio`、`speed_px_s_p95`、`stationary_duration_ms`、`camera_motion_state` |
+| `person_waving` | `runtime_person_slot`、`wrist_x_span_px`、`wrist_x_span_bbox_ratio`、`wrist_y_relative_to_shoulder_px`、`wave_duration_ms`、`keypoint_min_confidence` |
+| `attention_target_changed` | `previous_track_id`、`target_track_id`、`switch_reason` |
+
+`runtime_person_slot` 只在当前 server runtime 内有效，用于短期合并和调试；不代表跨连接身份。
 
 服务端负责：
 

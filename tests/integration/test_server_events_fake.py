@@ -250,7 +250,8 @@ def test_semantic_events_have_protocol_fields_and_empty_frames_use_empty_list():
         third = visual_state_from(websocket, frame_id=3, timestamp_ms=1400)
 
     assert first["semantic_events"] == []
-    assert set(third["semantic_events"][0]) == {
+    event = third["semantic_events"][0]
+    assert set(event) == {
         "type",
         "event_id",
         "event",
@@ -258,8 +259,18 @@ def test_semantic_events_have_protocol_fields_and_empty_frames_use_empty_list():
         "track_id",
         "confidence",
         "duration_ms",
+        "lifecycle_state",
+        "evidence",
         "text",
     }
+    assert event["lifecycle_state"] == "confirmed"
+    assert isinstance(event["evidence"], dict)
+    assert {
+        "runtime_person_slot",
+        "visible_duration_ms",
+        "bbox_area_ratio",
+        "salient_reason",
+    }.issubset(event["evidence"])
 
 
 def test_head_motion_gates_motion_events_but_not_non_motion_events():

@@ -120,7 +120,7 @@ class BackendVisualStreamSession:
         phase_latencies_ms["attention"] = _elapsed_ms(attention_start, self._clock)
 
         events_start = self._clock()
-        semantic_events = self.event_engine.update(frame, tracks, attention)
+        event_result = self.event_engine.update(frame, tracks, attention)
         phase_latencies_ms["events"] = _elapsed_ms(events_start, self._clock)
 
         response_start = self._clock()
@@ -128,7 +128,8 @@ class BackendVisualStreamSession:
             frame,
             tracks,
             attention=attention,
-            semantic_events=semantic_events,
+            semantic_events=event_result.semantic_events,
+            scene_context=event_result.scene_context,
         )
         phase_latencies_ms["response"] = _elapsed_ms(response_start, self._clock)
         phase_latencies_ms["total"] = _elapsed_ms(total_start, self._clock)
@@ -187,6 +188,7 @@ def build_visual_state(
     *,
     attention: AttentionResult | None = None,
     semantic_events: list[dict[str, object]] | None = None,
+    scene_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     protocol_tracks = [
         track.to_protocol(image_width=frame.width, image_height=frame.height)
@@ -208,6 +210,9 @@ def build_visual_state(
         "image_size": [frame.width, frame.height],
         "tracks": protocol_tracks,
         "attention": attention.to_protocol() if attention is not None else None,
+        "scene_context": (
+            scene_context if scene_context is not None else _default_scene_context()
+        ),
         "scene_flags": {
             "has_person": visible_person_count > 0,
             "person_count": visible_person_count,
@@ -221,6 +226,16 @@ def build_visual_state(
             ),
         },
         "semantic_events": semantic_events or [],
+    }
+
+
+def _default_scene_context() -> dict[str, Any]:
+    return {
+        "engagement_state": "no_target",
+        "attention_available": False,
+        "target_track_id": None,
+        "no_engage_reasons": ["no_visible_person"],
+        "target_reacquired": None,
     }
 
 

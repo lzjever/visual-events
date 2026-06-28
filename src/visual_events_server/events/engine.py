@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from visual_events_server.attention import AttentionResult
 from visual_events_server.inference.base import BBoxXYXY, PoseKeypoint, bbox_area
@@ -109,6 +109,12 @@ class EventConfig:
 
 
 @dataclass(frozen=True)
+class EventEngineResult:
+    semantic_events: list[dict[str, object]]
+    scene_context: dict[str, object]
+
+
+@dataclass(frozen=True)
 class _Observation:
     timestamp_ms: int
     bbox_xyxy: BBoxXYXY
@@ -123,7 +129,18 @@ class _EventProposal:
     track_id: int
     confidence: float
     duration_ms: int
+    evidence: dict[str, object] = field(default_factory=dict)
     rising_edge: bool = True
+
+
+@dataclass(frozen=True)
+class _WaveResult:
+    duration_ms: int
+    confidence: float
+    wrist_x_span_px: float
+    wrist_x_span_bbox_ratio: float
+    wrist_y_relative_to_shoulder_px: float
+    keypoint_min_confidence: float
 
 
 class EventEngine:
@@ -140,11 +157,10 @@ class EventEngine:
         frame: FrameMessage,
         tracks: list[TrackSnapshot],
         attention: AttentionResult | None,
-    ) -> list[dict[str, object]]:
+    ) -> EventEngineResult:
         if self._should_reset(frame):
             self._reset_state()
 
-        now_ms = int(frame.timestamp_ms)
         visible_tracks = [
             track
             for track in tracks
@@ -163,10 +179,10 @@ class EventEngine:
             )
 
         proposals: list[_EventProposal] = []
-        appeared = self._person_appeared_proposal(salient)
+        appeared = self._person_appeared_proposal(frame, salient, attention)
         if appeared is not None:
             proposals.append(appeared)
-        proposals.extend(self._person_left_proposals(now_ms, tracks_by_id))
+        proposals.extend(self._person_left_proposals(frame, tracks_by_id))
 
         for track in visible_tracks:
             passing = self._person_passing_by_proposal(frame, track)
@@ -195,10 +211,19 @@ class EventEngine:
             for proposal in proposals
             if (event := self._emit_if_allowed(frame, proposal)) is not None
         ]
+        scene_context = self._scene_context(
+            frame,
+            visible_tracks=visible_tracks,
+            attention=attention,
+            semantic_events=events,
+        )
 
         self._last_timestamp_ms = frame.timestamp_ms
         self._last_frame_id = frame.frame_id
-        return events
+        return EventEngineResult(
+            semantic_events=events,
+            scene_context=scene_context,
+        )
 
     def _reset_state(self) -> None:
         self._last_timestamp_ms: int | None = None
@@ -303,28 +328,115 @@ class EventEngine:
             and int(track.age_ms) >= self.config.stable_min_age_ms
         )
 
+    def _scene_context(
+        self,
+        frame: FrameMessage,
+        *,
+        visible_tracks: list[TrackSnapshot],
+        attention: AttentionResult | None,
+        semantic_events: list[dict[str, object]],
+    ) -> dict[str, object]:
+        if not visible_tracks:
+            return {
+                "engagement_state": "no_target",
+                "attention_available": False,
+                "target_track_id": None,
+                "no_engage_reasons": ["no_visible_person"],
+                "target_reacquired": None,
+            }
+
+        stable_attention_target = self._stable_attention_target(
+            visible_tracks,
+            attention,
+        )
+        reasons: list[str] = []
+        if stable_attention_target is None:
+            reasons.append("unstable")
+        elif not self._is_near(
+            _observation_from_track(
+                stable_attention_target,
+                timestamp_ms=int(frame.timestamp_ms),
+            ),
+            frame,
+        ):
+            reasons.append("too_far")
+
+        if frame.head_motion_state != "stationary":
+            reasons.append("camera_motion_not_stationary")
+        if _has_confirmed_fast_passing(semantic_events):
+            reasons.append("passing_fast")
+
+        if stable_attention_target is not None and not reasons:
+            return {
+                "engagement_state": "available",
+                "attention_available": True,
+                "target_track_id": stable_attention_target.track_id,
+                "no_engage_reasons": [],
+                "target_reacquired": None,
+            }
+        return {
+            "engagement_state": "no_engage_target",
+            "attention_available": False,
+            "target_track_id": stable_attention_target.track_id
+            if stable_attention_target is not None
+            else None,
+            "no_engage_reasons": reasons,
+            "target_reacquired": None,
+        }
+
+    def _stable_attention_target(
+        self,
+        visible_tracks: list[TrackSnapshot],
+        attention: AttentionResult | None,
+    ) -> TrackSnapshot | None:
+        if attention is None:
+            return None
+        for track in visible_tracks:
+            if (
+                track.track_id == attention.target_track_id
+                and self._is_stable_visible(track)
+            ):
+                return track
+        return None
+
     def _person_appeared_proposal(
         self,
+        frame: FrameMessage,
         salient: TrackSnapshot | None,
+        attention: AttentionResult | None,
     ) -> _EventProposal | None:
         if salient is None:
             return None
         slot = self._person_slot_for_track_id(salient.track_id)
         if slot in self._appeared_person_slots:
             return None
+        image_area = float(frame.width) * float(frame.height)
+        salient_reason = (
+            str(attention.reason)
+            if attention is not None and attention.target_track_id == salient.track_id
+            else "fallback_largest_stable_person"
+        )
         return _EventProposal(
             event="person_appeared",
             track_id=salient.track_id,
             confidence=float(salient.confidence),
             duration_ms=int(salient.age_ms),
+            evidence={
+                "runtime_person_slot": slot,
+                "visible_duration_ms": int(salient.age_ms),
+                "bbox_area_ratio": _area_ratio(salient.bbox_xyxy, image_area=image_area),
+                "salient_reason": salient_reason,
+            },
             rising_edge=False,
         )
 
     def _person_left_proposals(
         self,
-        now_ms: int,
+        frame: FrameMessage,
         tracks_by_id: dict[int, TrackSnapshot],
     ) -> list[_EventProposal]:
+        now_ms = int(frame.timestamp_ms)
+        image_area = float(frame.width) * float(frame.height)
         proposals: list[_EventProposal] = []
         known_slots = sorted(self._appeared_person_slots | self._salient_person_slots)
         visible_slots = {
@@ -360,12 +472,20 @@ class EventEngine:
             track_id = self._slot_last_track_id.get(slot)
             if track_id is None:
                 continue
+            last_bbox = self._slot_last_bbox.get(slot)
             proposals.append(
                 _EventProposal(
                     event="person_left",
                     track_id=track_id,
                     confidence=self._slot_last_confidence.get(slot, 0.8),
                     duration_ms=duration_ms,
+                    evidence={
+                        "runtime_person_slot": slot,
+                        "lost_duration_ms": duration_ms,
+                        "last_bbox_area_ratio": _area_ratio(last_bbox, image_area=image_area)
+                        if last_bbox is not None
+                        else 0.0,
+                    },
                     rising_edge=False,
                 )
             )
@@ -419,6 +539,16 @@ class EventEngine:
             track_id=track.track_id,
             confidence=current.confidence,
             duration_ms=duration_ms,
+            evidence={
+                "runtime_person_slot": self._person_slot_for_track_id(track.track_id),
+                "dx_ratio": dx_ratio,
+                "avg_vx_px_s": avg_vx,
+                "crossed_side_bands": crossed_side_bands,
+                "camera_motion_state": frame.head_motion_state,
+                "passing_speed_class": "fast"
+                if abs(avg_vx) >= self.config.passing_min_abs_vx_px_s * 3.0
+                else "slow",
+            },
         )
 
     def _person_approaching_robot_proposal(
@@ -463,6 +593,14 @@ class EventEngine:
             track_id=track.track_id,
             confidence=current.confidence,
             duration_ms=duration_ms,
+            evidence={
+                "runtime_person_slot": self._person_slot_for_track_id(track.track_id),
+                "bbox_area_ratio_start": start_area,
+                "bbox_area_ratio_end": current_area,
+                "area_growth_ratio": growth,
+                "area_delta": area_delta,
+                "camera_motion_state": frame.head_motion_state,
+            },
         )
 
     def _person_stopped_near_robot_proposal(
@@ -493,11 +631,23 @@ class EventEngine:
             return None
         if self._is_active(track.track_id, event):
             return None
+        image_area = float(frame.width) * float(frame.height)
+        speeds = [
+            math.hypot(float(item.velocity_uv_s[0]), float(item.velocity_uv_s[1]))
+            for item in streak
+        ]
         return _EventProposal(
             event=event,
             track_id=track.track_id,
             confidence=current.confidence,
             duration_ms=duration_ms,
+            evidence={
+                "runtime_person_slot": self._person_slot_for_track_id(track.track_id),
+                "bbox_area_ratio": _area_ratio(current.bbox_xyxy, image_area=image_area),
+                "speed_px_s_p95": _nearest_rank_percentile(speeds, 0.95),
+                "stationary_duration_ms": duration_ms,
+                "camera_motion_state": frame.head_motion_state,
+            },
         )
 
     def _person_waving_proposal(
@@ -515,14 +665,21 @@ class EventEngine:
         if result is None:
             self._clear_active(track.track_id, event)
             return None
-        duration_ms, confidence = result
         if self._is_active(track.track_id, event):
             return None
         return _EventProposal(
             event=event,
             track_id=track.track_id,
-            confidence=min(float(track.confidence), confidence),
-            duration_ms=duration_ms,
+            confidence=min(float(track.confidence), result.confidence),
+            duration_ms=result.duration_ms,
+            evidence={
+                "runtime_person_slot": self._person_slot_for_track_id(track.track_id),
+                "wrist_x_span_px": result.wrist_x_span_px,
+                "wrist_x_span_bbox_ratio": result.wrist_x_span_bbox_ratio,
+                "wrist_y_relative_to_shoulder_px": result.wrist_y_relative_to_shoulder_px,
+                "wave_duration_ms": result.duration_ms,
+                "keypoint_min_confidence": result.keypoint_min_confidence,
+            },
         )
 
     def _attention_target_changed_proposal(
@@ -544,6 +701,11 @@ class EventEngine:
             track_id=current_id,
             confidence=float(attention.confidence),
             duration_ms=0,
+            evidence={
+                "previous_track_id": previous_id,
+                "target_track_id": current_id,
+                "switch_reason": attention.reason,
+            },
             rising_edge=False,
         )
 
@@ -581,6 +743,8 @@ class EventEngine:
             "track_id": proposal.track_id,
             "confidence": _clamp(float(proposal.confidence), 0.0, 1.0),
             "duration_ms": max(0, int(proposal.duration_ms)),
+            "lifecycle_state": "confirmed",
+            "evidence": _clean_evidence(proposal.evidence),
             "text": _EVENT_TEXT[proposal.event],
         }
         self._next_event_number += 1
@@ -726,9 +890,9 @@ class EventEngine:
     def _wave_result(
         self,
         history: list[_Observation],
-    ) -> tuple[int, float] | None:
+    ) -> _WaveResult | None:
         for side in ("left", "right"):
-            samples: list[tuple[int, float, float]] = []
+            samples: list[tuple[int, float, float, float]] = []
             for observation in history:
                 shoulder = _keypoint_by_name(observation.keypoints, f"{side}_shoulder")
                 wrist = _keypoint_by_name(observation.keypoints, f"{side}_wrist")
@@ -745,6 +909,7 @@ class EventEngine:
                     (
                         observation.timestamp_ms,
                         float(wrist.x),
+                        float(shoulder.y) - float(wrist.y),
                         min(float(shoulder.confidence or 0.0), float(wrist.confidence or 0.0)),
                     )
                 )
@@ -760,7 +925,16 @@ class EventEngine:
             )
             if span < required_span or not _has_direction_reversal(xs):
                 continue
-            return samples[-1][0] - samples[0][0], sum(sample[2] for sample in samples) / len(samples)
+            confidences = [sample[3] for sample in samples]
+            duration_ms = samples[-1][0] - samples[0][0]
+            return _WaveResult(
+                duration_ms=duration_ms,
+                confidence=sum(confidences) / len(confidences),
+                wrist_x_span_px=span,
+                wrist_x_span_bbox_ratio=span / bbox_width if bbox_width > 0.0 else 0.0,
+                wrist_y_relative_to_shoulder_px=min(sample[2] for sample in samples),
+                keypoint_min_confidence=min(confidences),
+            )
         return None
 
     def _is_wave_pose_sample(
@@ -938,6 +1112,66 @@ def _has_direction_reversal(values: list[float]) -> bool:
             continue
         signs.append(1 if delta > 0 else -1)
     return any(signs[index] != signs[index - 1] for index in range(1, len(signs)))
+
+
+def _has_confirmed_fast_passing(events: list[dict[str, object]]) -> bool:
+    for event in events:
+        if event.get("event") != "person_passing_by":
+            continue
+        evidence = event.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        if evidence.get("passing_speed_class") == "fast":
+            return True
+    return False
+
+
+def _nearest_rank_percentile(values: list[float], percentile: float) -> float:
+    finite_values = sorted(float(value) for value in values if math.isfinite(float(value)))
+    if not finite_values:
+        return 0.0
+    rank = int(math.ceil(_clamp(percentile, 0.0, 1.0) * len(finite_values)))
+    return finite_values[max(0, rank - 1)]
+
+
+def _clean_evidence(evidence: dict[str, object]) -> dict[str, object]:
+    cleaned: dict[str, object] = {}
+    for key, value in evidence.items():
+        if not isinstance(key, str):
+            continue
+        clean_value = _clean_json_value(value)
+        if clean_value is not _UNSUPPORTED_EVIDENCE:
+            cleaned[key] = clean_value
+    return cleaned
+
+
+_UNSUPPORTED_EVIDENCE = object()
+
+
+def _clean_json_value(value: object) -> object:
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        return value if math.isfinite(value) else _UNSUPPORTED_EVIDENCE
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _UNSUPPORTED_EVIDENCE
+    if isinstance(value, list):
+        cleaned_items: list[object] = []
+        for item in value:
+            clean_item = _clean_json_value(item)
+            if clean_item is not _UNSUPPORTED_EVIDENCE:
+                cleaned_items.append(clean_item)
+        return cleaned_items
+    if isinstance(value, dict):
+        cleaned_dict: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            clean_item = _clean_json_value(item)
+            if clean_item is not _UNSUPPORTED_EVIDENCE:
+                cleaned_dict[key] = clean_item
+        return cleaned_dict
+    return _UNSUPPORTED_EVIDENCE
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:

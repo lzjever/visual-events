@@ -47,6 +47,13 @@
     "reason": "largest_stable_person",
     "confidence": 0.86
   },
+  "scene_context": {
+    "engagement_state": "available",
+    "attention_available": true,
+    "target_track_id": 7,
+    "no_engage_reasons": [],
+    "target_reacquired": null
+  },
   "scene_flags": {
     "has_person": true,
     "person_count": 1,
@@ -62,6 +69,15 @@
       "track_id": 7,
       "confidence": 0.86,
       "duration_ms": 900,
+      "lifecycle_state": "confirmed",
+      "evidence": {
+        "runtime_person_slot": 3,
+        "wrist_x_span_px": 84.0,
+        "wrist_x_span_bbox_ratio": 0.42,
+        "wrist_y_relative_to_shoulder_px": 18.0,
+        "wave_duration_ms": 900,
+        "keypoint_min_confidence": 0.72
+      },
       "text": "有人在机器人前方挥手"
     }
   ]

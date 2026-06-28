@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from visual_events_server.attention import AttentionResult
-from visual_events_server.events import EventConfig, EventEngine
+from visual_events_server.events import EventConfig, EventEngine, EventEngineResult
 from visual_events_server.inference.base import PoseKeypoint
 from visual_events_server.protocol import FrameMessage
 from visual_events_server.tracking import TrackSnapshot
@@ -71,12 +73,92 @@ def attention(track_id: int) -> AttentionResult:
     )
 
 
-def event_names(events: list[dict]) -> list[str]:
+def semantic_events(result: EventEngineResult | list[dict]) -> list[dict]:
+    if isinstance(result, EventEngineResult):
+        return result.semantic_events
+    return result
+
+
+def event_names(result: EventEngineResult | list[dict]) -> list[str]:
+    events = semantic_events(result)
     return [str(event["event"]) for event in events]
 
 
-def events_of(events: list[dict], name: str) -> list[dict]:
+def events_of(result: EventEngineResult | list[dict], name: str) -> list[dict]:
+    events = semantic_events(result)
     return [event for event in events if event["event"] == name]
+
+
+REQUIRED_EVIDENCE_KEYS = {
+    "person_appeared": {
+        "runtime_person_slot",
+        "visible_duration_ms",
+        "bbox_area_ratio",
+        "salient_reason",
+    },
+    "person_left": {
+        "runtime_person_slot",
+        "lost_duration_ms",
+        "last_bbox_area_ratio",
+    },
+    "person_passing_by": {
+        "runtime_person_slot",
+        "dx_ratio",
+        "avg_vx_px_s",
+        "crossed_side_bands",
+        "camera_motion_state",
+        "passing_speed_class",
+    },
+    "person_approaching_robot": {
+        "runtime_person_slot",
+        "bbox_area_ratio_start",
+        "bbox_area_ratio_end",
+        "area_growth_ratio",
+        "area_delta",
+        "camera_motion_state",
+    },
+    "person_stopped_near_robot": {
+        "runtime_person_slot",
+        "bbox_area_ratio",
+        "speed_px_s_p95",
+        "stationary_duration_ms",
+        "camera_motion_state",
+    },
+    "person_waving": {
+        "runtime_person_slot",
+        "wrist_x_span_px",
+        "wrist_x_span_bbox_ratio",
+        "wrist_y_relative_to_shoulder_px",
+        "wave_duration_ms",
+        "keypoint_min_confidence",
+    },
+    "attention_target_changed": {
+        "previous_track_id",
+        "target_track_id",
+        "switch_reason",
+    },
+}
+
+
+def assert_json_simple_and_finite(value: object) -> None:
+    if value is None or isinstance(value, (str, bool)):
+        return
+    if isinstance(value, int):
+        assert math.isfinite(value)
+        return
+    if isinstance(value, float):
+        assert math.isfinite(value)
+        return
+    if isinstance(value, list):
+        for item in value:
+            assert_json_simple_and_finite(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            assert isinstance(key, str)
+            assert_json_simple_and_finite(item)
+        return
+    raise AssertionError(f"unsupported evidence value: {value!r}")
 
 
 def keypoints(
@@ -133,8 +215,109 @@ def make_wave_history(
                 )
             ],
             attention(track_id),
-        )
+        ).semantic_events
     return emitted
+
+
+def test_update_returns_event_engine_result_with_scene_context_no_target():
+    result = EventEngine().update(frame(), [], None)
+
+    assert isinstance(result, EventEngineResult)
+    assert result.semantic_events == []
+    assert result.scene_context == {
+        "engagement_state": "no_target",
+        "attention_available": False,
+        "target_track_id": None,
+        "no_engage_reasons": ["no_visible_person"],
+        "target_reacquired": None,
+    }
+
+
+def test_scene_context_available_for_stable_near_stationary_attention_target():
+    result = EventEngine().update(
+        frame(),
+        [track(7, bbox_xyxy=(350.0, 150.0, 650.0, 650.0))],
+        attention(7),
+    )
+
+    assert result.scene_context == {
+        "engagement_state": "available",
+        "attention_available": True,
+        "target_track_id": 7,
+        "no_engage_reasons": [],
+        "target_reacquired": None,
+    }
+
+
+def test_scene_context_marks_visible_unstable_person_as_no_engage_target():
+    result = EventEngine().update(
+        frame(),
+        [track(1, hits=1)],
+        None,
+    )
+
+    assert result.scene_context["engagement_state"] == "no_engage_target"
+    assert result.scene_context["attention_available"] is False
+    assert result.scene_context["target_track_id"] is None
+    assert "unstable" in result.scene_context["no_engage_reasons"]
+
+
+def test_scene_context_marks_stable_attention_target_too_far():
+    result = EventEngine().update(
+        frame(),
+        [track(1, bbox_xyxy=(450.0, 100.0, 550.0, 300.0))],
+        attention(1),
+    )
+
+    assert result.scene_context["engagement_state"] == "no_engage_target"
+    assert result.scene_context["attention_available"] is False
+    assert result.scene_context["target_track_id"] == 1
+    assert "too_far" in result.scene_context["no_engage_reasons"]
+
+
+def test_scene_context_marks_camera_motion_not_stationary():
+    result = EventEngine().update(
+        frame(head_motion_state="moving"),
+        [track(1, bbox_xyxy=(350.0, 150.0, 650.0, 650.0))],
+        attention(1),
+    )
+
+    assert result.scene_context["engagement_state"] == "no_engage_target"
+    assert result.scene_context["attention_available"] is False
+    assert result.scene_context["target_track_id"] == 1
+    assert "camera_motion_not_stationary" in result.scene_context["no_engage_reasons"]
+
+
+def test_scene_context_marks_confirmed_fast_passing_frame():
+    subject = EventEngine()
+    subject.update(
+        frame(frame_id=1, timestamp_ms=1000),
+        [
+            track(
+                1,
+                timestamp_ms=1000,
+                bbox_xyxy=(20.0, 200.0, 120.0, 520.0),
+            )
+        ],
+        attention(1),
+    )
+
+    result = subject.update(
+        frame(frame_id=2, timestamp_ms=2000),
+        [
+            track(
+                1,
+                timestamp_ms=2000,
+                bbox_xyxy=(820.0, 200.0, 920.0, 520.0),
+                velocity_uv_s=(800.0, 0.0),
+            )
+        ],
+        attention(1),
+    )
+
+    assert "person_passing_by" in event_names(result)
+    assert result.scene_context["engagement_state"] == "no_engage_target"
+    assert "passing_fast" in result.scene_context["no_engage_reasons"]
 
 
 def test_person_appeared_uses_salient_stable_target_and_rising_edge():
@@ -172,10 +355,10 @@ def test_person_appeared_uses_salient_stable_target_and_rising_edge():
         attention(1),
     )
 
-    assert unstable == []
+    assert unstable.semantic_events == []
     assert event_names(appeared) == ["person_appeared"]
-    assert appeared[0]["track_id"] == 1
-    assert repeated == []
+    assert appeared.semantic_events[0]["track_id"] == 1
+    assert repeated.semantic_events == []
 
 
 def test_person_appeared_falls_back_to_best_visible_stable_track_without_attention():
@@ -191,7 +374,7 @@ def test_person_appeared_falls_back_to_best_visible_stable_track_without_attenti
     )
 
     assert event_names(events) == ["person_appeared"]
-    assert events[0]["track_id"] == 2
+    assert events.semantic_events[0]["track_id"] == 2
 
 
 def test_person_left_triggers_once_after_appeared_track_expires_from_tracks():
@@ -206,10 +389,10 @@ def test_person_left_triggers_once_after_appeared_track_expires_from_tracks():
     left = subject.update(frame(frame_id=3, timestamp_ms=2500), [], None)
     repeated = subject.update(frame(frame_id=4, timestamp_ms=3000), [], None)
 
-    assert early == []
+    assert early.semantic_events == []
     assert event_names(left) == ["person_left"]
-    assert left[0]["track_id"] == 1
-    assert repeated == []
+    assert left.semantic_events[0]["track_id"] == 1
+    assert repeated.semantic_events == []
 
 
 def test_person_passing_by_requires_stationary_lateral_history():
@@ -421,7 +604,7 @@ def test_person_approaching_robot_tolerates_small_bbox_area_jitter_before_stoppe
                     )
                 ],
                 attention(1),
-            )
+            ).semantic_events
         )
 
     names = event_names(emitted)
@@ -570,7 +753,7 @@ def test_person_waving_rejects_walking_arm_swing_near_or_below_shoulder():
                     )
                 ],
                 attention(1),
-            )
+            ).semantic_events
         )
 
     assert "person_waving" not in event_names(emitted)
@@ -583,7 +766,10 @@ def test_attention_target_changed_requires_previous_and_current_non_null_targets
         track(2, timestamp_ms=1000, bbox_xyxy=(600.0, 100.0, 800.0, 500.0), hits=1),
     ]
 
-    assert subject.update(frame(frame_id=1, timestamp_ms=1000), tracks, None) == []
+    assert (
+        subject.update(frame(frame_id=1, timestamp_ms=1000), tracks, None).semantic_events
+        == []
+    )
     first = subject.update(frame(frame_id=2, timestamp_ms=1200), tracks, attention(1))
     changed = subject.update(
         frame(frame_id=3, timestamp_ms=1800),
@@ -596,7 +782,7 @@ def test_attention_target_changed_requires_previous_and_current_non_null_targets
 
     assert "attention_target_changed" not in event_names(first)
     assert event_names(changed) == ["attention_target_changed"]
-    assert changed[0]["track_id"] == 2
+    assert changed.semantic_events[0]["track_id"] == 2
 
 
 def test_cooldown_suppresses_same_event_type_at_4999ms_and_allows_at_5000ms():
@@ -670,7 +856,7 @@ def test_nearby_reacquired_track_dedupes_greeting_after_global_cooldown():
                     )
                 ],
                 attention(2),
-            )
+            ).semantic_events
         )
 
     assert event_names(first) == ["person_waving"]
@@ -697,7 +883,7 @@ def test_nearby_aliased_track_can_emit_greeting_after_alias_window():
                     )
                 ],
                 attention(2),
-            )
+            ).semantic_events
         )
 
     subject.update(
@@ -727,7 +913,7 @@ def test_nearby_aliased_track_can_emit_greeting_after_alias_window():
                     )
                 ],
                 attention(2),
-            )
+            ).semantic_events
         )
 
     late_waves = events_of(late, "person_waving")
@@ -757,7 +943,7 @@ def test_far_reacquired_track_can_emit_greeting_after_global_cooldown():
                     )
                 ],
                 attention(2),
-            )
+            ).semantic_events
         )
 
     assert event_names(first) == ["person_waving"]
@@ -783,8 +969,8 @@ def test_event_id_increments_and_reset_does_not_reuse_already_sent_ids():
         attention(2),
     )
 
-    assert first[0]["event_id"] == "front:evt_000001"
-    assert after_reset[0]["event_id"] == "front:evt_000002"
+    assert first.semantic_events[0]["event_id"] == "front:evt_000001"
+    assert after_reset.semantic_events[0]["event_id"] == "front:evt_000002"
 
 
 def emitted_event(name: str) -> tuple[dict, int]:
@@ -795,7 +981,7 @@ def emitted_event(name: str) -> tuple[dict, int]:
             [track(1, timestamp_ms=1000, first_seen_ms=600)],
             attention(1),
         )
-        return events[0], 400
+        return events.semantic_events[0], 400
     if name == "person_left":
         subject.update(
             frame(frame_id=1, timestamp_ms=1000),
@@ -803,7 +989,7 @@ def emitted_event(name: str) -> tuple[dict, int]:
             attention(1),
         )
         events = subject.update(frame(frame_id=2, timestamp_ms=2500), [], None)
-        return events[0], 1500
+        return events.semantic_events[0], 1500
     if name == "person_passing_by":
         subject.update(
             frame(frame_id=1, timestamp_ms=1000),
@@ -879,7 +1065,7 @@ def emitted_event(name: str) -> tuple[dict, int]:
             ],
             attention(2),
         )
-        return events[0], 0
+        return events.semantic_events[0], 0
     raise AssertionError(f"unsupported event fixture: {name}")
 
 
@@ -907,6 +1093,8 @@ def test_event_payload_schema_confidence_duration_and_text(name: str):
         "track_id",
         "confidence",
         "duration_ms",
+        "lifecycle_state",
+        "evidence",
         "text",
     }
     assert event["type"] == "semantic_event"
@@ -914,6 +1102,10 @@ def test_event_payload_schema_confidence_duration_and_text(name: str):
     assert 0.0 <= event["confidence"] <= 1.0
     assert isinstance(event["duration_ms"], int)
     assert event["duration_ms"] == expected_duration_ms
+    assert event["lifecycle_state"] == "confirmed"
+    assert isinstance(event["evidence"], dict)
+    assert set(event["evidence"]) >= REQUIRED_EVIDENCE_KEYS[name]
+    assert_json_simple_and_finite(event["evidence"])
     assert event["text"]
 
 

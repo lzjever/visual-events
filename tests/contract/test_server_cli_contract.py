@@ -25,6 +25,8 @@ EVENT_FIELDS = {
     "track_id",
     "confidence",
     "duration_ms",
+    "lifecycle_state",
+    "evidence",
     "text",
 }
 BOTIFIED_PERSON_EVENTS = {
@@ -152,6 +154,27 @@ def event_names(states: list[dict]) -> set[str]:
     }
 
 
+def assert_json_simple_and_finite(value: object) -> None:
+    if value is None or isinstance(value, (str, bool)):
+        return
+    if isinstance(value, int):
+        assert math.isfinite(value)
+        return
+    if isinstance(value, float):
+        assert math.isfinite(value)
+        return
+    if isinstance(value, list):
+        for item in value:
+            assert_json_simple_and_finite(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            assert isinstance(key, str)
+            assert_json_simple_and_finite(item)
+        return
+    raise AssertionError(f"unsupported evidence value: {value!r}")
+
+
 def test_visual_state_attention_contract_for_cli_gaze_mapper():
     states = run_sequence(
         STABLE_BBOXES,
@@ -179,8 +202,26 @@ def test_visual_state_attention_contract_for_cli_gaze_mapper():
     assert 0.0 <= target_u <= width
     assert 0.0 <= target_v <= height
     assert attention["reason"] == "largest_stable_person"
+    assert "scene_context" in visual_state
     assert "phase_latencies_ms" not in visual_state
     assert "resources" not in visual_state
+
+
+def test_visual_state_scene_context_contract_for_available_target():
+    states = run_sequence(
+        NEAR_STATIONARY_BBOXES,
+        timestamps_ms=STOP_TIMESTAMPS_MS,
+        head_motion="stationary",
+    )
+    visual_state = states[-1]
+
+    assert visual_state["scene_context"] == {
+        "engagement_state": "available",
+        "attention_available": True,
+        "target_track_id": visual_state["attention"]["target_track_id"],
+        "no_engage_reasons": [],
+        "target_reacquired": None,
+    }
 
 
 def test_semantic_event_contract_for_cli_botified_mapper():
@@ -197,6 +238,15 @@ def test_semantic_event_contract_for_cli_botified_mapper():
     assert event["camera"] == "front"
     assert event["event"] in BOTIFIED_PERSON_EVENTS
     assert event["event"] == "person_appeared"
+    assert event["lifecycle_state"] == "confirmed"
+    assert isinstance(event["evidence"], dict)
+    assert {
+        "runtime_person_slot",
+        "visible_duration_ms",
+        "bbox_area_ratio",
+        "salient_reason",
+    } <= set(event["evidence"])
+    assert_json_simple_and_finite(event["evidence"])
     assert event["text"]
 
 
