@@ -329,6 +329,87 @@ async def test_runtime_coordinator_stale_watchdog_fires_at_exact_deadline_while_
 
 
 @pytest.mark.asyncio
+async def test_runtime_coordinator_recovers_valid_gaze_after_camera_head_gap_publishes_stale():
+    runtime = import_runtime()
+    clock = FakeClock(1710000000100)
+    stale_after_ms = 250
+    first_frame_timestamp_ms = 1710000000000
+    recovered_frame_timestamp_ms = 1710000000360
+    frame_source = FakeFrameSource(
+        [make_frame(timestamp_ms=first_frame_timestamp_ms)]
+    )
+    service = FakeServiceClient(
+        [
+            service_result(
+                load_visual_state_tracking(
+                    frame_id=1,
+                    frame_timestamp_ms=first_frame_timestamp_ms,
+                )
+            ),
+            service_result(
+                load_visual_state_tracking(
+                    frame_id=2,
+                    frame_timestamp_ms=recovered_frame_timestamp_ms,
+                )
+            ),
+        ]
+    )
+    gaze = FakeGazePublisher()
+    head_state = {
+        "motion": HeadMotion(
+            state="stationary",
+            yaw_vel_rad_s=0.0,
+            pitch_vel_rad_s=0.0,
+        )
+    }
+
+    def current_head_motion() -> HeadMotion:
+        return head_state["motion"]
+
+    coordinator = runtime.RuntimeCoordinator(
+        frame_source=frame_source,
+        service_client=service,
+        gaze_publisher=gaze,
+        head_motion_provider=current_head_motion,
+        stale_after_ms=stale_after_ms,
+        clock_ms=clock,
+    )
+
+    await run_tick(coordinator)
+    assert [payload["state"] for payload in gaze.dicts()] == ["tracking"]
+
+    clock.now_ms += stale_after_ms
+    await run_tick(coordinator)
+    assert [payload["state"] for payload in gaze.dicts()] == [
+        "tracking",
+        "stale",
+    ]
+
+    head_state["motion"] = HeadMotion(
+        state="moving",
+        yaw_vel_rad_s=0.2,
+        pitch_vel_rad_s=-0.1,
+    )
+    clock.now_ms = recovered_frame_timestamp_ms
+    frame_source.frames.append(make_frame(timestamp_ms=recovered_frame_timestamp_ms))
+
+    await run_tick(coordinator)
+
+    gaze_payloads = gaze.dicts()
+    assert [payload["state"] for payload in gaze_payloads] == [
+        "tracking",
+        "stale",
+        "tracking",
+    ]
+    assert gaze_payloads[-1]["valid"] is True
+    assert service.requests[1][0]["head_motion"] == {
+        "state": "moving",
+        "yaw_vel_rad_s": 0.2,
+        "pitch_vel_rad_s": -0.1,
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_coordinator_slow_botified_drain_does_not_block_stale_watchdog():
     runtime = import_runtime()
     clock = FakeClock(1710000000100)

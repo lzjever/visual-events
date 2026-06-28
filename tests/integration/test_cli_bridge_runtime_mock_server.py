@@ -181,6 +181,130 @@ def test_slow_tracking_profile_publishes_one_stale_gaze(
     _assert_process_closed(recorded_processes)
 
 
+def test_server_restart_publishes_stale_then_recovers_tracking_in_same_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    bridge_bin, stdin_path = _write_fake_bridge_child(
+        tmp_path,
+        monkeypatch,
+        repeat_interval_seconds=0.001,
+    )
+    recorded_processes: list[DdsBridgeProcess] = []
+
+    with _RestartableMockVisualStateServer(profile="tracking") as server:
+        result = run_runtime(
+            _bridge_config(
+                service_url=server.service_url,
+                gaze_stale_ms=25,
+                response_timeout_ms=20,
+            ),
+            factories=_runtime_factories(
+                bridge_bin=bridge_bin,
+                recorded_processes=recorded_processes,
+            ),
+            stop_requested=_StopAfterServerRestartRecovery(stdin_path, server),
+            max_ticks=2_000,
+            sleep_seconds=0,
+            clock_ms=AdvancingClock(step_ms=1, sleep_seconds=0.0005),
+        )
+
+    assert result == 0
+    assert capfd.readouterr().out == ""
+
+    gaze_payloads = [
+        payload
+        for payload in _read_jsonl(stdin_path)
+        if payload.get("type") == "gaze_target"
+    ]
+    first_tracking_index = _find_gaze_index(
+        gaze_payloads,
+        state="tracking",
+        valid=True,
+    )
+    stale_index = _find_gaze_index(
+        gaze_payloads,
+        state="stale",
+        valid=False,
+        start=first_tracking_index + 1,
+    )
+    recovered_tracking_index = _find_gaze_index(
+        gaze_payloads,
+        state="tracking",
+        valid=True,
+        start=stale_index + 1,
+    )
+
+    first_tracking = gaze_payloads[first_tracking_index]
+    stale = gaze_payloads[stale_index]
+    recovered_tracking = gaze_payloads[recovered_tracking_index]
+
+    assert first_tracking["camera"] == "front"
+    assert stale["camera"] == "front"
+    assert recovered_tracking["camera"] == "front"
+    assert first_tracking["frame_id"] <= stale["frame_id"]
+    assert stale["frame_id"] < recovered_tracking["frame_id"]
+
+    _assert_process_closed(recorded_processes)
+
+
+class _RestartableMockVisualStateServer:
+    def __init__(
+        self,
+        *,
+        profile: str,
+        delay_ms: int = 0,
+    ) -> None:
+        self._host = "127.0.0.1"
+        self._port = _free_loopback_port()
+        self._profile = profile
+        self._delay_ms = int(delay_ms)
+        self._process: subprocess.Popen[Any] | None = None
+
+    def __enter__(self) -> "_RestartableMockVisualStateServer":
+        self.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.terminate()
+
+    @property
+    def service_url(self) -> str:
+        return f"ws://{self._host}:{self._port}/v1/stream"
+
+    def start(self) -> None:
+        if self._process is not None and self._process.poll() is None:
+            return
+        self._process = subprocess.Popen(
+            [
+                sys.executable,
+                os.fspath(MOCK_SERVER_TOOL),
+                "--host",
+                self._host,
+                "--port",
+                str(self._port),
+                "--profile",
+                self._profile,
+                "--delay-ms",
+                str(self._delay_ms),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _wait_for_health(f"http://{self._host}:{self._port}/healthz")
+
+    def terminate(self) -> None:
+        process = self._process
+        self._process = None
+        if process is not None:
+            _terminate_server_process(process)
+
+    def restart(self) -> None:
+        self.terminate()
+        self.start()
+
+
 @contextlib.contextmanager
 def _mock_visual_state_server(
     *,
@@ -261,6 +385,8 @@ def _bridge_config(
 def _write_fake_bridge_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    repeat_interval_seconds: float | None = None,
 ) -> tuple[str, Path]:
     stdin_path = tmp_path / "fake-bridge-stdin.jsonl"
     bridge_bin = tmp_path / "fake_jsonl_bridge_child.py"
@@ -279,6 +405,7 @@ def _write_fake_bridge_child(
 
             JPEG_BASE64 = {jpeg_base64!r}
             STDIN_PATH = os.environ["VISUAL_EVENTS_FAKE_BRIDGE_STDIN_PATH"]
+            REPEAT_INTERVAL_SECONDS = {repeat_interval_seconds!r}
 
 
             def capture_stdin() -> None:
@@ -331,7 +458,12 @@ def _write_fake_bridge_child(
             emit(camera_jpeg())
 
             while True:
-                time.sleep(0.1)
+                if REPEAT_INTERVAL_SECONDS is None:
+                    time.sleep(0.1)
+                    continue
+                time.sleep(REPEAT_INTERVAL_SECONDS)
+                emit(head_state())
+                emit(camera_jpeg())
             """
         ),
         encoding="utf-8",
@@ -369,6 +501,55 @@ class _StopAfterGazeState:
         return True
 
 
+class _StopAfterServerRestartRecovery:
+    def __init__(
+        self,
+        path: Path,
+        server: _RestartableMockVisualStateServer,
+    ) -> None:
+        self._path = path
+        self._server = server
+        self._next_gaze_index = 0
+        self._phase = "waiting_tracking"
+
+    def __call__(self) -> bool:
+        gaze_payloads = [
+            payload
+            for payload in _read_jsonl_if_exists(self._path)
+            if payload.get("type") == "gaze_target"
+        ]
+        new_payloads = gaze_payloads[self._next_gaze_index :]
+        self._next_gaze_index = len(gaze_payloads)
+
+        for payload in new_payloads:
+            if (
+                self._phase == "waiting_tracking"
+                and payload.get("state") == "tracking"
+                and payload.get("valid") is True
+            ):
+                self._server.terminate()
+                self._phase = "waiting_stale"
+                continue
+
+            if (
+                self._phase == "waiting_stale"
+                and payload.get("state") == "stale"
+                and payload.get("valid") is False
+            ):
+                self._server.restart()
+                self._phase = "waiting_recovered_tracking"
+                continue
+
+            if (
+                self._phase == "waiting_recovered_tracking"
+                and payload.get("state") == "tracking"
+                and payload.get("valid") is True
+            ):
+                return True
+
+        return False
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     assert path.exists(), f"expected fake child stdin capture at {path}"
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -392,6 +573,21 @@ def _only_gaze_target(payloads: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     assert len(gaze_payloads) == 1
     return gaze_payloads[0]
+
+
+def _find_gaze_index(
+    gaze_payloads: list[dict[str, Any]],
+    *,
+    state: str,
+    valid: bool,
+    start: int = 0,
+) -> int:
+    for index, payload in enumerate(gaze_payloads[start:], start=start):
+        if payload.get("state") == state and payload.get("valid") is valid:
+            return index
+    raise AssertionError(
+        f"expected gaze_target state={state!r} valid={valid!r} after index {start}"
+    )
 
 
 def _free_loopback_port() -> int:
