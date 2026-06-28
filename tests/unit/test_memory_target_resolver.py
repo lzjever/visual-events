@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import pytest
+
+from visual_events_server.attention import AttentionResult
+from visual_events_server.memory.target_resolver import (
+    TargetCandidate,
+    TargetPreview,
+    TargetRequest,
+    TargetResolveError,
+    TargetResolver,
+)
+from visual_events_server.tracking import TrackSnapshot
+
+
+def track(
+    track_id: int,
+    *,
+    bbox_xyxy: tuple[float, float, float, float],
+    hits: int = 2,
+    lost_ms: int = 0,
+) -> TrackSnapshot:
+    return TrackSnapshot(
+        track_id=track_id,
+        first_seen_ms=700,
+        last_seen_ms=1000 - lost_ms,
+        frame_timestamp_ms=1000,
+        bbox_xyxy=bbox_xyxy,
+        confidence=0.9,
+        pose_confidence=0.8,
+        head_uv=((bbox_xyxy[0] + bbox_xyxy[2]) / 2.0, bbox_xyxy[1] + 40.0),
+        velocity_uv_s=(0.0, 0.0),
+        lost_ms=lost_ms,
+        hits=hits,
+        misses=0,
+    )
+
+
+def attention(track_id: int) -> AttentionResult:
+    return AttentionResult(
+        target_track_id=track_id,
+        target_uv=(300.0, 180.0),
+        reason="largest_stable_person",
+        confidence=0.91,
+        largest_person_stable=True,
+    )
+
+
+def test_resolves_attention_target_to_matching_track_bbox() -> None:
+    resolved = TargetResolver().resolve(
+        TargetRequest(mode="attention_target"),
+        image_width=640,
+        image_height=480,
+        tracks=[track(7, bbox_xyxy=(100.0, 80.0, 380.0, 420.0))],
+        attention=attention(7),
+    )
+
+    assert resolved.source_target_mode == "attention_target"
+    assert resolved.target_type == "person"
+    assert resolved.track_id == 7
+    assert resolved.bbox_xyxy == (100.0, 80.0, 380.0, 420.0)
+
+
+def test_resolves_point_to_visible_track_containing_point() -> None:
+    resolved = TargetResolver().resolve(
+        TargetRequest(mode="point_uv", point_uv=(320.0, 220.0)),
+        image_width=640,
+        image_height=480,
+        tracks=[
+            track(1, bbox_xyxy=(50.0, 50.0, 190.0, 460.0)),
+            track(2, bbox_xyxy=(250.0, 120.0, 390.0, 360.0)),
+        ],
+        attention=None,
+    )
+
+    assert resolved.source_target_mode == "point_uv"
+    assert resolved.target_type == "person"
+    assert resolved.track_id == 2
+    assert resolved.bbox_xyxy == (250.0, 120.0, 390.0, 360.0)
+
+
+def test_previews_overlapping_point_hits_as_ambiguous_person_candidates() -> None:
+    preview = TargetResolver().preview(
+        TargetRequest(mode="point_uv", point_uv=(320.0, 220.0)),
+        image_width=640,
+        image_height=480,
+        tracks=[
+            track(1, bbox_xyxy=(50.0, 50.0, 590.0, 460.0)),
+            track(2, bbox_xyxy=(250.0, 120.0, 390.0, 360.0)),
+        ],
+        attention=None,
+    )
+
+    assert isinstance(preview, TargetPreview)
+    assert preview.status == "ambiguous"
+    assert [candidate.track_id for candidate in preview.candidates] == [2, 1]
+    assert all(isinstance(candidate, TargetCandidate) for candidate in preview.candidates)
+    assert preview.candidates[0].target_type == "person"
+    assert preview.candidates[0].bbox_xyxy == (250.0, 120.0, 390.0, 360.0)
+    assert preview.candidates[0].confidence > preview.candidates[1].confidence
+    assert preview.candidates[0].reason == "point_inside_bbox"
+
+
+def test_previews_single_point_bbox_hit_as_resolved() -> None:
+    preview = TargetResolver().resolve_candidates(
+        TargetRequest(mode="point_uv", point_uv=(320.0, 220.0)),
+        image_width=640,
+        image_height=480,
+        tracks=[
+            track(1, bbox_xyxy=(50.0, 50.0, 190.0, 460.0)),
+            track(2, bbox_xyxy=(250.0, 120.0, 390.0, 360.0)),
+        ],
+        attention=None,
+    )
+
+    assert preview.status == "resolved"
+    assert [candidate.track_id for candidate in preview.candidates] == [2]
+    assert preview.candidates[0].reason == "point_inside_bbox"
+
+
+def test_previews_point_between_two_near_people_as_ambiguous() -> None:
+    preview = TargetResolver().preview(
+        TargetRequest(mode="point_uv", point_uv=(300.0, 180.0)),
+        image_width=640,
+        image_height=480,
+        tracks=[
+            track(7, bbox_xyxy=(160.0, 100.0, 260.0, 360.0)),
+            track(9, bbox_xyxy=(340.0, 100.0, 440.0, 360.0)),
+        ],
+        attention=None,
+    )
+
+    assert preview.status == "ambiguous"
+    assert {candidate.track_id for candidate in preview.candidates} == {7, 9}
+    assert {candidate.reason for candidate in preview.candidates} == {"nearest_bbox_to_point"}
+
+
+def test_resolve_rejects_ambiguous_point_instead_of_selecting_track() -> None:
+    with pytest.raises(TargetResolveError) as exc:
+        TargetResolver().resolve(
+            TargetRequest(mode="point_uv", point_uv=(300.0, 180.0)),
+            image_width=640,
+            image_height=480,
+            tracks=[
+                track(7, bbox_xyxy=(160.0, 100.0, 260.0, 360.0)),
+                track(9, bbox_xyxy=(340.0, 100.0, 440.0, 360.0)),
+            ],
+            attention=None,
+        )
+
+    assert exc.value.code == "target_ambiguous"
+
+
+def test_attention_prior_does_not_override_explicit_point_hit() -> None:
+    preview = TargetResolver().preview(
+        TargetRequest(mode="point_uv", point_uv=(120.0, 180.0)),
+        image_width=640,
+        image_height=480,
+        tracks=[
+            track(1, bbox_xyxy=(80.0, 90.0, 190.0, 360.0)),
+            track(2, bbox_xyxy=(300.0, 90.0, 430.0, 360.0)),
+        ],
+        attention=attention(2),
+    )
+
+    assert preview.status == "resolved"
+    assert preview.candidates[0].track_id == 1
+    assert preview.candidates[0].reason == "point_inside_bbox"
+
+
+def test_preview_point_without_visible_people_returns_not_found_region_candidate() -> None:
+    preview = TargetResolver().preview(
+        TargetRequest(mode="point_uv", point_uv=(320.0, 220.0)),
+        image_width=640,
+        image_height=480,
+        tracks=[track(3, bbox_xyxy=(100.0, 80.0, 380.0, 420.0), lost_ms=1)],
+        attention=None,
+    )
+
+    assert preview.status == "not_found"
+    assert len(preview.candidates) == 1
+    assert preview.candidates[0].target_type == "region"
+    assert preview.candidates[0].track_id is None
+    assert preview.candidates[0].reason == "point_region_fallback"
+
+
+def test_resolves_scene_to_full_image_region() -> None:
+    resolved = TargetResolver().resolve(
+        TargetRequest(mode="scene"),
+        image_width=640,
+        image_height=480,
+        tracks=[],
+        attention=None,
+    )
+
+    assert resolved.source_target_mode == "scene"
+    assert resolved.target_type == "scene"
+    assert resolved.track_id is None
+    assert resolved.bbox_xyxy == (0.0, 0.0, 640.0, 480.0)
+
+
+def test_rejects_missing_or_lost_track_without_returning_guess() -> None:
+    with pytest.raises(TargetResolveError) as exc:
+        TargetResolver().resolve(
+            TargetRequest(mode="track_id", track_id=3),
+            image_width=640,
+            image_height=480,
+            tracks=[track(3, bbox_xyxy=(100.0, 80.0, 380.0, 420.0), lost_ms=1)],
+            attention=None,
+        )
+
+    assert exc.value.code == "target_not_visible"
+
+
+def test_rejects_bbox_that_is_too_small_after_clipping() -> None:
+    with pytest.raises(TargetResolveError) as exc:
+        TargetResolver(min_box_size_px=16.0).resolve(
+            TargetRequest(mode="bbox", bbox_xyxy=(-10.0, -10.0, 8.0, 8.0)),
+            image_width=640,
+            image_height=480,
+            tracks=[],
+            attention=None,
+        )
+
+    assert exc.value.code == "target_too_small"

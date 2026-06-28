@@ -7,6 +7,7 @@ from tools.visualize_service_replay import (
     _engagement_state,
     _event_summary,
     _evidence_summary,
+    _memory_event_summary,
     _progress_line,
     _reacquire_summary,
     _render_html,
@@ -51,6 +52,142 @@ def _visual_state() -> dict:
             }
         ],
     }
+
+
+def _memory_events() -> list[dict]:
+    return [
+        {
+            "type": "semantic_event",
+            "event": "known_person_present",
+            "track_id": 7,
+            "evidence": {
+                "memory_match_id": "match_000001",
+                "matched_id": "person_000001",
+                "match_score": 0.86,
+                "top2_margin": 0.09,
+                "embedding_id": "emb_face_000001",
+                "vector_blob": "must-not-leak",
+            },
+            "memory_context": {
+                "person": {
+                    "person_id": "person_000001",
+                    "display_name": "张三",
+                    "description": "店长，熟悉新品陈列和现场活动",
+                },
+                "raw_notes": "must-not-leak",
+            },
+        },
+        {
+            "type": "semantic_event",
+            "event": "scene_activated",
+            "track_id": None,
+            "evidence": {
+                "memory_match_id": "match_scene_000001",
+                "matched_id": "scene_000001",
+                "match_score": 0.82,
+                "top2_margin": 0.07,
+            },
+            "memory_context": {
+                "scene": {
+                    "scene_id": "scene_000001",
+                    "title": "新品展示区",
+                    "activation_hint": "可以介绍新品活动。",
+                }
+            },
+        },
+        {
+            "type": "semantic_event",
+            "event": "familiar_unknown_present",
+            "track_id": 9,
+            "evidence": {
+                "memory_match_id": "match_anon_000001",
+                "matched_id": "anon_000123",
+                "match_score": 0.81,
+                "top2_margin": 0.08,
+            },
+            "memory_context": {
+                "anonymous_person": {
+                    "anonymous_id": "anon_000123",
+                    "seen_count": 5,
+                }
+            },
+        },
+    ]
+
+
+def test_visual_debug_helpers_summarize_memory_events() -> None:
+    known_person, scene, familiar_unknown = _memory_events()
+
+    assert _memory_event_summary(known_person) == (
+        "matched_id=person_000001 name=张三 match_score=0.86 "
+        "top2_margin=0.09 memory_match_id=match_000001"
+    )
+    assert _event_summary(known_person) == (
+        "known_person_present track=7 memory=matched_id=person_000001 name=张三 "
+        "match_score=0.86 top2_margin=0.09 memory_match_id=match_000001"
+    )
+
+    assert _memory_event_summary(scene) == (
+        "matched_id=scene_000001 title=新品展示区 match_score=0.82 "
+        "top2_margin=0.07 memory_match_id=match_scene_000001"
+    )
+    assert _event_summary(scene) == (
+        "scene_activated track=- memory=matched_id=scene_000001 title=新品展示区 "
+        "match_score=0.82 top2_margin=0.07 memory_match_id=match_scene_000001"
+    )
+
+    assert _memory_event_summary(familiar_unknown) == (
+        "matched_id=anon_000123 match_score=0.81 top2_margin=0.08 "
+        "memory_match_id=match_anon_000001"
+    )
+    assert "seen_count" not in _event_summary(familiar_unknown)
+    assert "vector_blob" not in _event_summary(known_person)
+
+
+def test_visual_debug_html_includes_memory_event_summary(tmp_path: Path) -> None:
+    state = _visual_state()
+    state["semantic_events"] = _memory_events()
+    args = argparse.Namespace(
+        out=tmp_path,
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene=Path("fixtures/scene"),
+    )
+    result = {
+        "index": 1,
+        "source": Path("frame_001.jpg"),
+        "output_image": tmp_path / "frames" / "frame_001.jpg",
+        "output_state": tmp_path / "states" / "frame_001.json",
+        "response": state,
+    }
+
+    rendered = _render_html(args, [result], tmp_path / "visual_state.jsonl")
+
+    assert (
+        "known_person_present track=7 memory=matched_id=person_000001 name=张三 "
+        "match_score=0.86 top2_margin=0.09 memory_match_id=match_000001"
+    ) in rendered
+    assert (
+        "scene_activated track=- memory=matched_id=scene_000001 title=新品展示区 "
+        "match_score=0.82 top2_margin=0.07 memory_match_id=match_scene_000001"
+    ) in rendered
+    assert (
+        "familiar_unknown_present track=9 memory=matched_id=anon_000123 "
+        "match_score=0.81 top2_margin=0.08 memory_match_id=match_anon_000001"
+    ) in rendered
+
+
+def test_visual_debug_memory_summary_tolerates_missing_fields() -> None:
+    assert _memory_event_summary({}) == "-"
+    assert _event_summary({"event": "known_person_present"}) == (
+        "known_person_present track=- memory=-"
+    )
+    assert _memory_event_summary(
+        {
+            "event": "known_person_present",
+            "evidence": {"matched_id": "person_1"},
+            "memory_context": {"person": {"display_name": "Alex"}},
+        }
+    ) == "matched_id=person_1 name=Alex"
 
 
 def test_visual_debug_helpers_summarize_scene_reacquire_and_evidence() -> None:

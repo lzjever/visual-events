@@ -10,6 +10,9 @@ from typing import Any, Callable, TextIO
 
 
 BOTIFIED_ALLOWED_EVENTS = (
+    "known_person_present",
+    "scene_activated",
+    "familiar_unknown_present",
     "person_appeared",
     "person_left",
     "person_passing_by",
@@ -21,10 +24,22 @@ BOTIFIED_ALLOWED_EVENTS = (
 _BOTIFIED_OPEN = "<botified>"
 _BOTIFIED_CLOSE = "</botified>"
 _EVENT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+_MEMORY_EVENTS = {
+    "known_person_present",
+    "scene_activated",
+    "familiar_unknown_present",
+}
 _PENDING_EVENTS = {"person_passing_by", "person_approaching_robot"}
-_IMMEDIATE_EVENTS = {"person_stopped_near_robot", "person_waving"}
+_IMMEDIATE_EVENTS = {
+    "person_stopped_near_robot",
+    "person_waving",
+    *_MEMORY_EVENTS,
+}
 _SUPPRESSED_EVENTS = {"person_appeared"}
 _EVENT_PRIORITY = {
+    "known_person_present": 35,
+    "scene_activated": 35,
+    "familiar_unknown_present": 35,
     "person_waving": 50,
     "person_stopped_near_robot": 40,
     "person_left": 30,
@@ -314,6 +329,9 @@ class BotifiedEventMapper:
         event: dict[str, Any],
         visual_state: dict[str, Any],
     ) -> tuple[tuple[str, Any] | None, frozenset[tuple[str, Any]]]:
+        if event.get("event") in _MEMORY_EVENTS:
+            return _memory_event_keys(event)
+
         evidence = event.get("evidence")
         if not isinstance(evidence, dict):
             evidence = {}
@@ -333,6 +351,9 @@ class BotifiedEventMapper:
         event: dict[str, Any],
         visual_state: dict[str, Any],
     ) -> frozenset[tuple[str, Any]]:
+        if event.get("event") in _MEMORY_EVENTS:
+            return _memory_event_keys(event)[1]
+
         aliases: set[tuple[str, Any]] = set()
         track_id = event.get("track_id")
         if isinstance(track_id, (int, str)) and str(track_id) != "":
@@ -468,7 +489,7 @@ def _visual_context(
     fresh_target = attention_available and target_track_id is not None
     person_count = _person_count(visual_state)
 
-    return {
+    context = {
         "event_target": {
             "track_id": event.get("track_id"),
             "runtime_person_slot": _runtime_person_slot(event),
@@ -495,6 +516,10 @@ def _visual_context(
             "no_engage_reasons": _list_or_empty(scene_context.get("no_engage_reasons")),
         },
     }
+    memory_context = _project_memory_context(event)
+    if memory_context:
+        context["memory_context"] = memory_context
+    return context
 
 
 def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
@@ -544,6 +569,36 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
             "wave_duration_ms",
             "keypoint_min_confidence",
         ),
+        "known_person_present": (
+            "memory_match_id",
+            "matched_type",
+            "matched_id",
+            "embedding_id",
+            "match_type",
+            "match_score",
+            "top2_margin",
+            "source_target_mode",
+        ),
+        "scene_activated": (
+            "memory_match_id",
+            "matched_type",
+            "matched_id",
+            "embedding_id",
+            "match_type",
+            "match_score",
+            "top2_margin",
+            "source_target_mode",
+        ),
+        "familiar_unknown_present": (
+            "memory_match_id",
+            "matched_type",
+            "matched_id",
+            "embedding_id",
+            "match_type",
+            "match_score",
+            "top2_margin",
+            "source_target_mode",
+        ),
     }
     keys = allowed_by_event.get(str(event.get("event")), ())
     projected: dict[str, Any] = {}
@@ -551,6 +606,144 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
         if key in evidence:
             projected[key] = evidence[key]
     return projected
+
+
+def _memory_event_keys(
+    event: dict[str, Any],
+) -> tuple[tuple[str, Any] | None, frozenset[tuple[str, Any]]]:
+    aliases: set[tuple[str, Any]] = set()
+    context = event.get("memory_context")
+    if not isinstance(context, dict):
+        context = {}
+
+    for key_type, section_name, field_name in (
+        ("person", "person", "person_id"),
+        ("scene", "scene", "scene_id"),
+        ("anonymous", "anonymous_person", "anonymous_id"),
+    ):
+        section = context.get(section_name)
+        if isinstance(section, dict):
+            value = section.get(field_name)
+            if isinstance(value, (int, str)) and str(value) != "":
+                aliases.add((key_type, value))
+
+    evidence = event.get("evidence")
+    if isinstance(evidence, dict):
+        memory_match_id = evidence.get("memory_match_id")
+        if isinstance(memory_match_id, (int, str)) and str(memory_match_id) != "":
+            aliases.add(("memory_match", memory_match_id))
+
+    for key_type in ("person", "scene", "anonymous", "memory_match"):
+        for key in aliases:
+            if key[0] == key_type:
+                return key, frozenset(aliases)
+    return None, frozenset()
+
+
+def _project_memory_context(event: dict[str, Any]) -> dict[str, Any]:
+    context = event.get("memory_context")
+    if not isinstance(context, dict):
+        return {}
+
+    projected: dict[str, Any] = {}
+    person = _project_section(
+        context.get("person"),
+        {
+            "person_id": 80,
+            "display_name": 80,
+            "description": 180,
+            "tags": 6,
+            "match_confidence": None,
+        },
+    )
+    if person:
+        projected["person"] = person
+
+    scene = _project_section(
+        context.get("scene"),
+        {
+            "scene_id": 80,
+            "region_id": 80,
+            "title": 80,
+            "description": 180,
+            "activation_hint": 180,
+            "match_confidence": None,
+        },
+    )
+    if scene:
+        projected["scene"] = scene
+
+    anonymous_person = _project_section(
+        context.get("anonymous_person"),
+        {
+            "anonymous_id": 80,
+            "seen_count": None,
+            "familiar_score": None,
+            "last_seen_at_ms": None,
+        },
+    )
+    if anonymous_person:
+        projected["anonymous_person"] = anonymous_person
+
+    summaries = _short_string_list(
+        context.get("conversation_summaries"),
+        max_items=1,
+        max_chars=180,
+    )
+    if summaries:
+        projected["conversation_summaries"] = summaries
+
+    return projected
+
+
+def _project_section(
+    section: Any,
+    field_limits: dict[str, int | None],
+) -> dict[str, Any]:
+    if not isinstance(section, dict):
+        return {}
+
+    projected: dict[str, Any] = {}
+    for field, limit in field_limits.items():
+        if field not in section:
+            continue
+        value = section[field]
+        if isinstance(value, str):
+            projected[field] = _clip_string(value, max_chars=limit or 180)
+        elif isinstance(value, list) and field == "tags":
+            tags = _short_string_list(value, max_items=limit or 6, max_chars=40)
+            if tags:
+                projected[field] = tags
+        elif isinstance(value, (int, float, bool)) and not isinstance(value, bool):
+            projected[field] = value
+    return projected
+
+
+def _short_string_list(
+    value: Any,
+    *,
+    max_items: int,
+    max_chars: int,
+) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        clipped = _clip_string(item, max_chars=max_chars)
+        if clipped:
+            items.append(clipped)
+        if len(items) >= max_items:
+            break
+    return items
+
+
+def _clip_string(value: str, *, max_chars: int) -> str:
+    text = value.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)].rstrip() + "..."
 
 
 def _find_track(visual_state: dict[str, Any], track_id: Any) -> dict[str, Any] | None:

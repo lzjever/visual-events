@@ -26,6 +26,36 @@ class MetricsConfig:
 
 
 @dataclass(frozen=True)
+class MemoryEmbeddingConfig:
+    backend: str = "disabled"
+    person_model_path: Path | None = None
+    scene_model_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class MemoryMatchingConfig:
+    known_person_threshold: float = 0.82
+    known_person_margin: float = 0.06
+    anonymous_threshold: float = 0.78
+    anonymous_margin: float = 0.04
+    familiar_seen_count: int = 3
+    familiar_threshold: float = 0.78
+    scene_threshold: float = 0.78
+    event_cooldown_ms: int = 60000
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    enabled: bool = False
+    db_path: Path = Path("runtime/memory/visual_memory.sqlite3")
+    frame_cache_seconds: int = 5
+    query_interval_ms: int = 1000
+    queue_size: int = 2
+    embedding: MemoryEmbeddingConfig = field(default_factory=MemoryEmbeddingConfig)
+    matching: MemoryMatchingConfig = field(default_factory=MemoryMatchingConfig)
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8765
@@ -35,6 +65,7 @@ class ServerConfig:
     attention: AttentionConfig = field(default_factory=AttentionConfig)
     events: EventConfig = field(default_factory=EventConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 def load_config(path: str | Path | None = None) -> ServerConfig:
@@ -63,6 +94,9 @@ def load_config(path: str | Path | None = None) -> ServerConfig:
     metrics_data = data.get("metrics", {})
     if not isinstance(metrics_data, dict):
         raise ValueError("[metrics] section must be an object")
+    memory_data = data.get("memory", {})
+    if not isinstance(memory_data, dict):
+        raise ValueError("[memory] section must be an object")
 
     return ServerConfig(
         host=str(server_data.get("host", ServerConfig.host)),
@@ -73,6 +107,7 @@ def load_config(path: str | Path | None = None) -> ServerConfig:
         attention=_parse_attention_config(attention_data),
         events=_parse_event_config(events_data),
         metrics=_parse_metrics_config(metrics_data),
+        memory=_parse_memory_config(memory_data, runtime_dir=runtime_dir),
     )
 
 
@@ -125,6 +160,123 @@ def _parse_metrics_config(data: dict[str, Any]) -> MetricsConfig:
     if not jsonl_path_text:
         raise ValueError("[metrics].jsonl_path must be non-empty")
     return MetricsConfig(jsonl_path=Path(jsonl_path_text))
+
+
+def _parse_memory_config(
+    data: dict[str, Any],
+    *,
+    runtime_dir: Path,
+) -> MemoryConfig:
+    defaults = MemoryConfig()
+    embedding_data = data.get("embedding", {})
+    if not isinstance(embedding_data, dict):
+        raise ValueError("[memory.embedding] section must be an object")
+    matching_data = data.get("matching", {})
+    if not isinstance(matching_data, dict):
+        raise ValueError("[memory.matching] section must be an object")
+
+    enabled = _parse_bool(data.get("enabled", defaults.enabled), "[memory].enabled")
+    db_path = Path(
+        data.get("db_path", runtime_dir / "memory" / "visual_memory.sqlite3")
+    )
+    frame_cache_seconds = int(
+        data.get("frame_cache_seconds", defaults.frame_cache_seconds)
+    )
+    query_interval_ms = int(data.get("query_interval_ms", defaults.query_interval_ms))
+    queue_size = int(data.get("queue_size", defaults.queue_size))
+    if frame_cache_seconds <= 0:
+        raise ValueError("[memory].frame_cache_seconds must be positive")
+    if query_interval_ms <= 0:
+        raise ValueError("[memory].query_interval_ms must be positive")
+    if queue_size <= 0:
+        raise ValueError("[memory].queue_size must be positive")
+
+    return MemoryConfig(
+        enabled=enabled,
+        db_path=db_path,
+        frame_cache_seconds=frame_cache_seconds,
+        query_interval_ms=query_interval_ms,
+        queue_size=queue_size,
+        embedding=_parse_memory_embedding_config(embedding_data),
+        matching=_parse_memory_matching_config(matching_data),
+    )
+
+
+def _parse_memory_embedding_config(data: dict[str, Any]) -> MemoryEmbeddingConfig:
+    defaults = MemoryEmbeddingConfig()
+    backend = str(data.get("backend", defaults.backend))
+    if backend not in {"disabled", "fake", "local"}:
+        raise ValueError(
+            "[memory.embedding].backend must be 'disabled', 'fake', or 'local'"
+        )
+    return MemoryEmbeddingConfig(
+        backend=backend,
+        person_model_path=_optional_path(data.get("person_model_path")),
+        scene_model_path=_optional_path(data.get("scene_model_path")),
+    )
+
+
+def _parse_memory_matching_config(data: dict[str, Any]) -> MemoryMatchingConfig:
+    defaults = MemoryMatchingConfig()
+    known_person_threshold = float(
+        data.get("known_person_threshold", defaults.known_person_threshold)
+    )
+    known_person_margin = float(
+        data.get("known_person_margin", defaults.known_person_margin)
+    )
+    anonymous_threshold = float(
+        data.get("anonymous_threshold", defaults.anonymous_threshold)
+    )
+    anonymous_margin = float(data.get("anonymous_margin", defaults.anonymous_margin))
+    familiar_seen_count = int(
+        data.get("familiar_seen_count", defaults.familiar_seen_count)
+    )
+    familiar_threshold = float(
+        data.get("familiar_threshold", defaults.familiar_threshold)
+    )
+    scene_threshold = float(data.get("scene_threshold", defaults.scene_threshold))
+    event_cooldown_ms = int(
+        data.get("event_cooldown_ms", defaults.event_cooldown_ms)
+    )
+    for name, value in (
+        ("known_person_threshold", known_person_threshold),
+        ("known_person_margin", known_person_margin),
+        ("anonymous_threshold", anonymous_threshold),
+        ("anonymous_margin", anonymous_margin),
+        ("familiar_threshold", familiar_threshold),
+        ("scene_threshold", scene_threshold),
+    ):
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"[memory.matching].{name} must be between 0 and 1")
+    if familiar_seen_count <= 0:
+        raise ValueError("[memory.matching].familiar_seen_count must be positive")
+    if event_cooldown_ms <= 0:
+        raise ValueError("[memory.matching].event_cooldown_ms must be positive")
+    return MemoryMatchingConfig(
+        known_person_threshold=known_person_threshold,
+        known_person_margin=known_person_margin,
+        anonymous_threshold=anonymous_threshold,
+        anonymous_margin=anonymous_margin,
+        familiar_seen_count=familiar_seen_count,
+        familiar_threshold=familiar_threshold,
+        scene_threshold=scene_threshold,
+        event_cooldown_ms=event_cooldown_ms,
+    )
+
+
+def _parse_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field_name} must be a boolean")
+
+
+def _optional_path(value: Any) -> Path | None:
+    if value is None:
+        return None
+    text = str(value)
+    if not text:
+        return None
+    return Path(text)
 
 
 def _parse_tracking_config(data: dict[str, Any]) -> TrackingConfig:

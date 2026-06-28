@@ -15,12 +15,15 @@ VISUAL_STATE_TRACKING_SAMPLE = (
 )
 
 EXPECTED_ALLOWED_EVENTS = {
+    "familiar_unknown_present",
+    "known_person_present",
     "person_appeared",
     "person_left",
     "person_passing_by",
     "person_approaching_robot",
     "person_stopped_near_robot",
     "person_waving",
+    "scene_activated",
 }
 BOTIFIED_OPEN = "<botified>"
 BOTIFIED_CLOSE = "</botified>"
@@ -66,6 +69,133 @@ def semantic_event(
             "keypoint_min_confidence": 0.72,
         },
         "text": text,
+    }
+
+
+def known_person_event(
+    *,
+    event_id: str = "front:mem_evt_000001",
+    person_id: str = "person_000001",
+    track_id: int = 7,
+    memory_match_id: str = "match_000001",
+) -> dict[str, Any]:
+    return {
+        "type": "semantic_event",
+        "event_id": event_id,
+        "event": "known_person_present",
+        "camera": "front",
+        "track_id": track_id,
+        "confidence": 0.86,
+        "duration_ms": 0,
+        "lifecycle_state": "confirmed",
+        "evidence": {
+            "memory_match_id": memory_match_id,
+            "matched_type": "person",
+            "matched_id": person_id,
+            "embedding_id": "emb_face_000001",
+            "match_type": "face",
+            "match_score": 0.86,
+            "top2_margin": 0.09,
+            "source_target_mode": "track_id",
+            "source_frame_id": 1234,
+            "source_frame_timestamp_ms": 1780000000000,
+            "embedding_model": "local-face-v1",
+            "vector_blob": "must-not-leak",
+        },
+        "memory_context": {
+            "person": {
+                "person_id": person_id,
+                "display_name": "张三",
+                "description": "店长，熟悉新品陈列和现场活动",
+                "tags": ["staff", "manager"],
+                "match_confidence": 0.86,
+                "embedding": [0.1, 0.2],
+            },
+            "conversation_summaries": [
+                "上次问过新品尺码，偏好浅色外套。",
+                "第二条摘要不应进入短上下文。",
+            ],
+            "raw_notes": "must-not-leak",
+        },
+        "text": "看到已知人物：张三",
+    }
+
+
+def scene_memory_event(
+    *,
+    event_id: str = "front:mem_evt_scene_000001",
+    scene_id: str = "scene_000001",
+    memory_match_id: str = "match_scene_000001",
+) -> dict[str, Any]:
+    return {
+        "type": "semantic_event",
+        "event_id": event_id,
+        "event": "scene_activated",
+        "camera": "front",
+        "track_id": None,
+        "confidence": 0.82,
+        "duration_ms": 0,
+        "lifecycle_state": "confirmed",
+        "evidence": {
+            "memory_match_id": memory_match_id,
+            "matched_type": "scene",
+            "matched_id": scene_id,
+            "embedding_id": "emb_scene_000001",
+            "match_type": "scene",
+            "match_score": 0.82,
+            "top2_margin": 0.07,
+            "source_target_mode": "scene",
+        },
+        "memory_context": {
+            "scene": {
+                "scene_id": scene_id,
+                "title": "新品展示区",
+                "description": "这里是本周新品展示区。",
+                "activation_hint": "可以介绍新品活动。",
+                "match_confidence": 0.82,
+                "embedding": [0.1, 0.2],
+            }
+        },
+        "text": "看到已教学场景：新品展示区",
+    }
+
+
+def familiar_unknown_event(
+    *,
+    event_id: str = "front:mem_evt_anon_000001",
+    anonymous_id: str = "anon_000123",
+    track_id: int = 7,
+    memory_match_id: str = "match_anon_000001",
+) -> dict[str, Any]:
+    return {
+        "type": "semantic_event",
+        "event_id": event_id,
+        "event": "familiar_unknown_present",
+        "camera": "front",
+        "track_id": track_id,
+        "confidence": 0.81,
+        "duration_ms": 0,
+        "lifecycle_state": "confirmed",
+        "evidence": {
+            "memory_match_id": memory_match_id,
+            "matched_type": "anonymous_person",
+            "matched_id": anonymous_id,
+            "embedding_id": "emb_face_000245",
+            "match_type": "face",
+            "match_score": 0.81,
+            "top2_margin": 0.08,
+            "source_target_mode": "track_id",
+        },
+        "memory_context": {
+            "anonymous_person": {
+                "anonymous_id": anonymous_id,
+                "seen_count": 5,
+                "familiar_score": 0.81,
+                "last_seen_at_ms": 1780000000000,
+                "debug_crop": "must-not-leak",
+            }
+        },
+        "text": "看到一个经常出现但尚未命名的人",
     }
 
 
@@ -142,7 +272,7 @@ def visual_state_with_events(
     return state
 
 
-def test_allowed_events_constant_is_exact_six_person_events():
+def test_allowed_events_constant_is_exact_botified_events():
     module = import_botified_output()
 
     allowed = getattr(module, "BOTIFIED_ALLOWED_EVENTS", None)
@@ -152,7 +282,7 @@ def test_allowed_events_constant_is_exact_six_person_events():
 
 
 @pytest.mark.parametrize("event_name", sorted(EXPECTED_ALLOWED_EVENTS))
-def test_format_botified_frame_outputs_allowlisted_person_events(event_name):
+def test_format_botified_frame_outputs_allowlisted_events(event_name):
     module = import_botified_output()
     event = semantic_event(event=f"{event_name}", event_id=f"front:{event_name}")
 
@@ -482,6 +612,130 @@ def test_trigger_evidence_only_contains_whitelisted_projection_fields():
         "wave_duration_ms": 900,
         "keypoint_min_confidence": 0.72,
     }
+
+
+def test_memory_event_frame_contains_compact_memory_context_and_stable_payload():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    event = known_person_event()
+
+    frames = mapper.frames_from_visual_state(visual_state_with_events([event]))
+
+    assert len(frames) == 1
+    payload = parse_botified_frame(frames[0], event_id="front:mem_evt_000001")
+    assert set(payload) == {"id", "urgency", "timeout_secs", "request", "expect"}
+    context = parse_visual_context(payload)
+    assert set(context) == {
+        "event_target",
+        "trigger_evidence",
+        "current_scene",
+        "memory_context",
+    }
+    assert context["memory_context"] == {
+        "person": {
+            "person_id": "person_000001",
+            "display_name": "张三",
+            "description": "店长，熟悉新品陈列和现场活动",
+            "tags": ["staff", "manager"],
+            "match_confidence": 0.86,
+        },
+        "conversation_summaries": ["上次问过新品尺码，偏好浅色外套。"],
+    }
+    assert context["trigger_evidence"] == {
+        "memory_match_id": "match_000001",
+        "matched_type": "person",
+        "matched_id": "person_000001",
+        "embedding_id": "emb_face_000001",
+        "match_type": "face",
+        "match_score": 0.86,
+        "top2_margin": 0.09,
+        "source_target_mode": "track_id",
+    }
+
+
+def test_scene_and_familiar_unknown_memory_context_are_projected():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    scene = scene_memory_event()
+    familiar = familiar_unknown_event(event_id="front:mem_evt_anon_000002")
+
+    frames = mapper.frames_from_visual_state(visual_state_with_events([scene, familiar]))
+
+    assert len(frames) == 2
+    contexts = [
+        parse_visual_context(
+            parse_botified_frame(frame, event_id=event["event_id"])
+        )["memory_context"]
+        for frame, event in zip(frames, [scene, familiar])
+    ]
+    assert contexts[0] == {
+        "scene": {
+            "scene_id": "scene_000001",
+            "title": "新品展示区",
+            "description": "这里是本周新品展示区。",
+            "activation_hint": "可以介绍新品活动。",
+            "match_confidence": 0.82,
+        }
+    }
+    assert contexts[1] == {
+        "anonymous_person": {
+            "anonymous_id": "anon_000123",
+            "seen_count": 5,
+            "familiar_score": 0.81,
+            "last_seen_at_ms": 1780000000000,
+        }
+    }
+
+
+def test_memory_same_key_gap_uses_memory_identity_not_track_id():
+    module = import_botified_output()
+    now_ms = 1_710_000_000_100
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: now_ms)
+    first = known_person_event(
+        event_id="front:mem_evt_person_1",
+        person_id="person_000001",
+        track_id=7,
+        memory_match_id="match_000001",
+    )
+    same_person = known_person_event(
+        event_id="front:mem_evt_person_2",
+        person_id="person_000001",
+        track_id=8,
+        memory_match_id="match_000002",
+    )
+    different_person_same_track = known_person_event(
+        event_id="front:mem_evt_person_3",
+        person_id="person_000002",
+        track_id=7,
+        memory_match_id="match_000003",
+    )
+
+    first_frames = mapper.frames_from_visual_state(visual_state_with_events([first]))
+    second_frames = mapper.frames_from_visual_state(
+        visual_state_with_events([same_person, different_person_same_track])
+    )
+
+    assert len(first_frames) == 1
+    assert len(second_frames) == 1
+    payload = parse_botified_frame(
+        second_frames[0],
+        event_id="front:mem_evt_person_3",
+    )
+    assert "person_000002" in payload["request"]
+
+
+def test_memory_same_key_gap_falls_back_to_memory_match_id():
+    module = import_botified_output()
+    now_ms = 1_710_000_000_100
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: now_ms)
+    first = known_person_event(event_id="front:mem_evt_match_1")
+    second = known_person_event(event_id="front:mem_evt_match_2")
+    first.pop("memory_context")
+    second.pop("memory_context")
+    second["evidence"]["matched_id"] = "person_000002"
+
+    assert len(mapper.frames_from_visual_state(visual_state_with_events([first]))) == 1
+    assert mapper.frames_from_visual_state(visual_state_with_events([second])) == []
 
 
 def test_event_target_matches_attention_target_uses_current_scene_context():

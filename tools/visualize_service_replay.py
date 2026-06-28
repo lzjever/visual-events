@@ -31,6 +31,11 @@ _EVIDENCE_KEYS = (
     "target_track_id",
     "switch_reason",
 )
+_MEMORY_EVENTS = {
+    "known_person_present",
+    "scene_activated",
+    "familiar_unknown_present",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -392,12 +397,55 @@ def _reacquire_summary(scene_context: Any) -> str:
 def _event_summary(event: Any) -> str:
     if not isinstance(event, dict):
         return "-"
+    event_name = _short(event.get("event", "-"))
+    track = _short(event.get("track_id", "-"))
+    if event.get("event") in _MEMORY_EVENTS:
+        return f"{event_name} track={track} memory={_memory_event_summary(event)}"
     evidence = _evidence_summary(event)
-    return (
-        f"{_short(event.get('event', '-'))}"
-        f" track={_short(event.get('track_id', '-'))}"
-        f" evidence={evidence}"
-    )
+    return f"{event_name} track={track} evidence={evidence}"
+
+
+def _memory_event_summary(event: Any) -> str:
+    if not isinstance(event, dict):
+        return "-"
+    evidence = event.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    items: list[str] = []
+    if "matched_id" in evidence:
+        items.append(f"matched_id={_short(evidence['matched_id'])}")
+
+    label = _memory_label(event.get("memory_context"))
+    if label:
+        items.append(label)
+
+    for key in ("match_score", "top2_margin", "memory_match_id"):
+        if key in evidence:
+            items.append(f"{key}={_short(evidence[key])}")
+
+    return " ".join(items) if items else "-"
+
+
+def _memory_label(memory_context: Any) -> str:
+    if not isinstance(memory_context, dict):
+        return ""
+
+    person = memory_context.get("person")
+    if isinstance(person, dict) and person.get("display_name"):
+        return f"name={_short(person['display_name'])}"
+
+    scene = memory_context.get("scene")
+    if isinstance(scene, dict) and scene.get("title"):
+        return f"title={_short(scene['title'])}"
+
+    anonymous = memory_context.get("anonymous_person")
+    if isinstance(anonymous, dict):
+        for key in ("display_name", "name", "title"):
+            if anonymous.get(key):
+                return f"name={_short(anonymous[key])}"
+
+    return ""
 
 
 def _evidence_summary(event: Any) -> str:

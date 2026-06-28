@@ -131,6 +131,70 @@ jsonl_path = "{metrics_path}"
     assert config.metrics.jsonl_path == metrics_path
 
 
+def test_load_config_parses_memory_section(tmp_path):
+    db_path = tmp_path / "memory" / "visual_memory.sqlite3"
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"""
+[memory]
+enabled = true
+db_path = "{db_path}"
+frame_cache_seconds = 3
+query_interval_ms = 750
+queue_size = 4
+
+[memory.embedding]
+backend = "fake"
+person_model_path = "runtime/models/face.onnx"
+scene_model_path = "runtime/models/scene.onnx"
+
+[memory.matching]
+known_person_threshold = 0.83
+known_person_margin = 0.07
+anonymous_threshold = 0.76
+anonymous_margin = 0.04
+familiar_seen_count = 4
+familiar_threshold = 0.88
+scene_threshold = 0.79
+event_cooldown_ms = 30000
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.memory.enabled is True
+    assert config.memory.db_path == db_path
+    assert config.memory.frame_cache_seconds == 3
+    assert config.memory.query_interval_ms == 750
+    assert config.memory.queue_size == 4
+    assert config.memory.embedding.backend == "fake"
+    assert config.memory.embedding.person_model_path == Path("runtime/models/face.onnx")
+    assert config.memory.embedding.scene_model_path == Path("runtime/models/scene.onnx")
+    assert config.memory.matching.known_person_threshold == 0.83
+    assert config.memory.matching.known_person_margin == 0.07
+    assert config.memory.matching.anonymous_threshold == 0.76
+    assert config.memory.matching.anonymous_margin == 0.04
+    assert config.memory.matching.familiar_seen_count == 4
+    assert config.memory.matching.familiar_threshold == 0.88
+    assert config.memory.matching.scene_threshold == 0.79
+    assert config.memory.matching.event_cooldown_ms == 30000
+
+
+def test_load_config_rejects_invalid_memory_matching_section_value(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[memory.matching]
+familiar_seen_count = 0
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="familiar_seen_count"):
+        load_config(config_path)
+
+
 def test_server_cli_metrics_jsonl_override_wires_config(tmp_path, monkeypatch):
     from visual_events_server import app as app_module
 

@@ -70,6 +70,39 @@ def semantic_event(
     }
 
 
+def known_person_event(*, event_id: str = "front:mem_evt_000001") -> dict[str, Any]:
+    return {
+        "type": "semantic_event",
+        "event_id": event_id,
+        "event": "known_person_present",
+        "camera": "front",
+        "track_id": 7,
+        "confidence": 0.86,
+        "duration_ms": 0,
+        "lifecycle_state": "confirmed",
+        "evidence": {
+            "memory_match_id": "match_000001",
+            "matched_type": "person",
+            "matched_id": "person_000001",
+            "embedding_id": "emb_face_000001",
+            "match_type": "face",
+            "match_score": 0.86,
+            "top2_margin": 0.09,
+            "source_target_mode": "track_id",
+        },
+        "memory_context": {
+            "person": {
+                "person_id": "person_000001",
+                "display_name": "张三",
+                "description": "店长，熟悉新品陈列和现场活动",
+                "tags": ["staff", "manager"],
+                "match_confidence": 0.86,
+            }
+        },
+        "text": "看到已知人物：张三",
+    }
+
+
 class FakeServiceClient:
     def __init__(self, results: list[Any] | None = None):
         self.requests: list[tuple[dict[str, Any], bytes]] = []
@@ -127,6 +160,14 @@ def parse_botified_payload(frame: str) -> dict[str, Any]:
     assert frame.startswith("<botified>")
     assert frame.endswith("</botified>")
     return json.loads(frame[len("<botified>") : -len("</botified>")])
+
+
+def parse_visual_context(payload: dict[str, Any]) -> dict[str, Any]:
+    marker = "visual_context="
+    start = payload["request"].index(marker) + len(marker)
+    wrapper, end = json.JSONDecoder().raw_decode(payload["request"][start:])
+    assert payload["request"][start + end :].strip() == ""
+    return wrapper["visual_context"]
 
 
 def service_result(visual_state: dict[str, Any] | None = None, error: Any = None) -> Any:
@@ -320,6 +361,32 @@ async def test_semantic_events_are_written_as_botified_frames_except_attention_c
     payload = parse_botified_payload(botified.frames[0])
     assert payload["id"] == f"visual:{allowed['event_id']}"
     assert "visual_context=" in payload["request"]
+
+
+@pytest.mark.asyncio
+async def test_memory_events_are_written_with_projected_memory_context():
+    module = import_frame_pump()
+    slot = module.LatestFrameSlot()
+    botified = FakeBotifiedWriter()
+    event = known_person_event()
+    state = load_visual_state_tracking(
+        frame_id=1,
+        frame_timestamp_ms=1710000000000,
+        semantic_events=[event],
+    )
+    service = FakeServiceClient([service_result(state)])
+    pump = make_pump(module, slot=slot, service=service, botified=botified)
+
+    slot.push(make_frame(module, timestamp_ms=1710000000000))
+    await pump.process_one(now_ms=1710000000082)
+
+    assert len(botified.frames) == 1
+    payload = parse_botified_payload(botified.frames[0])
+    assert payload["id"] == "visual:front:mem_evt_000001"
+    context = parse_visual_context(payload)
+    assert context["memory_context"]["person"]["person_id"] == "person_000001"
+    assert context["memory_context"]["person"]["display_name"] == "张三"
+    assert set(payload) == {"id", "urgency", "timeout_secs", "request", "expect"}
 
 
 @pytest.mark.asyncio
