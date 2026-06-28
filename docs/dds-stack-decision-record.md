@@ -154,9 +154,9 @@ Runtime must set `VISUAL_EVENTS_DDS_BRIDGE_BIN`, `VISUAL_EVENTS_DDS_DOMAIN`, `VI
 
 This section is a required plan for the next adapter step, not passed evidence.
 
-## RK3588 / Board Probe Gate
+## RK3588 / Board Post-GA Validation Probe
 
-The aarch64 SDK package exists and local `file` evidence shows ARM aarch64 DDS libraries. GA handoff still requires an aarch64/RK3588 build/probe, or an explicit unsupported fail-fast path, before claiming board compatibility. In other words, claiming board compatibility still requires an RK3588/board probe, and this deferred hardware gate does not block the current repo-local PC DDS emulation delivery gate. Do not mark RK3588 supported or hardware/field GA passed from package presence or PC evidence alone.
+The aarch64 SDK package exists and local `file` evidence shows ARM aarch64 DDS libraries. Board/RK3588 build/probe is post-GA hardware validation, not a current GA handoff gate and not part of the repo-local PC DDS emulation delivery gate. Claiming board compatibility still requires an RK3588/board probe or an explicit unsupported fail-fast path. Do not mark RK3588 supported, board compatible, or hardware/field GA passed from package presence or PC evidence alone.
 
 ## No-Motion Boundary
 
