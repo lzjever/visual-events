@@ -595,7 +595,101 @@ async def test_replay_scene_summarizes_attention_targets_switches_and_lost_hold(
     assert stats.attention_target_lost_frames == 1
     assert stats.attention_max_lost_hold_ms == 300
     assert stats.attention_largest_bbox_disagreement_frames == 1
+    assert stats.attention_actionable_largest_bbox_disagreement_frames == 0
     assert _stats_passed(stats, gate="attention") is True
+
+
+@pytest.mark.asyncio
+async def test_stable_attention_gate_ignores_held_lost_target_disagreement(tmp_path):
+    scene = tmp_path / "pic_walk_in_stop"
+    write_scene_frames(scene, 1)
+    connector = SequenceResponseConnect(
+        [
+            [
+                track_payload(
+                    1,
+                    age_ms=400,
+                    bbox_area_ratio=0.10,
+                    lost_ms=300,
+                ),
+                track_payload(2, age_ms=400, bbox_area_ratio=0.30),
+            ],
+        ],
+        [
+            attention_payload(1, reason="held_lost_target"),
+        ],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.attention_largest_bbox_disagreement_frames == 1
+    assert stats.attention_target_lost_frames == 1
+    assert stats.attention_actionable_largest_bbox_disagreement_frames == 0
+    assert _stats_passed(stats, gate="attention") is True
+
+
+@pytest.mark.asyncio
+async def test_stable_attention_gate_allows_short_largest_mismatch_dwell(tmp_path):
+    scene = tmp_path / "pic_walk_in_stop"
+    write_scene_frames(scene, 9)
+    smaller = track_payload(1, age_ms=400, bbox_area_ratio=0.10)
+    larger = track_payload(2, age_ms=400, bbox_area_ratio=0.30)
+    connector = SequenceResponseConnect(
+        [[smaller, larger] for _ in range(9)],
+        [attention_payload(1) for _ in range(8)] + [attention_payload(2)],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.attention_largest_bbox_disagreement_frames == 8
+    assert stats.attention_target_switches == 1
+    assert stats.attention_actionable_largest_bbox_disagreement_frames == 0
+    assert _stats_passed(stats, gate="attention") is True
+
+
+@pytest.mark.asyncio
+async def test_stable_attention_gate_fails_sustained_largest_mismatch(tmp_path):
+    scene = tmp_path / "pic_walk_in_stop"
+    write_scene_frames(scene, 9)
+    smaller = track_payload(1, age_ms=400, bbox_area_ratio=0.10)
+    larger = track_payload(2, age_ms=400, bbox_area_ratio=0.30)
+    connector = SequenceResponseConnect(
+        [[smaller, larger] for _ in range(9)],
+        [attention_payload(1) for _ in range(9)],
+    )
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=250,
+    )
+
+    assert stats.attention_largest_bbox_disagreement_frames == 9
+    assert stats.attention_actionable_largest_bbox_disagreement_frames > 0
+    assert _stats_passed(stats, gate="attention") is False
 
 
 @pytest.mark.asyncio
@@ -1417,6 +1511,7 @@ async def test_async_main_writes_summary_json(tmp_path, monkeypatch):
             "attention_target_lost_frames": 0,
             "attention_max_lost_hold_ms": 0,
             "attention_largest_bbox_disagreement_frames": 0,
+            "attention_actionable_largest_bbox_disagreement_frames": 0,
             "semantic_event_frames": 0,
             "semantic_event_count": 0,
             "semantic_event_counts_by_type": {},

@@ -24,6 +24,7 @@ _ASSOCIATION_IOU_THRESHOLD = 0.5
 _S4_STABLE_ATTENTION_SCENES = {"pci_stand", "pic_walk_in_stop"}
 _S4_STABLE_ATTENTION_MIN_COVERAGE = 0.85
 _S4_STABLE_ATTENTION_MAX_SWITCHES = 2
+_S4_STABLE_ATTENTION_SWITCH_DWELL_MS = 750
 DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS = 5000
 _SEMANTIC_EVENT_ID = re.compile(r"^[^:]+:evt_\d{6}$")
 _SEMANTIC_EVENT_TYPES = {
@@ -149,6 +150,7 @@ class ReplayStats:
     attention_target_lost_frames: int = 0
     attention_max_lost_hold_ms: int = 0
     attention_largest_bbox_disagreement_frames: int = 0
+    attention_actionable_largest_bbox_disagreement_frames: int = 0
     semantic_event_frames: int = 0
     semantic_event_count: int = 0
     semantic_event_counts_by_type: dict[str, int] = field(default_factory=dict)
@@ -420,6 +422,9 @@ async def replay_scene(
         attention_max_lost_hold_ms=attention_summary["attention_max_lost_hold_ms"],
         attention_largest_bbox_disagreement_frames=attention_summary[
             "attention_largest_bbox_disagreement_frames"
+        ],
+        attention_actionable_largest_bbox_disagreement_frames=attention_summary[
+            "attention_actionable_largest_bbox_disagreement_frames"
         ],
         semantic_event_frames=semantic_event_summary["semantic_event_frames"],
         semantic_event_count=semantic_event_summary["semantic_event_count"],
@@ -710,6 +715,9 @@ def stats_to_summary(item: ReplayStats, *, gate: str = "tracking") -> dict[str, 
         "attention_largest_bbox_disagreement_frames": (
             item.attention_largest_bbox_disagreement_frames
         ),
+        "attention_actionable_largest_bbox_disagreement_frames": (
+            item.attention_actionable_largest_bbox_disagreement_frames
+        ),
         "semantic_event_frames": item.semantic_event_frames,
         "semantic_event_count": item.semantic_event_count,
         "semantic_event_counts_by_type": item.semantic_event_counts_by_type,
@@ -821,6 +829,7 @@ def _attention_stats_passed(item: ReplayStats) -> bool:
     return (
         item.attention_coverage >= _S4_STABLE_ATTENTION_MIN_COVERAGE
         and item.attention_target_switches <= _S4_STABLE_ATTENTION_MAX_SWITCHES
+        and item.attention_actionable_largest_bbox_disagreement_frames == 0
     )
 
 
@@ -1120,18 +1129,23 @@ class _AttentionStatsAccumulator:
     attention_target_lost_frames: int = 0
     attention_max_lost_hold_ms: int = 0
     attention_largest_bbox_disagreement_frames: int = 0
+    attention_actionable_largest_bbox_disagreement_frames: int = 0
 
     def __post_init__(self) -> None:
         self._last_target_track_id: int | None = None
         self._target_counts_by_id: dict[str, int] = {}
+        self._largest_bbox_challenger_id: int | None = None
+        self._largest_bbox_challenger_start_ms: int | None = None
 
     def observe(self, response: dict[str, Any]) -> None:
         attention = response.get("attention")
         if attention is None:
             self.attention_null_frames += 1
+            self._reset_largest_bbox_challenger_dwell()
             return
         if not isinstance(attention, dict) or not _valid_attention_schema(attention):
             self.attention_schema_errors += 1
+            self._reset_largest_bbox_challenger_dwell()
             return
 
         self.attention_frames += 1
@@ -1159,11 +1173,13 @@ class _AttentionStatsAccumulator:
         tracks = _valid_tracks_from_response(response)
         tracks_by_id = {int(track["track_id"]): track for track in tracks}
         target_track = tracks_by_id.get(target_id)
+        target_lost = False
         if target_track is None:
             self.attention_target_missing_track_frames += 1
         else:
             lost_ms = int(target_track.get("lost_ms", 0))
             if lost_ms > 0:
+                target_lost = True
                 self.attention_target_lost_frames += 1
                 self.attention_max_lost_hold_ms = max(
                     self.attention_max_lost_hold_ms,
@@ -1178,8 +1194,55 @@ class _AttentionStatsAccumulator:
                 visible_tracks,
                 key=lambda track: float(track["bbox_area_ratio"]),
             )
-            if int(largest["track_id"]) != target_id:
+            largest_id = int(largest["track_id"])
+            if largest_id != target_id:
                 self.attention_largest_bbox_disagreement_frames += 1
+                self._observe_actionable_largest_bbox_disagreement(
+                    challenger_id=largest_id,
+                    response=response,
+                    attention=attention,
+                    target_lost=target_lost,
+                )
+            else:
+                self._reset_largest_bbox_challenger_dwell()
+        else:
+            self._reset_largest_bbox_challenger_dwell()
+
+    def _observe_actionable_largest_bbox_disagreement(
+        self,
+        *,
+        challenger_id: int,
+        response: dict[str, Any],
+        attention: dict[str, Any],
+        target_lost: bool,
+    ) -> None:
+        if attention.get("reason") == "held_lost_target" or target_lost:
+            self._reset_largest_bbox_challenger_dwell()
+            return
+
+        timestamp_ms = response.get("frame_timestamp_ms")
+        has_valid_timestamp = _is_finite_number(timestamp_ms)
+        timestamp = int(timestamp_ms) if has_valid_timestamp else None
+
+        if challenger_id != self._largest_bbox_challenger_id:
+            self._largest_bbox_challenger_id = challenger_id
+            self._largest_bbox_challenger_start_ms = timestamp
+            return
+
+        if timestamp is None:
+            return
+        if self._largest_bbox_challenger_start_ms is None:
+            self._largest_bbox_challenger_start_ms = timestamp
+            return
+        if (
+            timestamp - self._largest_bbox_challenger_start_ms
+            >= _S4_STABLE_ATTENTION_SWITCH_DWELL_MS
+        ):
+            self.attention_actionable_largest_bbox_disagreement_frames += 1
+
+    def _reset_largest_bbox_challenger_dwell(self) -> None:
+        self._largest_bbox_challenger_id = None
+        self._largest_bbox_challenger_start_ms = None
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -1198,6 +1261,9 @@ class _AttentionStatsAccumulator:
             "attention_max_lost_hold_ms": self.attention_max_lost_hold_ms,
             "attention_largest_bbox_disagreement_frames": (
                 self.attention_largest_bbox_disagreement_frames
+            ),
+            "attention_actionable_largest_bbox_disagreement_frames": (
+                self.attention_actionable_largest_bbox_disagreement_frames
             ),
         }
 
