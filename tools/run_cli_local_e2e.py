@@ -1457,13 +1457,26 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
         and gaze_attention_oracle["passed"] is True
         and gaze_attention_oracle_contracts_present
     )
+    server_exit_code, cli_exit_code, runtime_failure_reasons = (
+        _full_scene_matrix_runtime_evidence(config, scene_reports)
+    )
+    failure_reasons.extend(runtime_failure_reasons)
+    runtime_provenance_pass = not runtime_failure_reasons
     current_pc_core_gate_pass = (
-        slice_matrix_pass and oracle_pass and gaze_attention_oracle_pass
+        slice_matrix_pass
+        and oracle_pass
+        and gaze_attention_oracle_pass
+        and runtime_provenance_pass
     )
     ga_gate_status = (
         GA_GATE_STATUS_PC_SIMULATED_PASS
         if current_pc_core_gate_pass
         else GA_GATE_STATUS_PC_SIMULATED_FAIL
+    )
+    runtime_report = _runtime_provenance_report_with_exit_codes(
+        config.runtime_provenance,
+        server_exit_code=server_exit_code,
+        cli_exit_code=cli_exit_code,
     )
     report = _base_report(
         manifest_report=config.manifest_report,
@@ -1482,6 +1495,11 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
             "current_pc_core_gate_pass": current_pc_core_gate_pass,
             "ga_gate_pass": current_pc_core_gate_pass,
             "ga_gate_status": ga_gate_status,
+            **_runtime_provenance_flat_aliases(
+                runtime_report,
+                server_exit_code=server_exit_code,
+                cli_exit_code=cli_exit_code,
+            ),
             "report_scope": CURRENT_PC_CORE_GATE_SCOPE,
             "overall_scope": CURRENT_PC_CORE_GATE_SCOPE,
             "scene_replay_mode": "full_scene_matrix",
@@ -1517,6 +1535,76 @@ def _run_full_scene_matrix(config: CliLocalE2EConfig, runner: ProcessRunner) -> 
     _write_report(config.out, report)
     print(str(config.out))
     return 0 if current_pc_core_gate_pass else 1
+
+
+def _full_scene_matrix_runtime_evidence(
+    config: CliLocalE2EConfig,
+    scene_reports: list[dict[str, Any]],
+) -> tuple[int | None, int | None, list[str]]:
+    server_exit_code, server_reasons = _full_scene_matrix_exit_code(
+        scene_reports,
+        field="server_exit_code",
+        process_name="server",
+    )
+    cli_exit_code, cli_reasons = _full_scene_matrix_exit_code(
+        scene_reports,
+        field="cli_exit_code",
+        process_name="cli",
+    )
+    reasons = [
+        *server_reasons,
+        *cli_reasons,
+        *_full_scene_matrix_runtime_consistency_reasons(config, scene_reports),
+    ]
+    return server_exit_code, cli_exit_code, reasons
+
+
+def _full_scene_matrix_exit_code(
+    scene_reports: list[dict[str, Any]],
+    *,
+    field: str,
+    process_name: str,
+) -> tuple[int | None, list[str]]:
+    values: list[int] = []
+    for result in scene_reports:
+        report = result.get("report")
+        if not isinstance(report, dict):
+            return None, [f"runtime_provenance_exit_code_inconsistent:{process_name}"]
+        value = report.get(field)
+        if not isinstance(value, int):
+            return None, [f"runtime_provenance_exit_code_inconsistent:{process_name}"]
+        values.append(value)
+    if not values:
+        return None, [f"runtime_provenance_exit_code_inconsistent:{process_name}"]
+    unique_values = set(values)
+    if len(unique_values) != 1:
+        return None, [f"runtime_provenance_exit_code_inconsistent:{process_name}"]
+    return values[0], []
+
+
+def _full_scene_matrix_runtime_consistency_reasons(
+    config: CliLocalE2EConfig,
+    scene_reports: list[dict[str, Any]],
+) -> list[str]:
+    expected = {
+        "runtime_hash": config.runtime_provenance.get("runtime_hash"),
+        "config_hash": config.runtime_provenance.get("config_hash"),
+        "server_bin": os.fspath(config.server_bin),
+        "cli_bin": os.fspath(config.cli_bin),
+    }
+    reasons: list[str] = []
+    for result in scene_reports:
+        scene = result.get("scene") or "unknown"
+        report = result.get("report")
+        if not isinstance(report, dict):
+            reasons.append(f"runtime_provenance_inconsistent:{scene}")
+            continue
+        if any(
+            report.get(key) != expected_value
+            for key, expected_value in expected.items()
+        ):
+            reasons.append(f"runtime_provenance_inconsistent:{scene}")
+    return reasons
 
 
 def _full_scene_matrix_not_covered(

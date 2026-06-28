@@ -1803,6 +1803,14 @@ def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> N
     assert report["current_pc_core_gate_pass"] is True
     assert report["ga_gate_pass"] is True
     assert report["ga_gate_status"] == module.GA_GATE_STATUS_PC_SIMULATED_PASS
+    assert_runtime_provenance_success(
+        report,
+        paths,
+        config_hash=sha256_file(paths["server_config"]),
+    )
+    assert report["server_exit_code"] == -15
+    assert report["cli_exit_code"] == -15
+    assert "runtime_provenance" in report
     assert report["gates"]["ga"] == {
         "scope": "pc_simulated_ga",
         "pass": True,
@@ -1833,6 +1841,88 @@ def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> N
     ]
     assert report["botified_event_oracle"]["missing_required_events"] == []
     assert report["botified_event_oracle"]["blocking_failure_reasons"] == []
+
+
+def test_all_scenes_full_scene_inconsistent_runtime_exit_code_blocks_core(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["scene-a", "scene-b"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "scene-a": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+                {
+                    "start_frame_timestamp_ms": 1090,
+                    "end_frame_timestamp_ms": 1090,
+                    "no_target": True,
+                },
+            ],
+            "scene-b": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+                {
+                    "start_frame_timestamp_ms": 1090,
+                    "end_frame_timestamp_ms": 1090,
+                    "no_target": True,
+                },
+            ],
+        },
+    )
+
+    class InconsistentServerExitRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__(
+                sync_results={"gaze_subscriber": successful_full_scene_gaze_result()},
+                process_results={
+                    "cli": [
+                        FakeResult(0, stdout=botified_frame("person_waving")),
+                        FakeResult(0, stdout=botified_frame("person_waving")),
+                    ]
+                },
+            )
+            self.server_start_count = 0
+
+        def start_process(
+            self,
+            command: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            name: str,
+        ) -> FakeProcess:
+            process = super().start_process(command, cwd=cwd, env=env, name=name)
+            if name == "server":
+                self.server_start_count += 1
+                if self.server_start_count == 2:
+                    process.returncode = 0
+            return process
+
+    runner = InconsistentServerExitRunner()
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "full_scene_matrix_failed"
+    assert report["slice_matrix_pass"] is True
+    assert report["current_pc_core_gate_pass"] is False
+    assert "runtime_provenance_exit_code_inconsistent:server" in report[
+        "failure_reasons"
+    ]
 
 
 def test_all_scenes_full_scene_output_limit_failure_blocks_pc_gate(
