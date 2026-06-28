@@ -54,6 +54,12 @@ VALID_GAZE_STATES = {"tracking", "lost", "stale", "disabled"}
 VALID_HEAD_STATES = ("stationary", "moving", "unknown")
 DEFAULT_HEAD_STATE_SEGMENTS = VALID_HEAD_STATES
 MIN_HEAD_STATE_HZ = 9.0
+MIN_HEAD_PUBLISHER_PRE_ROLL_SAMPLES = 3
+MIN_HEAD_PUBLISHER_TAIL_SAMPLES = 3
+HEAD_PUBLISHER_PRE_ROLL_MIN_DURATION_S = 0.1
+HEAD_PUBLISHER_TAIL_MIN_DURATION_S = 0.1
+CLI_REQUEST_LOG_WARMUP_POLL_ATTEMPTS = 20
+CLI_REQUEST_LOG_WARMUP_POLL_INTERVAL_S = 0.05
 MIN_GAZE_PUBLISH_HZ = 9.0
 MAX_GAZE_PUBLISH_HZ = 10.5
 MIN_PC_GA_ATTENTION_SWITCH_CONFIRM_MS = 750.0
@@ -201,6 +207,7 @@ class WarmupResult:
     passed: bool | None
     failure_reason: str | None = None
     count: int = 0
+    expected_publish_count: int = 0
     image_dir: Path | None = None
     image_result: CommandResult | None = None
     head_result: CommandResult | None = None
@@ -1046,8 +1053,10 @@ def _run_smoke_result(
                 failure_reasons.append(
                     f"warmup_failed:{warmup_result.failure_reason or 'unknown'}"
                 )
-            cli_request_line_offset = _read_cli_frame_request_log(
-                cli_request_log_path
+            cli_request_line_offset = _wait_cli_frame_request_log_after_warmup(
+                cli_request_log_path,
+                runner=runner,
+                warmup_result=warmup_result,
             ).next_line_offset
             for segment in config.head_state_segments:
                 segment_suffix = f":segment={segment.state}"
@@ -1065,6 +1074,7 @@ def _run_smoke_result(
                     env=orchestration_env,
                     name=head_name,
                 )
+                runner.sleep(_head_publisher_pre_roll_duration_s(segment))
                 image_result = runner.run_sync(
                     image_command,
                     cwd=REPO_ROOT,
@@ -1080,7 +1090,10 @@ def _run_smoke_result(
                 head_result = runner.wait_process(
                     head_process,
                     name=head_name,
-                    timeout_s=_publisher_timeout_s(segment.frame_count, segment.head_state_hz),
+                    timeout_s=_publisher_timeout_s(
+                        _expected_head_publish_count(segment),
+                        segment.head_state_hz,
+                    ),
                 )
                 head_stdout_json, head_stdout_parse_error = _parse_head_publisher_stdout(
                     head_result.stdout
@@ -1091,6 +1104,7 @@ def _run_smoke_result(
                         result=head_result,
                         stdout_json=head_stdout_json,
                         stdout_parse_error=head_stdout_parse_error,
+                        expected_publish_count=_expected_head_publish_count(segment),
                     )
                 )
                 head_process = None
@@ -1269,6 +1283,7 @@ def _run_full_scene_warmup(
             env=orchestration_env,
             name="head_publisher:warmup",
         )
+        runner.sleep(_head_publisher_pre_roll_duration_s(head_segment))
         image_result = runner.run_sync(
             image_command,
             cwd=REPO_ROOT,
@@ -1278,13 +1293,17 @@ def _run_full_scene_warmup(
         head_result = runner.wait_process(
             head_process,
             name="head_publisher:warmup",
-            timeout_s=_publisher_timeout_s(1, head_segment.head_state_hz),
+            timeout_s=_publisher_timeout_s(
+                _expected_head_publish_count(head_segment),
+                head_segment.head_state_hz,
+            ),
         )
         head_process = None
 
         failure_reason = _warmup_failure_reason(
             image_result=image_result,
             head_result=head_result,
+            expected_publish_count=_expected_head_publish_count(head_segment),
         )
         return (
             WarmupResult(
@@ -1292,6 +1311,7 @@ def _run_full_scene_warmup(
                 passed=failure_reason is None,
                 failure_reason=failure_reason,
                 count=1,
+                expected_publish_count=_expected_head_publish_count(head_segment),
                 image_dir=image_dir,
                 image_result=image_result,
                 head_result=head_result,
@@ -1305,6 +1325,13 @@ def _run_full_scene_warmup(
                 passed=False,
                 failure_reason=f"warmup_exception:{type(exc).__name__}",
                 count=1,
+                expected_publish_count=_expected_head_publish_count(
+                    HeadStateSegment(
+                        state="stationary",
+                        frame_count=1,
+                        head_state_hz=max(config.head_state_hz, MIN_HEAD_STATE_HZ),
+                    )
+                ),
                 image_dir=image_dir,
                 image_result=image_result,
                 head_result=head_result,
@@ -1320,6 +1347,7 @@ def _warmup_failure_reason(
     *,
     image_result: CommandResult,
     head_result: CommandResult,
+    expected_publish_count: int,
 ) -> str | None:
     if image_result.returncode != 0:
         return "warmup_image_publisher_failed"
@@ -1333,7 +1361,11 @@ def _warmup_failure_reason(
     if head_stdout_json.get("state") != "stationary":
         return "warmup_head_publisher_state_mismatch"
     published = head_stdout_json.get("published")
-    if not isinstance(published, int) or isinstance(published, bool) or published < 1:
+    if (
+        not isinstance(published, int)
+        or isinstance(published, bool)
+        or published != expected_publish_count
+    ):
         return "warmup_head_publisher_count_mismatch"
     return None
 
@@ -1728,17 +1760,10 @@ def _evaluate_gaze_attention_scene(
         if not isinstance(window, dict):
             mismatches.append({"window_index": index, "reason": "invalid_window"})
             continue
-        start_ms = _finite_float(window.get("start_frame_timestamp_ms"))
-        end_ms = _finite_float(window.get("end_frame_timestamp_ms"))
-        if start_ms is None or end_ms is None or end_ms < start_ms:
+        samples = _attention_window_samples(window, accepted_samples)
+        if samples is None:
             mismatches.append({"window_index": index, "reason": "invalid_window"})
             continue
-
-        samples = [
-            sample
-            for sample in accepted_samples
-            if _sample_frame_timestamp_in_window(sample, start_ms, end_ms)
-        ]
         if window.get("no_target") is True:
             tracking_samples = [
                 sample for sample in samples if _is_tracking_gaze_sample(sample)
@@ -1757,7 +1782,8 @@ def _evaluate_gaze_attention_scene(
             continue
 
         allowed_track_ids = _allowed_attention_track_ids(window)
-        if not allowed_track_ids:
+        has_point_target = _has_attention_point_target(window)
+        if not allowed_track_ids and not has_point_target:
             mismatches.append(
                 {"window_index": index, "reason": "missing_expected_target"}
             )
@@ -1767,7 +1793,10 @@ def _evaluate_gaze_attention_scene(
             sample
             for sample in samples
             if _is_tracking_gaze_sample(sample)
-            and _sample_track_id(sample) in allowed_track_ids
+            and (
+                not allowed_track_ids
+                or _sample_track_id(sample) in allowed_track_ids
+            )
             and _sample_matches_optional_attention_point(sample, window)
         ]
         if matching_samples:
@@ -2076,6 +2105,60 @@ def _fresh_gaze_samples(value: Any) -> list[dict[str, Any]]:
     return samples
 
 
+def _attention_window_samples(
+    window: dict[str, Any],
+    accepted_samples: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    has_frame_id_window, frame_id_window = _attention_frame_id_window(window)
+    if has_frame_id_window:
+        if frame_id_window is None:
+            return None
+        start_frame_id, end_frame_id = frame_id_window
+        return [
+            sample
+            for sample in accepted_samples
+            if _sample_frame_id_in_window(sample, start_frame_id, end_frame_id)
+        ]
+
+    start_ms = _finite_float(window.get("start_frame_timestamp_ms"))
+    end_ms = _finite_float(window.get("end_frame_timestamp_ms"))
+    if start_ms is None or end_ms is None or end_ms < start_ms:
+        return None
+    return [
+        sample
+        for sample in accepted_samples
+        if _sample_frame_timestamp_in_window(sample, start_ms, end_ms)
+    ]
+
+
+def _attention_frame_id_window(
+    window: dict[str, Any],
+) -> tuple[bool, tuple[int, int] | None]:
+    has_frame_id_window = "start_frame_id" in window or "end_frame_id" in window
+    if not has_frame_id_window:
+        return False, None
+    start_frame_id = _frame_id_value(window.get("start_frame_id"))
+    end_frame_id = _frame_id_value(window.get("end_frame_id"))
+    if start_frame_id is None or end_frame_id is None or end_frame_id < start_frame_id:
+        return True, None
+    return True, (start_frame_id, end_frame_id)
+
+
+def _frame_id_value(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _sample_frame_id_in_window(
+    sample: dict[str, Any],
+    start_frame_id: int,
+    end_frame_id: int,
+) -> bool:
+    frame_id = _frame_id_value(sample.get("frame_id"))
+    return frame_id is not None and start_frame_id <= frame_id <= end_frame_id
+
+
 def _sample_frame_timestamp_in_window(
     sample: dict[str, Any],
     start_ms: float,
@@ -2107,6 +2190,15 @@ def _allowed_attention_track_ids(window: dict[str, Any]) -> set[int]:
             if isinstance(item, int) and not isinstance(item, bool):
                 allowed.add(item)
     return allowed
+
+
+def _has_attention_point_target(window: dict[str, Any]) -> bool:
+    has_point = (
+        _finite_float(window.get("target_u")) is not None
+        or _finite_float(window.get("target_v")) is not None
+    )
+    tolerance_px = _finite_float(window.get("tolerance_px"))
+    return has_point and tolerance_px is not None and tolerance_px >= 0
 
 
 def _sample_matches_optional_attention_point(
@@ -2145,6 +2237,9 @@ def _unevaluated_botified_event_oracle() -> dict[str, Any]:
     return {
         "evaluated": False,
         "passed": None,
+        "missing_required_blocks": False,
+        "missing_required_events": [],
+        "blocking_failure_reasons": [],
         "scenes": [],
     }
 
@@ -2156,6 +2251,7 @@ def _evaluate_botified_event_oracle(
 ) -> tuple[dict[str, Any], list[str]]:
     scenes: list[dict[str, Any]] = []
     failure_reasons: list[str] = []
+    missing_required_events: list[dict[str, str]] = []
 
     for scene_report in scene_reports:
         scene = str(scene_report.get("scene") or "")
@@ -2177,6 +2273,8 @@ def _evaluate_botified_event_oracle(
         )
 
         missing = [event for event in required if observed.get(event, 0) <= 0]
+        for event in missing:
+            missing_required_events.append({"scene": scene, "event": event})
         forbidden_present = {
             event: observed[event]
             for event in forbidden
@@ -2191,23 +2289,31 @@ def _evaluate_botified_event_oracle(
             head_motion=head_motion,
             event_records=sequence,
         )
+        blocking_failure_reasons: list[str] = []
 
-        for event in missing:
-            failure_reasons.append(f"botified_event_oracle_missing:{scene}:{event}")
+        if required and not observed:
+            blocking_failure_reasons.append(
+                f"botified_event_oracle_no_allowed_event:{scene}"
+            )
         for event in forbidden_present:
-            failure_reasons.append(f"botified_event_oracle_forbidden:{scene}:{event}")
+            blocking_failure_reasons.append(
+                f"botified_event_oracle_forbidden:{scene}:{event}"
+            )
         for violation in order_violations:
-            failure_reasons.append(
+            blocking_failure_reasons.append(
                 "botified_event_oracle_order:"
                 f"{scene}:{violation['before_event']}_before_{violation['after_event']}"
             )
         for violation in duplicate_greeting_violations:
-            failure_reasons.append(
+            blocking_failure_reasons.append(
                 "botified_event_oracle_duplicate_greeting:"
                 f"{scene}:{violation['person_label']}:{violation['event']}"
             )
         if not contract_present:
-            failure_reasons.append(f"botified_event_oracle_missing_scene_contract:{scene}")
+            blocking_failure_reasons.append(
+                f"botified_event_oracle_missing_scene_contract:{scene}"
+            )
+        failure_reasons.extend(blocking_failure_reasons)
 
         scenes.append(
             {
@@ -2219,6 +2325,8 @@ def _evaluate_botified_event_oracle(
                 "forbidden_present": forbidden_present,
                 "order_violations": order_violations,
                 "duplicate_greeting_violations": duplicate_greeting_violations,
+                "missing_required_blocks": False,
+                "blocking_failure_reasons": blocking_failure_reasons,
             }
         )
 
@@ -2226,6 +2334,9 @@ def _evaluate_botified_event_oracle(
         {
             "evaluated": True,
             "passed": not failure_reasons,
+            "missing_required_blocks": False,
+            "missing_required_events": missing_required_events,
+            "blocking_failure_reasons": failure_reasons,
             "scenes": scenes,
         },
         failure_reasons,
@@ -2394,6 +2505,25 @@ def _read_cli_frame_request_log(
     )
 
 
+def _wait_cli_frame_request_log_after_warmup(
+    path: Path,
+    *,
+    runner: ProcessRunner,
+    warmup_result: WarmupResult,
+) -> CliFrameRequestLogRead:
+    expected_records = warmup_result.count if warmup_result.enabled else 0
+    last_read = _read_cli_frame_request_log(path)
+    if expected_records <= 0:
+        return last_read
+
+    for _ in range(CLI_REQUEST_LOG_WARMUP_POLL_ATTEMPTS):
+        if len(last_read.records) >= expected_records:
+            return last_read
+        runner.sleep(CLI_REQUEST_LOG_WARMUP_POLL_INTERVAL_S)
+        last_read = _read_cli_frame_request_log(path)
+    return last_read
+
+
 def _wrapper_common_command(config: CliLocalE2EConfig, script_name: str) -> list[str]:
     command = [
         os.fspath(sys.executable),
@@ -2456,12 +2586,42 @@ def _head_publisher_command(config: CliLocalE2EConfig, segment: HeadStateSegment
         "--state",
         segment.state,
         "--count",
-        str(segment.frame_count),
+        str(_expected_head_publish_count(segment)),
         "--hz",
         _format_number(segment.head_state_hz),
         "--head-state-topic",
         config.head_state_topic,
     ]
+
+
+def _head_publisher_pre_roll_samples(segment: HeadStateSegment) -> int:
+    return max(
+        MIN_HEAD_PUBLISHER_PRE_ROLL_SAMPLES,
+        math.ceil(segment.head_state_hz * HEAD_PUBLISHER_PRE_ROLL_MIN_DURATION_S),
+    )
+
+
+def _head_publisher_tail_samples(segment: HeadStateSegment) -> int:
+    return max(
+        MIN_HEAD_PUBLISHER_TAIL_SAMPLES,
+        math.ceil(segment.head_state_hz * HEAD_PUBLISHER_TAIL_MIN_DURATION_S),
+    )
+
+
+def _head_publisher_pre_roll_duration_s(segment: HeadStateSegment) -> float:
+    return _head_publisher_pre_roll_samples(segment) / segment.head_state_hz
+
+
+def _head_publisher_tail_duration_s(segment: HeadStateSegment) -> float:
+    return _head_publisher_tail_samples(segment) / segment.head_state_hz
+
+
+def _expected_head_publish_count(segment: HeadStateSegment) -> int:
+    return (
+        segment.frame_count
+        + _head_publisher_pre_roll_samples(segment)
+        + _head_publisher_tail_samples(segment)
+    )
 
 
 def _parse_head_state_segment_names(
@@ -2531,6 +2691,7 @@ def _head_segment_failure_reasons(
     result: CommandResult,
     stdout_json: dict[str, Any] | None,
     stdout_parse_error: str | None,
+    expected_publish_count: int,
 ) -> list[str]:
     reasons: list[str] = []
     suffix = f":segment={segment.state}"
@@ -2548,7 +2709,7 @@ def _head_segment_failure_reasons(
     published = stdout_json.get("published")
     if isinstance(published, bool) or not isinstance(published, int):
         reasons.append(f"head_publisher_count_mismatch{suffix}")
-    elif published != segment.frame_count:
+    elif published != expected_publish_count:
         reasons.append(f"head_publisher_count_mismatch{suffix}")
 
     mapped_state = stdout_json.get("mapped_state")
@@ -2725,6 +2886,11 @@ def _build_smoke_report(
                 "state": config.head_state_segments[0].state,
                 "hz": config.head_state_hz,
                 "count": config.frame_count,
+                "image_frame_count": config.frame_count,
+                "expected_publish_count": sum(
+                    _expected_head_publish_count(segment)
+                    for segment in config.head_state_segments
+                ),
                 "segments": head_state_segments,
                 "stale_count": head_state_stale_count,
                 "unknown_ratio": head_state_unknown_ratio,
@@ -2802,11 +2968,15 @@ def _build_smoke_report(
 
 
 def _warmup_report(warmup_result: WarmupResult) -> dict[str, Any]:
+    publish_count = _head_result_publish_count(warmup_result.head_result)
     return {
         "enabled": warmup_result.enabled,
         "passed": warmup_result.passed,
         "failure_reason": warmup_result.failure_reason,
         "count": warmup_result.count,
+        "image_frame_count": warmup_result.count,
+        "expected_publish_count": warmup_result.expected_publish_count,
+        "publish_count": publish_count,
     }
 
 
@@ -2966,6 +3136,19 @@ def _head_state_segment_reports(
             {
                 "requested_state": result.segment.state,
                 "frame_count": result.segment.frame_count,
+                "image_frame_count": result.segment.frame_count,
+                "expected_publish_count": _expected_head_publish_count(
+                    result.segment
+                ),
+                "publish_count": _int_count(summary.get("published")),
+                "pre_roll_samples": _head_publisher_pre_roll_samples(
+                    result.segment
+                ),
+                "tail_samples": _head_publisher_tail_samples(result.segment),
+                "pre_roll_duration_s": _head_publisher_pre_roll_duration_s(
+                    result.segment
+                ),
+                "tail_duration_s": _head_publisher_tail_duration_s(result.segment),
                 "head_state_hz": result.segment.head_state_hz,
                 "publisher_mode": "required",
                 "returncode": None
@@ -2999,6 +3182,18 @@ def _head_state_segment_reports(
             }
         )
     return reports
+
+
+def _head_result_publish_count(result: CommandResult | None) -> int | None:
+    if result is None:
+        return None
+    stdout_json, stdout_parse_error = _parse_head_publisher_stdout(result.stdout)
+    if stdout_parse_error is not None or stdout_json is None:
+        return None
+    published = stdout_json.get("published")
+    if isinstance(published, bool) or not isinstance(published, int):
+        return None
+    return published
 
 
 def _head_state_unknown_ratio(

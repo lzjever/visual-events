@@ -310,7 +310,7 @@ header 示例：
 
 详细字段、坐标、错误、backpressure 和断线语义见 [protocol.md](../common/schema/protocol.md)。
 
-不使用 gRPC，不让服务端接 DDS，不通过 Botified 发送高频状态。当前 GA acceptance/pass/fail authority 是 PC 本地模拟门禁；GA runtime 只发布一个高频 DDS gaze target，不发布完整 `visual_state` DDS：
+不使用 gRPC，不让服务端接 DDS，不通过 Botified 发送高频状态。事件语义由 server replay 逐帧验证；CLI PC E2E 验证 DDS/CLI/server/Botified/gaze 链路和不该出现的事件、重复、顺序、stdout 合同错误。GA runtime 只发布一个高频 DDS gaze target，不发布完整 `visual_state` DDS：
 
 ```text
 /visual_events/gaze_target  best_effort, keep_last=1, lifespan=250ms
