@@ -236,24 +236,24 @@ def test_visual_state_scene_context_reacquired_contract_for_cli():
     states = run_sequence(
         [
             (460.0, 100.0, 820.0, 620.0),
-            (462.0, 100.0, 822.0, 620.0),
+            (560.0, 240.0, 720.0, 480.0),
         ],
-        timestamps_ms=[1000, 2601],
+        timestamps_ms=[1000, 2000],
         head_motion="stationary",
     )
     visual_state = states[-1]
     target_reacquired = visual_state["scene_context"]["target_reacquired"]
 
     assert isinstance(target_reacquired, dict)
+    visible_track = next(track for track in visual_state["tracks"] if track["lost_ms"] == 0)
     assert set(target_reacquired) == REACQUIRE_KEYS
     assert target_reacquired["runtime_person_slot"] == 1
     assert target_reacquired["reacquired_from_track_id"] == 1
-    assert target_reacquired["reacquired_to_track_id"] == visual_state["tracks"][0][
-        "track_id"
-    ]
+    assert target_reacquired["reacquired_to_track_id"] == visible_track["track_id"]
     assert target_reacquired["reacquired_to_track_id"] != target_reacquired[
         "reacquired_from_track_id"
     ]
+    assert target_reacquired["reacquire_elapsed_ms"] == 1000
     assert_json_simple_and_finite(target_reacquired)
 
 

@@ -61,7 +61,7 @@ class EventConfig:
     wave_window_ms: int = 1800
     wave_min_x_span_px: float = 35.0
     wave_min_x_span_bbox_ratio: float = 0.12
-    reacquire_alias_window_ms: int = 5000
+    reacquire_alias_window_ms: int = 1200
     reacquire_center_distance_ratio: float = 0.08
 
     def __post_init__(self) -> None:

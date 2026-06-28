@@ -841,12 +841,17 @@ def test_nearby_reacquired_track_dedupes_greeting_after_global_cooldown():
     subject = EventEngine()
 
     first = make_wave_history(subject, track_id=1, start_ms=1000)
+    subject.update(
+        frame(frame_id=4, timestamp_ms=7000),
+        [track(1, timestamp_ms=7000, bbox_xyxy=(400.0, 150.0, 600.0, 450.0))],
+        attention(1),
+    )
     reacquired: list[dict] = []
     for index, wrist_x in enumerate((460.0, 545.0, 465.0)):
-        timestamp_ms = 7000 + (index * 600)
+        timestamp_ms = 8000 + (index * 600)
         reacquired.extend(
             subject.update(
-                frame(frame_id=4 + index, timestamp_ms=timestamp_ms),
+                frame(frame_id=5 + index, timestamp_ms=timestamp_ms),
                 [
                     track(
                         2,
@@ -880,12 +885,12 @@ def test_scene_context_reports_reacquired_attention_target_alias():
     )
 
     reacquired = subject.update(
-        frame(frame_id=2, timestamp_ms=2500),
+        frame(frame_id=2, timestamp_ms=2000),
         [
             track(
                 2,
-                timestamp_ms=2500,
-                first_seen_ms=2100,
+                timestamp_ms=2000,
+                first_seen_ms=1600,
                 bbox_xyxy=(410.0, 150.0, 610.0, 430.0),
             )
         ],
@@ -898,7 +903,7 @@ def test_scene_context_reports_reacquired_attention_target_alias():
         "runtime_person_slot": 1,
         "reacquired_from_track_id": 1,
         "reacquired_to_track_id": 2,
-        "reacquire_elapsed_ms": 1500,
+        "reacquire_elapsed_ms": 1000,
         "reacquire_center_distance_px": pytest.approx(math.hypot(10.0, 10.0)),
         "reacquire_area_ratio": pytest.approx(280.0 / 300.0),
     }
@@ -920,12 +925,12 @@ def test_scene_context_reacquired_is_one_frame_signal():
         attention(1),
     )
     reacquired = subject.update(
-        frame(frame_id=2, timestamp_ms=2500),
+        frame(frame_id=2, timestamp_ms=2000),
         [
             track(
                 2,
-                timestamp_ms=2500,
-                first_seen_ms=2100,
+                timestamp_ms=2000,
+                first_seen_ms=1600,
                 bbox_xyxy=(410.0, 150.0, 610.0, 430.0),
             )
         ],
@@ -937,7 +942,7 @@ def test_scene_context_reacquired_is_one_frame_signal():
             track(
                 2,
                 timestamp_ms=2800,
-                first_seen_ms=2100,
+                first_seen_ms=1600,
                 bbox_xyxy=(410.0, 150.0, 610.0, 430.0),
                 hits=3,
             )
@@ -966,7 +971,7 @@ def test_reacquired_event_evidence_includes_alias_source():
 
     emitted: list[dict] = []
     for index, wrist_x in enumerate((460.0, 545.0, 465.0)):
-        timestamp_ms = 2500 + (index * 600)
+        timestamp_ms = 2000 + (index * 600)
         emitted.extend(
             subject.update(
                 frame(frame_id=2 + index, timestamp_ms=timestamp_ms),
@@ -974,7 +979,7 @@ def test_reacquired_event_evidence_includes_alias_source():
                     track(
                         2,
                         timestamp_ms=timestamp_ms,
-                        first_seen_ms=2100,
+                        first_seen_ms=1600,
                         bbox_xyxy=(410.0, 150.0, 610.0, 430.0),
                         keypoints=keypoints(wrist_x=wrist_x),
                         hits=2 + index,
@@ -1002,23 +1007,79 @@ def test_reacquired_event_evidence_includes_alias_source():
         "runtime_person_slot": 1,
         "reacquired_from_track_id": 1,
         "reacquired_to_track_id": 2,
-        "reacquire_elapsed_ms": 1500,
+        "reacquire_elapsed_ms": 1000,
         "reacquire_center_distance_px": pytest.approx(math.hypot(10.0, 10.0)),
         "reacquire_area_ratio": pytest.approx(280.0 / 300.0),
     }
     assert_json_simple_and_finite(waves[0]["evidence"])
 
 
+def test_reacquire_evidence_not_added_after_default_alias_window():
+    subject = EventEngine()
+    subject.update(
+        frame(frame_id=1, timestamp_ms=1000),
+        [
+            track(
+                1,
+                timestamp_ms=1000,
+                first_seen_ms=600,
+                bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
+            )
+        ],
+        attention(1),
+    )
+
+    emitted: list[dict] = []
+    first_reacquire_candidate = None
+    for index, wrist_x in enumerate((460.0, 545.0, 465.0)):
+        timestamp_ms = 2500 + (index * 600)
+        result = subject.update(
+            frame(frame_id=2 + index, timestamp_ms=timestamp_ms),
+            [
+                track(
+                    2,
+                    timestamp_ms=timestamp_ms,
+                    first_seen_ms=2100,
+                    bbox_xyxy=(410.0, 150.0, 610.0, 430.0),
+                    keypoints=keypoints(wrist_x=wrist_x),
+                    hits=2 + index,
+                )
+            ],
+            attention(2),
+        )
+        if index == 0:
+            first_reacquire_candidate = result.scene_context["target_reacquired"]
+        emitted.extend(result.semantic_events)
+
+    waves = events_of(emitted, "person_waving")
+
+    assert first_reacquire_candidate is None
+    assert len(waves) == 1
+    assert waves[0]["evidence"]["runtime_person_slot"] == 2
+    assert not {
+        "reacquired_from_track_id",
+        "reacquired_to_track_id",
+        "reacquire_elapsed_ms",
+        "reacquire_center_distance_px",
+        "reacquire_area_ratio",
+    } & set(waves[0]["evidence"])
+
+
 def test_nearby_aliased_track_can_emit_greeting_after_alias_window():
     subject = EventEngine()
 
     first = make_wave_history(subject, track_id=1, start_ms=1000)
+    subject.update(
+        frame(frame_id=4, timestamp_ms=3000),
+        [track(1, timestamp_ms=3000, bbox_xyxy=(400.0, 150.0, 600.0, 450.0))],
+        attention(1),
+    )
     reacquired: list[dict] = []
     for index, wrist_x in enumerate((460.0, 545.0, 465.0)):
-        timestamp_ms = 7000 + (index * 600)
+        timestamp_ms = 4000 + (index * 600)
         reacquired.extend(
             subject.update(
-                frame(frame_id=4 + index, timestamp_ms=timestamp_ms),
+                frame(frame_id=5 + index, timestamp_ms=timestamp_ms),
                 [
                     track(
                         2,
@@ -1032,11 +1093,11 @@ def test_nearby_aliased_track_can_emit_greeting_after_alias_window():
         )
 
     subject.update(
-        frame(frame_id=7, timestamp_ms=9000),
+        frame(frame_id=8, timestamp_ms=6200),
         [
             track(
                 2,
-                timestamp_ms=9000,
+                timestamp_ms=6200,
                 bbox_xyxy=(400.0, 150.0, 600.0, 450.0),
                 keypoints=keypoints(wrist_x=500.0, wrist_confidence=0.1),
             )
@@ -1045,10 +1106,10 @@ def test_nearby_aliased_track_can_emit_greeting_after_alias_window():
     )
     late: list[dict] = []
     for index, wrist_x in enumerate((460.0, 545.0, 465.0)):
-        timestamp_ms = 12600 + (index * 600)
+        timestamp_ms = 7600 + (index * 600)
         late.extend(
             subject.update(
-                frame(frame_id=8 + index, timestamp_ms=timestamp_ms),
+                frame(frame_id=9 + index, timestamp_ms=timestamp_ms),
                 [
                     track(
                         2,
@@ -1067,6 +1128,13 @@ def test_nearby_aliased_track_can_emit_greeting_after_alias_window():
     assert "person_waving" not in event_names(reacquired)
     assert len(late_waves) == 1
     assert late_waves[0]["track_id"] == 2
+    assert not {
+        "reacquired_from_track_id",
+        "reacquired_to_track_id",
+        "reacquire_elapsed_ms",
+        "reacquire_center_distance_px",
+        "reacquire_area_ratio",
+    } & set(late_waves[0]["evidence"])
 
 
 def test_far_reacquired_track_can_emit_greeting_after_global_cooldown():
@@ -1317,7 +1385,7 @@ def test_event_config_defaults_are_documented_thresholds():
     assert config.wave_window_ms == 1800
     assert config.wave_min_x_span_px == 35
     assert config.wave_min_x_span_bbox_ratio == 0.12
-    assert config.reacquire_alias_window_ms == 5000
+    assert config.reacquire_alias_window_ms == 1200
     assert config.reacquire_center_distance_ratio == 0.08
 
 
