@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -54,6 +55,8 @@ VALID_HEAD_STATES = ("stationary", "moving", "unknown")
 DEFAULT_HEAD_STATE_SEGMENTS = VALID_HEAD_STATES
 MIN_HEAD_STATE_HZ = 9.0
 MIN_GAZE_PUBLISH_HZ = 9.0
+MAX_GAZE_PUBLISH_HZ = 10.0
+MIN_PC_GA_ATTENTION_SWITCH_CONFIRM_MS = 750.0
 MAX_CAPTURE_TO_GAZE_LATENCY_MS = 60_000.0
 PROCESS_COLLECTED_LINE_LIMIT = 4096
 PROCESS_READER_JOIN_TIMEOUT_S = 1.0
@@ -771,6 +774,7 @@ def _build_config(
     server_bin = _preflight_executable(args.server_bin, name="server-bin")
     cli_bin = _preflight_executable(args.cli_bin, name="cli-bin")
     server_config = _resolve_path(args.server_config) if args.server_config else None
+    _preflight_pc_ga_server_config(server_config, required=args.all_scenes)
     runtime_provenance = _preflight_runtime_provenance(
         server_bin=server_bin,
         cli_bin=cli_bin,
@@ -878,6 +882,40 @@ def _build_config(
         health_interval_s=args.health_interval_s,
         startup_grace_s=args.startup_grace_s,
     )
+
+
+def _preflight_pc_ga_server_config(
+    server_config: Path | None,
+    *,
+    required: bool,
+) -> None:
+    if server_config is None:
+        if required:
+            raise PreflightError("pc_ga_server_config_missing")
+        return
+    if not server_config.exists():
+        raise PreflightError("pc_ga_server_config_missing")
+    if not server_config.is_file():
+        raise PreflightError("pc_ga_server_config_invalid")
+    try:
+        with server_config.open("rb") as stream:
+            payload = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise PreflightError("pc_ga_server_config_invalid") from exc
+
+    attention = payload.get("attention")
+    if not isinstance(attention, dict):
+        raise PreflightError("pc_ga_attention_switch_confirm_ms_missing")
+    switch_confirm_ms = attention.get("switch_confirm_ms")
+    if isinstance(switch_confirm_ms, bool) or not isinstance(
+        switch_confirm_ms,
+        int | float,
+    ):
+        raise PreflightError("pc_ga_attention_switch_confirm_ms_missing")
+    if not math.isfinite(float(switch_confirm_ms)):
+        raise PreflightError("pc_ga_server_config_invalid")
+    if float(switch_confirm_ms) < MIN_PC_GA_ATTENTION_SWITCH_CONFIRM_MS:
+        raise PreflightError("pc_ga_attention_switch_confirm_ms_below_min")
 
 
 def _preflight_required_manifest_contract(manifest_report: dict[str, Any]) -> None:
@@ -1060,6 +1098,12 @@ def _run_smoke_result(
                     segment_failure_reasons.append(
                         f"gaze_target_count_shortfall{segment_suffix}"
                     )
+                segment_failure_reasons.extend(
+                    _capture_to_gaze_publish_latency_failure_reasons(
+                        gaze_summary,
+                        segment_suffix=segment_suffix,
+                    )
+                )
                 gaze_publish_hz = gaze_summary["fresh_gaze_publish_hz"]
                 if (
                     config.gaze_collection_mode == "duration"
@@ -1072,9 +1116,15 @@ def _run_smoke_result(
                     gaze_publish_hz["available"]
                     and gaze_publish_hz["pass"] is False
                 ):
-                    segment_failure_reasons.append(
-                        f"gaze_publish_hz_below_min{segment_suffix}"
-                    )
+                    hz = _finite_float(gaze_publish_hz.get("hz"))
+                    if hz is not None and hz > MAX_GAZE_PUBLISH_HZ:
+                        segment_failure_reasons.append(
+                            f"fresh_gaze_publish_hz_above_max{segment_suffix}"
+                        )
+                    else:
+                        segment_failure_reasons.append(
+                            f"gaze_publish_hz_below_min{segment_suffix}"
+                        )
                 segment_results.append(
                     SegmentSmokeResult(
                         segment=segment,
@@ -2140,6 +2190,22 @@ def _head_segment_failure_reasons(
     return reasons
 
 
+def _capture_to_gaze_publish_latency_failure_reasons(
+    gaze_summary: dict[str, Any],
+    *,
+    segment_suffix: str,
+) -> list[str]:
+    if _int_count(gaze_summary.get("accepted_count")) == 0:
+        return []
+    latency_summary = gaze_summary.get("capture_to_gaze_publish_ms")
+    if isinstance(latency_summary, dict):
+        if _int_count(latency_summary.get("invalid_sample_count")) > 0:
+            return [f"capture_to_gaze_publish_latency_invalid{segment_suffix}"]
+        if latency_summary.get("available") is True:
+            return []
+    return [f"capture_to_gaze_publish_latency_unavailable{segment_suffix}"]
+
+
 def _build_smoke_report(
     config: CliLocalE2EConfig,
     *,
@@ -2833,6 +2899,7 @@ def _gaze_publish_hz_summary(
             "last_publish_timestamp_ms": last_timestamp_ms,
             "hz": None,
             "min_hz": MIN_GAZE_PUBLISH_HZ,
+            "max_hz": MAX_GAZE_PUBLISH_HZ,
             "pass": None,
         }
 
@@ -2845,7 +2912,8 @@ def _gaze_publish_hz_summary(
         "last_publish_timestamp_ms": last_timestamp_ms,
         "hz": hz,
         "min_hz": MIN_GAZE_PUBLISH_HZ,
-        "pass": hz >= MIN_GAZE_PUBLISH_HZ,
+        "max_hz": MAX_GAZE_PUBLISH_HZ,
+        "pass": MIN_GAZE_PUBLISH_HZ <= hz <= MAX_GAZE_PUBLISH_HZ,
     }
 
 

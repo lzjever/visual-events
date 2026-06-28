@@ -362,6 +362,9 @@ def make_case(tmp_path: Path) -> dict[str, Path]:
     write_frame(data_dir / "scene-a" / "001.jpg")
     write_frame(data_dir / "scene-b" / "001.jpeg")
     out = tmp_path / "artifacts" / "cli-local-e2e.json"
+    server_config = tmp_path / "runtime" / "config" / "pc-ga-server.toml"
+    server_config.parent.mkdir(parents=True, exist_ok=True)
+    server_config.write_text("[attention]\nswitch_confirm_ms = 750\n", encoding="utf-8")
     runtime = make_runtime_distribution(tmp_path)
     build_dir = tmp_path / "build"
     dds_bridge = make_executable(build_dir / "visual_events_dds_bridge")
@@ -370,6 +373,7 @@ def make_case(tmp_path: Path) -> dict[str, Path]:
         "out": out,
         "server_bin": runtime["server_bin"],
         "cli_bin": runtime["cli_bin"],
+        "server_config": server_config,
         "runtime_root": runtime["runtime_root"],
         "runtime_venv": runtime["runtime_venv"],
         "runtime_bin_dir": runtime["runtime_bin_dir"],
@@ -459,8 +463,12 @@ def write_attention_oracle_manifest(
     return manifest_path
 
 
-def base_argv(paths: dict[str, Path], *extra: str) -> list[str]:
-    return [
+def base_argv(
+    paths: dict[str, Path],
+    *extra: str,
+    include_server_config: bool = True,
+) -> list[str]:
+    argv = [
         "--data-dir",
         os.fspath(paths["data_dir"]),
         "--out",
@@ -475,6 +483,11 @@ def base_argv(paths: dict[str, Path], *extra: str) -> list[str]:
         "57",
         "--dds-network",
         "lo",
+    ]
+    if include_server_config:
+        argv.extend(["--server-config", os.fspath(paths["server_config"])])
+    return [
+        *argv,
         *extra,
     ]
 
@@ -535,7 +548,7 @@ def successful_runner(
         sync_results={
             "gaze_subscriber": FakeResult(
                 0,
-                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+                stdout=valid_gaze_stdout(),
             )
         },
         process_results={
@@ -594,6 +607,19 @@ def gaze_jsonl(*payloads: dict[str, Any]) -> str:
     return "".join(
         json.dumps(payload, separators=(",", ":")) + "\n"
         for payload in payloads
+    )
+
+
+def valid_gaze_stdout() -> str:
+    return gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 990,
+            "publish_timestamp_ms": 1000,
+        }
     )
 
 
@@ -756,7 +782,95 @@ def test_preflight_rejects_non_loopback_without_allow_and_writes_report(
     report = load_report(paths["out"])
     assert report["pc_local_e2e_status"] == "preflight_failed"
     assert any("--allow-non-loopback-dds" in reason for reason in report["failure_reasons"])
+    assert_runtime_provenance_success(
+        report,
+        paths,
+        config_hash=sha256_file(paths["server_config"]),
+    )
+    assert report["server_exit_code"] is None
+
+
+def test_current_pc_core_preflight_requires_server_config(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = FakeRunner()
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--full-scene",
+            "--all-scenes",
+            include_server_config=False,
+        ),
+        runner=runner,
+    )
+
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert "pc_ga_server_config_missing" in captured.err
+    assert runner.events == []
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert report["failure_reasons"] == ["pc_ga_server_config_missing"]
+    assert report["server_exit_code"] is None
+    assert report["cli_exit_code"] is None
+
+
+def test_partial_smoke_without_server_config_keeps_config_hash_none(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    runner = successful_runner()
+
+    rc = module.main(
+        base_argv(
+            paths,
+            "--head-state",
+            "stationary",
+            include_server_config=False,
+        ),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
+    assert report["failure_reasons"] == []
     assert_runtime_provenance_success(report, paths, config_hash=None)
+    assert report["runtime_provenance"]["config_path"] is None
+    assert "--config" not in runner.commands["server"]
+
+
+def test_current_pc_core_preflight_rejects_attention_switch_confirm_below_min(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    paths["server_config"].write_text(
+        "[attention]\nswitch_confirm_ms = 749\n",
+        encoding="utf-8",
+    )
+    runner = FakeRunner()
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert "pc_ga_attention_switch_confirm_ms_below_min" in captured.err
+    assert runner.events == []
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "preflight_failed"
+    assert report["failure_reasons"] == [
+        "pc_ga_attention_switch_confirm_ms_below_min"
+    ]
     assert report["server_exit_code"] is None
     assert report["cli_exit_code"] is None
 
@@ -779,9 +893,7 @@ def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Pat
         sync_results={
             "gaze_subscriber": FakeResult(
                 0,
-                stdout=(
-                    '{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n'
-                ),
+                stdout=valid_gaze_stdout(),
             )
         }
     )
@@ -817,6 +929,8 @@ def test_command_construction_uses_required_args_and_wrapper_paths(tmp_path: Pat
         "127.0.0.1",
         "--port",
         "8877",
+        "--config",
+        os.fspath(paths["server_config"]),
     ]
     assert runner.commands["cli"] == [
         os.fspath(paths["cli_bin"]),
@@ -2368,7 +2482,7 @@ def test_segment_head_publisher_failure_or_malformed_json_fails_partial_slice(
         sync_results={
             "gaze_subscriber": FakeResult(
                 0,
-                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+                stdout=valid_gaze_stdout(),
             )
         },
         process_results={"head_publisher:moving": process_result},
@@ -2466,7 +2580,7 @@ def test_head_state_native_json_evidence_enforces_segment_mapping(
         sync_results={
             "gaze_subscriber": FakeResult(
                 0,
-                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+                stdout=valid_gaze_stdout(),
             )
         },
         process_results=process_results,
@@ -2486,7 +2600,7 @@ def test_legacy_scalar_fields_use_first_failing_segment(tmp_path: Path) -> None:
         sync_results={
             "gaze_subscriber": FakeResult(
                 0,
-                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+                stdout=valid_gaze_stdout(),
             )
         },
         process_results={
@@ -2537,7 +2651,7 @@ def test_image_failure_reason_is_segment_specific(tmp_path: Path) -> None:
         sync_results={
             "gaze_subscriber": FakeResult(
                 0,
-                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+                stdout=valid_gaze_stdout(),
             ),
             "image_publisher:moving": FakeResult(4, stderr="moving image failed"),
         }
@@ -2581,9 +2695,25 @@ def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -
             "gaze_subscriber": FakeResult(
                 0,
                 stdout=(
-                    '{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n'
-                    '{"type":"gaze_target","camera":"front","state":"lost","valid":false}\n'
-                    '{"type":"other","camera":"front","state":"tracking"}\n'
+                    gaze_jsonl(
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "tracking",
+                            "valid": True,
+                            "frame_timestamp_ms": 990,
+                            "publish_timestamp_ms": 1000,
+                        },
+                        {
+                            "type": "gaze_target",
+                            "camera": "front",
+                            "state": "lost",
+                            "valid": False,
+                            "frame_timestamp_ms": 1090,
+                            "publish_timestamp_ms": 1100,
+                        },
+                    )
+                    + '{"type":"other","camera":"front","state":"tracking"}\n'
                 ),
             )
         }
@@ -2655,7 +2785,11 @@ def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -
         "contract_violations": [],
     }
     assert "full_scene_matrix" in report["not_covered"]
-    assert_runtime_provenance_success(report, paths, config_hash=None)
+    assert_runtime_provenance_success(
+        report,
+        paths,
+        config_hash=sha256_file(paths["server_config"]),
+    )
     assert report["server_exit_code"] == -15
     assert report["cli_exit_code"] == -15
 
@@ -2772,7 +2906,7 @@ def test_gaze_timestamps_report_latency_and_publish_hz_per_segment(
     assert evidence["latency"] == report["latency"]
 
 
-def test_missing_or_invalid_gaze_timestamps_are_unavailable_without_failure(
+def test_invalid_gaze_latency_is_current_pc_core_hard_gate(
     tmp_path: Path,
 ) -> None:
     module = import_runner_module()
@@ -2802,10 +2936,13 @@ def test_missing_or_invalid_gaze_timestamps_are_unavailable_without_failure(
         runner=runner,
     )
 
-    assert rc == 0
+    assert rc != 0
     report = load_report(paths["out"])
-    assert report["slice_pass"] is True
-    assert report["failure_reasons"] == []
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+    assert report["slice_pass"] is False
+    assert "capture_to_gaze_publish_latency_invalid:segment=stationary" in report[
+        "failure_reasons"
+    ]
     latency = report["gaze"]["capture_to_gaze_publish_ms"]
     assert latency == {
         "available": False,
@@ -2836,7 +2973,7 @@ def test_missing_or_invalid_gaze_timestamps_are_unavailable_without_failure(
     assert report["evidence_summary"]["latency"] == report["latency"]
 
 
-def test_huge_gaze_timestamp_delta_is_unavailable_without_partial_failure(
+def test_huge_gaze_timestamp_delta_fails_basic_latency_sanity(
     tmp_path: Path,
 ) -> None:
     module = import_runner_module()
@@ -2868,14 +3005,16 @@ def test_huge_gaze_timestamp_delta_is_unavailable_without_partial_failure(
         runner=runner,
     )
 
-    assert rc == 0
+    assert rc != 0
     report = load_report(paths["out"])
-    assert report["pc_local_e2e_status"] == "partial_smoke_pass"
-    assert report["slice_pass"] is True
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+    assert report["slice_pass"] is False
     assert report["overall_pass"] is False
     assert report["ga_gate_pass"] is False
     assert "latency_p95_p99" in report["not_covered"]
-    assert report["failure_reasons"] == []
+    assert "capture_to_gaze_publish_latency_invalid:segment=stationary" in report[
+        "failure_reasons"
+    ]
 
     latency = report["gaze"]["capture_to_gaze_publish_ms"]
     assert latency == {
@@ -3005,6 +3144,54 @@ def test_fresh_gaze_publish_hz_gate_ignores_stale_samples(
     assert report["evidence_summary"]["gaze"]["rate_pass"] is True
 
 
+def test_fresh_gaze_publish_hz_above_max_fails_with_segment_reason(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    gaze_stdout = gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 990,
+            "publish_timestamp_ms": 1000,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1040,
+            "publish_timestamp_ms": 1050,
+        },
+    )
+    runner = FakeRunner(
+        sync_results={"gaze_subscriber": FakeResult(0, stdout=gaze_stdout)}
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary", "--gaze-count", "2"),
+        runner=runner,
+    )
+
+    assert rc != 0
+    report = load_report(paths["out"])
+    assert report["pc_local_e2e_status"] == "partial_smoke_failed"
+    assert report["slice_pass"] is False
+    assert "fresh_gaze_publish_hz_above_max:segment=stationary" in report[
+        "failure_reasons"
+    ]
+    fresh_hz = report["gaze"]["fresh_gaze_publish_hz"]
+    assert fresh_hz["available"] is True
+    assert fresh_hz["hz"] == pytest.approx(20.0)
+    assert fresh_hz["min_hz"] == 9.0
+    assert fresh_hz["max_hz"] == 10.0
+    assert fresh_hz["pass"] is False
+    assert report["evidence_summary"]["gaze"]["rate_pass"] is False
+
+
 def test_non_monotonic_gaze_publish_timestamps_make_hz_unavailable_without_partial_failure(
     tmp_path: Path,
 ) -> None:
@@ -3068,6 +3255,7 @@ def test_non_monotonic_gaze_publish_timestamps_make_hz_unavailable_without_parti
         "last_publish_timestamp_ms": 1500.0,
         "hz": None,
         "min_hz": 9.0,
+        "max_hz": 10.0,
         "pass": None,
     }
     assert report["evidence_summary"]["gaze"]["rate_pass"] is None
@@ -3189,7 +3377,10 @@ def test_success_report_hashes_runtime_provenance_and_server_config(tmp_path: Pa
     paths = make_case(tmp_path)
     server_config = tmp_path / "runtime" / "config" / "s2.toml"
     server_config.parent.mkdir(parents=True, exist_ok=True)
-    server_config.write_text("[server]\nmode = 'smoke'\n", encoding="utf-8")
+    server_config.write_text(
+        "[server]\nmode = 'smoke'\n\n[attention]\nswitch_confirm_ms = 750\n",
+        encoding="utf-8",
+    )
     runner = successful_runner()
 
     rc = module.main(
@@ -3379,7 +3570,7 @@ def test_unexpected_server_or_cli_exit_code_fails_partial_slice(
         sync_results={
             "gaze_subscriber": FakeResult(
                 0,
-                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+                stdout=valid_gaze_stdout(),
             )
         },
         initial_process_returncodes={process_name: returncode},
@@ -3508,7 +3699,7 @@ def test_preflight_accepts_normalized_runtime_metadata_name(tmp_path: Path) -> N
     assert_runtime_provenance_success(
         report,
         paths,
-        config_hash=None,
+        config_hash=sha256_file(paths["server_config"]),
         wheel_name="visual_events_server",
     )
     assert report["runtime_provenance"]["wheel_name"] == "visual_events_server"
@@ -3913,7 +4104,7 @@ def test_botified_stdout_untrustworthy_collection_fails_partial_slice(
         sync_results={
             "gaze_subscriber": FakeResult(
                 0,
-                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+                stdout=valid_gaze_stdout(),
             )
         },
         process_results={"cli": process_result},
@@ -4209,7 +4400,7 @@ def test_partial_smoke_does_not_claim_pc_simulated_or_real_robot_ga_pass(
         sync_results={
             "gaze_subscriber": FakeResult(
                 0,
-                stdout='{"type":"gaze_target","camera":"front","state":"tracking","valid":true}\n',
+                stdout=valid_gaze_stdout(),
             )
         }
     )
