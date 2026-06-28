@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from visual_events_cli.dds.bridge_protocol import (
+    BridgeCameraJpegFrame,
     BridgeErrorFrame,
     BridgeHeadStateFrame,
     ProtocolError,
@@ -201,8 +202,9 @@ class DdsBridgeProcess:
                 self.invalid_line_count += 1
             return
 
-        if isinstance(frame, CameraJpegMessage):
-            input_frame = frame.to_input_frame()
+        if isinstance(frame, BridgeCameraJpegFrame):
+            message = self._camera_message_from_bridge_frame(frame)
+            input_frame = message.to_input_frame()
             if input_frame is None:
                 with self._lock:
                     self.dropped_camera_count += 1
@@ -256,21 +258,45 @@ class DdsBridgeProcess:
                 self._mark_fatal(f"DDS bridge stdin write failed: {exc}")
                 return
 
+    def _camera_message_from_bridge_frame(
+        self,
+        frame: BridgeCameraJpegFrame,
+    ) -> CameraJpegMessage:
+        timestamp_ns = (
+            frame.dds_timestamp_ns
+            if frame.dds_timestamp_ns > 0
+            and frame.dds_timestamp_ns <= frame.received_monotonic_ns
+            else frame.received_monotonic_ns
+        )
+        return CameraJpegMessage(
+            camera=frame.camera,
+            timestamp_ms=self._monotonic_to_wall_ms(timestamp_ns),
+            width=frame.width,
+            height=frame.height,
+            encoding=frame.encoding,
+            data=frame.data,
+        )
+
     def _head_state_sample_from_bridge_frame(
         self,
         frame: BridgeHeadStateFrame,
     ) -> HeadStateSample:
-        offset_ms = self._monotonic_to_wall_offset_ms
-        if offset_ms is None:
-            offset_ms = int(self._wall_clock_ms()) - int(self._monotonic_ns()) // 1_000_000
         return HeadStateSample(
-            timestamp_ms=frame.received_monotonic_ns // 1_000_000 + offset_ms,
+            timestamp_ms=self._monotonic_to_wall_ms(frame.received_monotonic_ns),
             valid=frame.valid,
             yaw_rad=frame.yaw_rad,
             pitch_rad=frame.pitch_rad,
             yaw_vel_rad_s=frame.yaw_vel_rad_s,
             pitch_vel_rad_s=frame.pitch_vel_rad_s,
         )
+
+    def _monotonic_to_wall_ms(self, monotonic_ns: int) -> int:
+        offset_ms = self._monotonic_to_wall_offset_ms
+        if offset_ms is None:
+            offset_ms = (
+                int(self._wall_clock_ms()) - int(self._monotonic_ns()) // 1_000_000
+            )
+        return int(monotonic_ns) // 1_000_000 + offset_ms
 
     def _terminate_process(self, process: Any) -> None:
         try:

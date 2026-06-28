@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from visual_events_cli.dds.types import CameraJpegMessage
 from visual_events_cli.target_mapper import GazeTargetPayload
 
 
@@ -53,6 +52,17 @@ class BridgeErrorFrame:
 
 
 @dataclass(frozen=True)
+class BridgeCameraJpegFrame:
+    dds_timestamp_ns: int
+    received_monotonic_ns: int
+    camera: str
+    width: int
+    height: int
+    encoding: str
+    data: bytes
+
+
+@dataclass(frozen=True)
 class BridgeHeadStateFrame:
     dds_timestamp_ns: int
     received_monotonic_ns: int
@@ -65,7 +75,7 @@ class BridgeHeadStateFrame:
 
 
 BridgeInboundFrame = (
-    CameraJpegMessage | BridgeHeadStateFrame | BridgeStatusFrame | BridgeErrorFrame
+    BridgeCameraJpegFrame | BridgeHeadStateFrame | BridgeStatusFrame | BridgeErrorFrame
 )
 
 
@@ -152,12 +162,12 @@ def _decode_camera_jpeg(
     payload: Mapping[str, Any],
     *,
     logical_camera_name: str,
-) -> CameraJpegMessage:
+) -> BridgeCameraJpegFrame:
     if "data" in payload:
         raise ProtocolError("camera_jpeg raw data field is not accepted")
 
     dds_timestamp_ns = _required_int(payload, "dds_timestamp_ns")
-    _required_int(payload, "received_monotonic_ns")
+    received_monotonic_ns = _required_int(payload, "received_monotonic_ns")
     _required_str(payload, "camera_name")
     width = _required_positive_int(payload, "width")
     height = _required_positive_int(payload, "height")
@@ -174,9 +184,10 @@ def _decode_camera_jpeg(
     if len(data) != data_size_bytes:
         raise ProtocolError("camera_jpeg data_size_bytes does not match payload")
 
-    return CameraJpegMessage(
+    return BridgeCameraJpegFrame(
+        dds_timestamp_ns=dds_timestamp_ns,
+        received_monotonic_ns=received_monotonic_ns,
         camera=str(logical_camera_name),
-        timestamp_ms=dds_timestamp_ns // 1_000_000,
         width=width,
         height=height,
         encoding=encoding,

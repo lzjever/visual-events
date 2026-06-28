@@ -2091,6 +2091,61 @@ def test_huge_gaze_timestamp_delta_is_unavailable_without_partial_failure(
     assert report["evidence_summary"]["latency"] == report["latency"]
 
 
+def test_wall_aligned_gaze_latency_summary_is_available(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    gaze_stdout = gaze_jsonl(
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1_700_000_000_000,
+            "publish_timestamp_ms": 1_700_000_000_010,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1_700_000_000_100,
+            "publish_timestamp_ms": 1_700_000_000_125,
+        },
+        {
+            "type": "gaze_target",
+            "camera": "front",
+            "state": "tracking",
+            "valid": True,
+            "frame_timestamp_ms": 1_700_000_000_200,
+            "publish_timestamp_ms": 1_700_000_000_230,
+        },
+    )
+    runner = FakeRunner(
+        sync_results={"gaze_subscriber": FakeResult(0, stdout=gaze_stdout)}
+    )
+
+    rc = module.main(
+        base_argv(paths, "--head-state", "stationary", "--gaze-count", "3"),
+        runner=runner,
+    )
+
+    assert rc == 0
+    report = load_report(paths["out"])
+    latency = report["gaze"]["capture_to_gaze_publish_ms"]
+    assert latency == {
+        "available": True,
+        "sample_count": 3,
+        "invalid_sample_count": 0,
+        "p50": 25.0,
+        "p95": 30.0,
+        "p99": 30.0,
+    }
+    assert report["latency"]["capture_to_gaze_publish_ms"] == latency
+    assert report["evidence_summary"]["latency"] == report["latency"]
+
+
 def test_fresh_gaze_publish_hz_gate_ignores_stale_samples(
     tmp_path: Path,
 ) -> None:

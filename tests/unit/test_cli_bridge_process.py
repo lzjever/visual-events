@@ -157,12 +157,19 @@ def make_process(
     return module.DdsBridgeProcess(config, **kwargs)
 
 
-def camera_payload(timestamp_ns: int, *, data: bytes = JPEG_1280X720) -> dict[str, Any]:
+def camera_payload(
+    timestamp_ns: int,
+    *,
+    data: bytes = JPEG_1280X720,
+    received_monotonic_ns: int | None = None,
+) -> dict[str, Any]:
     return {
         "protocol_version": 1,
         "type": "camera_jpeg",
         "dds_timestamp_ns": timestamp_ns,
-        "received_monotonic_ns": 99_000_000,
+        "received_monotonic_ns": (
+            timestamp_ns if received_monotonic_ns is None else received_monotonic_ns
+        ),
         "camera_name": "dds-front",
         "width": 1280,
         "height": 720,
@@ -287,6 +294,59 @@ def test_stdout_reader_keeps_latest_valid_camera_and_head_only_and_drops_bad_jpe
     assert sample.timestamp_ms == 1_200
     assert sample.yaw_vel_rad_s == pytest.approx(0.05)
 
+    process.close()
+
+
+def test_camera_source_monotonic_timestamp_is_converted_to_wall_time():
+    module = import_bridge_process()
+    fake = FakeProcess()
+    process = make_process(
+        module,
+        fake,
+        wall_clock_ms=lambda: 1_700_000_000_000,
+        monotonic_ns=lambda: 5_000_000_000,
+    )
+    process.start()
+
+    fake.stdout.push_json(
+        camera_payload(
+            5_050_000_000,
+            received_monotonic_ns=5_060_000_000,
+        )
+    )
+    wait_until(lambda: fake.stdout.read_count >= 1)
+
+    frame = process.poll_latest_camera()
+    assert frame is not None
+    assert frame.timestamp_ms == 1_700_000_000_050
+    process.close()
+
+
+@pytest.mark.parametrize("dds_timestamp_ns", [0, 1_710_000_000_050_000_000])
+def test_camera_zero_or_cross_domain_source_timestamp_falls_back_to_received_monotonic(
+    dds_timestamp_ns: int,
+) -> None:
+    module = import_bridge_process()
+    fake = FakeProcess()
+    process = make_process(
+        module,
+        fake,
+        wall_clock_ms=lambda: 1_700_000_000_000,
+        monotonic_ns=lambda: 5_000_000_000,
+    )
+    process.start()
+
+    fake.stdout.push_json(
+        camera_payload(
+            dds_timestamp_ns,
+            received_monotonic_ns=5_050_000_000,
+        )
+    )
+    wait_until(lambda: fake.stdout.read_count >= 1)
+
+    frame = process.poll_latest_camera()
+    assert frame is not None
+    assert frame.timestamp_ms == 1_700_000_000_050
     process.close()
 
 
