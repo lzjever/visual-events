@@ -4,7 +4,7 @@
 
 后续 GA 开发以 [GA 后续开发计划](ga-development-plan.md) 为准。本文保留早期总体设计背景，并已同步关键边界：机器人 CLI 只发布 DDS gaze target，不直接操纵运控。
 
-当前阶段优先核心 server/CLI MVP runtime path：真实 server、正式 CLI runtime、DDS image/head/gaze、Botified event 输出，以及 PC local DDS E2E with `val-data`。直接验证这条路径的必要轻量稳定性和 latency 检查仍是当前核心工作；release report、handoff audit、full fault matrix、long soak、field/real robot gate 属于核心 runtime path 跑通后的交付审计/硬件层。只有直接保护运行边界或用户明确要求时才添加 governance/report/audit/gate 工作。
+当前 GA acceptance/pass/fail authority 是 PC 本地模拟：synthetic DDS image/head-state publishers、runtime server/CLI、DDS gaze subscriber/stdout collector、`val-data` full PC E2E，以及必要轻量稳定性和 latency checks。真机实际运行、真实 robot camera DDS、真实 head-state source、physical head pointing、HIL/real closed loop、现场测试或 owner sign-off 不阻塞 GA；RK3588/board/real robot/field validation 属于 GA 之后的硬件适配/现场验证。只有直接保护运行边界或用户明确要求时才添加 governance/report/audit/gate 工作。
 
 ## 1. 开发原则
 

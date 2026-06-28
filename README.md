@@ -2,7 +2,7 @@
 
 视觉事件推理服务。当前 repo 已包含 S0-S8 server baseline：WebSocket wire protocol parser/serializer、mock `visual_state` endpoint、`val-data` replay/E2E 工具、S2 推理 backend 边界和 Ultralytics pose adapter、S3 项目内 ByteTrack-style IoU/TTL tracker baseline、S4 attention selector、S5 semantic events、支持 S6/S6.1/S6.3/S8 E2E/perf/soak、semantic event first-trigger/timeline gate 和 opt-in server metrics evidence 的 `tools/run_val_data_e2e.py`，以及 release/runtime smoke verification 工具 `tools/run_runtime_smoke.py`。首个产品场景是商店门口揽客机器人。
 
-当前阶段优先推进核心 server/CLI MVP runtime path：真实 server、正式 CLI runtime、DDS image/head/gaze、Botified event 输出，以及 PC local DDS E2E with `val-data`。直接验证这条路径的必要轻量稳定性和 latency 检查仍是当前核心工作；manifest/evidence/strict gate 等已有工作只作为有限证据保留。Release report、handoff audit、full fault matrix、long soak、field/real robot gate 属于核心路径跑通后的交付审计/硬件层，不能替代实际 runtime E2E。
+当前 GA acceptance/pass/fail authority 是 PC 本地模拟：synthetic DDS image/head-state publishers、runtime server/CLI、DDS gaze subscriber/stdout collector、`val-data` full PC E2E，以及必要轻量稳定性和 latency checks。manifest/evidence/strict gate 等已有工作只作为有限证据保留。真机实际运行、真实 robot camera DDS、真实 head-state source、physical head pointing、HIL/real closed loop、现场测试或 owner sign-off 不阻塞 GA；RK3588/board/real robot/field validation 属于 GA 之后的硬件适配/现场验证，PC evidence 只能声称 PC-simulated GA passed。
 
 本 repo 计划包含两个运行单元，并包含开发/验证工具：
 
