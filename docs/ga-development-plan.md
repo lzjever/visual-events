@@ -4,7 +4,7 @@
 
 ## 1. 目标
 
-本计划覆盖 `visual-events` 从当前 server S0-S8 baseline 走到 GA 的剩余工作和当前收口状态。当前 PC 本地核心功能门禁（current PC core functional gate）已经收敛到真实 server、正式 CLI runtime、DDS image/head/gaze、`val-data` full-scene matrix 和 Botified event oracle；直接保护这条路径的必要轻量检查仍是当前核心工作。release report、handoff audit、full fault matrix、long soak、field/real robot validation 属于 GA 后交付审计/硬件层，不在当前核心实现切片中扩张。
+本计划覆盖 `visual-events` 从当前 server S0-S8 baseline 走到 GA 的剩余工作和当前收口状态。当前 PC 本地核心功能门禁（current PC core functional gate）已经收敛到真实 server、正式 CLI runtime、DDS image/head/gaze、`val-data` full-scene matrix 和 Botified event oracle；直接保护这条路径的必要轻量检查仍是当前核心工作。release report skeleton、handoff audit、manifest/schema 审计扩张、full fault matrix、long soak、field/real robot validation 属于 GA 后交付审计/硬件层，不在当前核心实现切片中扩张。
 
 首个 GA 场景是商店门口揽客机器人。系统必须在 nominal 10Hz DDS image 输入下稳定观察前方画面，识别人、追踪人、生成低频语义事件，并以 nominal 10Hz 输出 gaze target：每个新鲜 `visual_state` 派生一条 valid 或 invalid gaze target（实际目标 >=9Hz 且 <=10Hz），让机器人可以注视画面中最大且稳定的人。CLI/bridge 是 keep-latest + one-in-flight，等待期间可丢弃旧 DDS 输入帧，不补发旧帧、不用重复旧 target 凑频率。断线或状态过期后，CLI 在 250ms 内发布一次 invalid/stale gaze target，然后依赖 DDS lifespan 失效，不承诺断线期间继续 >=9Hz heartbeat。
 
@@ -32,7 +32,7 @@
 - 运行隔离：继续使用 `uv`；开发环境和 release/runtime 环境分开；不污染系统和用户目录；模型、cache、artifacts 不进 Git。
 - Artifact 可追溯：`val-data/` 不进 Git；当前只保留能直接保护核心 runtime path 的有限 evidence，如 manifest 身份、runtime/config hash、Botified event oracle 和关键 PC E2E 摘要。不要把 release report/handoff audit 当成当前实现切片。
 - 输出隔离：CLI stdout 是 Botified allowlist 输出，不是调试通道；高频 attention/gaze 状态不得泄漏到 Botified。
-- 治理克制：governance/report/audit/gate 层只能在直接保护核心运行边界或用户明确要求时添加。已完成的 manifest/evidence/strict gate 工作保留为有限 evidence，不再继续扩张，不能替代 MVP runtime path。
+- 治理克制：governance/report/audit/gate 层只能在直接保护核心运行边界或用户明确要求时添加。开发顺序以 server/CLI core runtime path 和 PC local E2E 为先；release report skeleton、manifest/schema 审计层和 handoff audit 不早于 core server/CLI MVP。已完成的 manifest/evidence/strict gate 工作保留为有限 evidence，不再继续扩张，不能替代 MVP runtime path。
 - TDD 边界：只对核心功能和高风险集成做 TDD；不要为测试工具、报告骨架、文档文字再堆“测试测试”。
 
 ## 3. 当前基线

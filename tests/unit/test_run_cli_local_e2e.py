@@ -26,6 +26,7 @@ class FakeResult:
     returncode: int
     stdout: str = ""
     stderr: str = ""
+    stdout_line_timestamps_ms: list[int] | None = None
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     collection_incomplete: bool = False
@@ -47,6 +48,7 @@ class FakeProcess:
         *,
         stdout: str = "",
         stderr: str = "",
+        stdout_line_timestamps_ms: list[int] | None = None,
         stdout_truncated: bool = False,
         stderr_truncated: bool = False,
         collection_incomplete: bool = False,
@@ -57,6 +59,8 @@ class FakeProcess:
         self.stopped = False
         self.stdout_lines = stdout.splitlines()
         self.stderr_lines = stderr.splitlines()
+        if stdout_line_timestamps_ms is not None:
+            self.stdout_line_timestamps_ms = list(stdout_line_timestamps_ms)
         self.stdout_tail = stdout if stdout else f"{name} stdout tail"
         self.stderr_tail = stderr if stderr else f"{name} stderr tail"
         self.stdout_truncated = stdout_truncated
@@ -153,6 +157,7 @@ class FakeRunner:
             self._next_pid,
             stdout=result.stdout,
             stderr=result.stderr,
+            stdout_line_timestamps_ms=result.stdout_line_timestamps_ms,
             stdout_truncated=result.stdout_truncated,
             stderr_truncated=result.stderr_truncated,
             collection_incomplete=result.collection_incomplete,
@@ -556,6 +561,35 @@ def botified_frame(
     return f"<botified>{inner}</botified>\n"
 
 
+def unavailable_botified_output_limits(module: Any) -> dict[str, Any]:
+    return {
+        "per_track_event_60s": {
+            "available": False,
+            "passed": None,
+            "max_count": 0,
+            "threshold": module.BOTIFIED_OUTPUT_LIMIT_PER_TRACK_EVENT_60S_THRESHOLD,
+            "window_ms": module.BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+            "violations": [],
+        },
+        "global_60s": {
+            "available": False,
+            "passed": None,
+            "max_count": 0,
+            "threshold": module.BOTIFIED_OUTPUT_LIMIT_GLOBAL_60S_THRESHOLD,
+            "window_ms": module.BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+            "violations": [],
+        },
+        "burst_1s": {
+            "available": False,
+            "passed": None,
+            "max_count": 0,
+            "threshold": module.BOTIFIED_OUTPUT_LIMIT_BURST_1S_THRESHOLD,
+            "window_ms": module.BOTIFIED_OUTPUT_LIMIT_1S_WINDOW_MS,
+            "violations": [],
+        },
+    }
+
+
 def gaze_jsonl(*payloads: dict[str, Any]) -> str:
     return "".join(
         json.dumps(payload, separators=(",", ":")) + "\n"
@@ -588,10 +622,20 @@ def successful_full_scene_gaze_result() -> FakeResult:
     )
 
 
-def successful_full_scene_matrix_runner(*, cli_stdout: str) -> FakeRunner:
+def successful_full_scene_matrix_runner(
+    *,
+    cli_stdout: str,
+    cli_stdout_line_timestamps_ms: list[int] | None = None,
+) -> FakeRunner:
     return FakeRunner(
         sync_results={"gaze_subscriber": successful_full_scene_gaze_result()},
-        process_results={"cli": FakeResult(0, stdout=cli_stdout)},
+        process_results={
+            "cli": FakeResult(
+                0,
+                stdout=cli_stdout,
+                stdout_line_timestamps_ms=cli_stdout_line_timestamps_ms,
+            )
+        },
     )
 
 
@@ -1412,6 +1456,104 @@ def test_all_scenes_full_scene_botified_event_oracle_passes(tmp_path: Path) -> N
             "duplicate_greeting_violations": [],
         }
     ]
+
+
+def test_all_scenes_full_scene_output_limit_failure_blocks_pc_gate(
+    tmp_path: Path,
+) -> None:
+    module = import_runner_module()
+    paths = make_case(tmp_path)
+    replace_scenes(paths, ["pci_stand"])
+    write_attention_oracle_manifest(
+        module,
+        paths,
+        {
+            "pci_stand": [
+                {
+                    "start_frame_timestamp_ms": 990,
+                    "end_frame_timestamp_ms": 990,
+                    "target_track_id": 1,
+                },
+                {
+                    "start_frame_timestamp_ms": 1090,
+                    "end_frame_timestamp_ms": 1090,
+                    "no_target": True,
+                },
+            ],
+        },
+    )
+    cli_stdout = (
+        botified_frame(
+            "person_appeared",
+            event_id="front:evt_000450",
+            track_id=1,
+        )
+        + botified_frame(
+            "person_appeared",
+            event_id="front:evt_000451",
+            track_id=1,
+        )
+        + botified_frame(
+            "person_stopped_near_robot",
+            event_id="front:evt_000452",
+            track_id=1,
+        )
+    )
+    runner = successful_full_scene_matrix_runner(
+        cli_stdout=cli_stdout,
+        cli_stdout_line_timestamps_ms=[0, 1000, 2000],
+    )
+
+    rc = module.main(
+        base_argv(paths, "--full-scene", "--all-scenes", "--head-state", "stationary"),
+        runner=runner,
+    )
+
+    assert rc == 1
+    report = load_report(paths["out"])
+    assert report["slice_matrix_pass"] is False
+    assert report["current_pc_core_gate_pass"] is False
+    assert report["ga_gate_pass"] is False
+    assert report["oracle_evaluation_passed"] is True
+    assert report["gaze_attention_oracle"]["passed"] is True
+    assert "scene_failed:pci_stand" in report["failure_reasons"]
+    assert "pci_stand:botified_stdout_output_limit_per_track_event_60s" in report[
+        "failure_reasons"
+    ]
+    scene_report = report["scene_results"][0]
+    assert scene_report["scene"] == "pci_stand"
+    assert scene_report["slice_pass"] is False
+    assert scene_report["failure_reasons"] == [
+        "botified_stdout_output_limit_per_track_event_60s"
+    ]
+    assert report["botified_event_oracle"]["passed"] is True
+    assert report["botified_event_oracle"]["scenes"][0]["observed"] == {
+        "person_appeared": 2,
+        "person_stopped_near_robot": 1,
+    }
+    output_limits = scene_report["botified_stdout"]["output_limits"]
+    assert output_limits["per_track_event_60s"] == {
+        "available": True,
+        "passed": False,
+        "max_count": 2,
+        "threshold": module.BOTIFIED_OUTPUT_LIMIT_PER_TRACK_EVENT_60S_THRESHOLD,
+        "window_ms": module.BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+        "violations": [
+            {
+                "count": 2,
+                "threshold": module.BOTIFIED_OUTPUT_LIMIT_PER_TRACK_EVENT_60S_THRESHOLD,
+                "window_ms": module.BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+                "event_ids": ["front:evt_000450", "front:evt_000451"],
+                "lines": [1, 2],
+                "track_id": 1,
+                "event": "person_appeared",
+            }
+        ],
+    }
+    assert output_limits["global_60s"]["passed"] is True
+    assert output_limits["global_60s"]["max_count"] == 3
+    assert output_limits["burst_1s"]["passed"] is True
+    assert output_limits["burst_1s"]["max_count"] == 1
 
 
 def test_all_scenes_full_scene_botified_event_oracle_fails_duplicate_greeting(
@@ -2505,6 +2647,7 @@ def test_fake_runner_success_writes_partial_pass_and_cleans_up(tmp_path: Path) -
         "forbidden_event_count": 0,
         "event_counts": {},
         "event_sequence": [],
+        "output_limits": unavailable_botified_output_limits(module),
         "first_frame": None,
         "last_frame": None,
         "collection_truncated": False,
@@ -3026,6 +3169,7 @@ def test_evidence_summary_aggregates_existing_report_fields(tmp_path: Path) -> N
         "pollution_count": 0,
         "forbidden_event_count": 0,
         "parse_error_count": 0,
+        "output_limits": unavailable_botified_output_limits(module),
     }
     assert evidence["gaze"]["total_expected_count"] == report["gaze"]["expected_count"]
     assert evidence["gaze"]["total_accepted_count"] == report["gaze"]["accepted_count"]
@@ -3787,6 +3931,159 @@ def test_botified_stdout_untrustworthy_collection_fails_partial_slice(
     assert report["botified_stdout"][expected_field] is True
 
 
+def test_botified_stdout_summary_fails_per_track_event_output_limit() -> None:
+    module = import_runner_module()
+
+    summary = module._summarize_botified_stdout(
+        [
+            botified_frame(
+                "person_waving",
+                event_id="front:evt_000456",
+                track_id=7,
+            ).strip(),
+            botified_frame(
+                "person_waving",
+                event_id="front:evt_000457",
+                track_id=7,
+            ).strip(),
+        ],
+        line_timestamps_ms=[0, 1000],
+        line_count=2,
+        collection_truncated=False,
+        collection_incomplete=False,
+    )
+
+    assert module._botified_stdout_failure_reasons(summary) == [
+        "botified_stdout_output_limit_per_track_event_60s"
+    ]
+    assert summary["event_sequence"] == [
+        {
+            "line": 1,
+            "event": "person_waving",
+            "event_id": "front:evt_000456",
+            "track_id": 7,
+            "received_monotonic_ms": 0,
+        },
+        {
+            "line": 2,
+            "event": "person_waving",
+            "event_id": "front:evt_000457",
+            "track_id": 7,
+            "received_monotonic_ms": 1000,
+        },
+    ]
+    assert summary["output_limits"]["per_track_event_60s"] == {
+        "available": True,
+        "passed": False,
+        "max_count": 2,
+        "threshold": module.BOTIFIED_OUTPUT_LIMIT_PER_TRACK_EVENT_60S_THRESHOLD,
+        "window_ms": module.BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+        "violations": [
+            {
+                "count": 2,
+                "threshold": module.BOTIFIED_OUTPUT_LIMIT_PER_TRACK_EVENT_60S_THRESHOLD,
+                "window_ms": module.BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+                "event_ids": ["front:evt_000456", "front:evt_000457"],
+                "lines": [1, 2],
+                "track_id": 7,
+                "event": "person_waving",
+            }
+        ],
+    }
+    assert summary["output_limits"]["global_60s"]["passed"] is True
+    assert summary["output_limits"]["global_60s"]["max_count"] == 2
+    assert summary["output_limits"]["burst_1s"]["passed"] is True
+    assert summary["output_limits"]["burst_1s"]["max_count"] == 1
+
+
+def test_botified_stdout_summary_fails_global_output_limit() -> None:
+    module = import_runner_module()
+    lines = [
+        botified_frame(
+            "person_waving",
+            event_id=f"front:evt_{index:06d}",
+            track_id=index,
+        ).strip()
+        for index in range(13)
+    ]
+
+    summary = module._summarize_botified_stdout(
+        lines,
+        line_timestamps_ms=[index * 1000 for index in range(13)],
+        line_count=13,
+        collection_truncated=False,
+        collection_incomplete=False,
+    )
+
+    assert module._botified_stdout_failure_reasons(summary) == [
+        "botified_stdout_output_limit_global_60s"
+    ]
+    assert summary["output_limits"]["per_track_event_60s"]["passed"] is True
+    assert summary["output_limits"]["per_track_event_60s"]["max_count"] == 1
+    assert summary["output_limits"]["global_60s"] == {
+        "available": True,
+        "passed": False,
+        "max_count": 13,
+        "threshold": module.BOTIFIED_OUTPUT_LIMIT_GLOBAL_60S_THRESHOLD,
+        "window_ms": module.BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+        "violations": [
+            {
+                "count": 13,
+                "threshold": module.BOTIFIED_OUTPUT_LIMIT_GLOBAL_60S_THRESHOLD,
+                "window_ms": module.BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+                "event_ids": [f"front:evt_{index:06d}" for index in range(13)],
+                "lines": list(range(1, 14)),
+            }
+        ],
+    }
+    assert summary["output_limits"]["burst_1s"]["passed"] is True
+    assert summary["output_limits"]["burst_1s"]["max_count"] == 1
+
+
+def test_botified_stdout_summary_fails_burst_output_limit() -> None:
+    module = import_runner_module()
+    lines = [
+        botified_frame(
+            "person_waving",
+            event_id=f"front:evt_{index:06d}",
+            track_id=index,
+        ).strip()
+        for index in range(4)
+    ]
+
+    summary = module._summarize_botified_stdout(
+        lines,
+        line_timestamps_ms=[0, 100, 200, 300],
+        line_count=4,
+        collection_truncated=False,
+        collection_incomplete=False,
+    )
+
+    assert module._botified_stdout_failure_reasons(summary) == [
+        "botified_stdout_output_limit_burst_1s"
+    ]
+    assert summary["output_limits"]["per_track_event_60s"]["passed"] is True
+    assert summary["output_limits"]["per_track_event_60s"]["max_count"] == 1
+    assert summary["output_limits"]["global_60s"]["passed"] is True
+    assert summary["output_limits"]["global_60s"]["max_count"] == 4
+    assert summary["output_limits"]["burst_1s"] == {
+        "available": True,
+        "passed": False,
+        "max_count": 4,
+        "threshold": module.BOTIFIED_OUTPUT_LIMIT_BURST_1S_THRESHOLD,
+        "window_ms": module.BOTIFIED_OUTPUT_LIMIT_1S_WINDOW_MS,
+        "violations": [
+            {
+                "count": 4,
+                "threshold": module.BOTIFIED_OUTPUT_LIMIT_BURST_1S_THRESHOLD,
+                "window_ms": module.BOTIFIED_OUTPUT_LIMIT_1S_WINDOW_MS,
+                "event_ids": [f"front:evt_{index:06d}" for index in range(4)],
+                "lines": [1, 2, 3, 4],
+            }
+        ],
+    }
+
+
 def test_botified_stdout_summary_flags_untrustworthy_collection_as_failure_reasons() -> None:
     module = import_runner_module()
 
@@ -3841,6 +4138,12 @@ def test_local_process_runner_stop_process_drains_live_stdout_and_stderr(tmp_pat
 
     assert process.poll() is not None
     assert process.stdout_lines == ["stdout-one", "stdout-two"]
+    assert len(process.stdout_line_timestamps_ms) == 2
+    assert all(isinstance(value, int) for value in process.stdout_line_timestamps_ms)
+    assert (
+        process.stdout_line_timestamps_ms[0]
+        <= process.stdout_line_timestamps_ms[1]
+    )
     assert process.stderr_lines == ["stderr-one", "stderr-two"]
     assert process.stdout_tail == "stdout-one\nstdout-two\n"
     assert process.stderr_tail == "stderr-one\nstderr-two\n"

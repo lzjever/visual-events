@@ -69,6 +69,11 @@ BOTIFIED_ALLOWED_EVENTS = {
 }
 BOTIFIED_EVENT_RE = re.compile(r"\bevent=([A-Za-z0-9_]+)\b")
 BOTIFIED_TRACK_ID_RE = re.compile(r"\btrack_id=(\d+)\b")
+BOTIFIED_OUTPUT_LIMIT_PER_TRACK_EVENT_60S_THRESHOLD = 1
+BOTIFIED_OUTPUT_LIMIT_GLOBAL_60S_THRESHOLD = 12
+BOTIFIED_OUTPUT_LIMIT_BURST_1S_THRESHOLD = 3
+BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS = 60_000
+BOTIFIED_OUTPUT_LIMIT_1S_WINDOW_MS = 1_000
 NOT_COVERED = [
     "full_scene_matrix",
     "oracle",
@@ -258,6 +263,7 @@ class ManagedProcess:
     collection_incomplete: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _stdout_lines: deque[str] = field(init=False, repr=False)
+    _stdout_line_timestamps_ms: deque[int] = field(init=False, repr=False)
     _stderr_lines: deque[str] = field(init=False, repr=False)
     _stdout_line_count: int = field(default=0, init=False, repr=False)
     _stderr_line_count: int = field(default=0, init=False, repr=False)
@@ -265,6 +271,7 @@ class ManagedProcess:
 
     def __post_init__(self) -> None:
         self._stdout_lines = deque(maxlen=PROCESS_COLLECTED_LINE_LIMIT)
+        self._stdout_line_timestamps_ms = deque(maxlen=PROCESS_COLLECTED_LINE_LIMIT)
         self._stderr_lines = deque(maxlen=PROCESS_COLLECTED_LINE_LIMIT)
         self._start_reader("stdout", self.popen.stdout)
         self._start_reader("stderr", self.popen.stderr)
@@ -294,6 +301,11 @@ class ManagedProcess:
     def stdout_lines(self) -> list[str]:
         with self._lock:
             return list(self._stdout_lines)
+
+    @property
+    def stdout_line_timestamps_ms(self) -> list[int]:
+        with self._lock:
+            return list(self._stdout_line_timestamps_ms)
 
     @property
     def stderr_lines(self) -> list[str]:
@@ -360,7 +372,9 @@ class ManagedProcess:
                 self._stdout_line_count += 1
                 if len(self._stdout_lines) >= PROCESS_COLLECTED_LINE_LIMIT:
                     self.stdout_truncated = True
+                received_monotonic_ms = time.monotonic_ns() // 1_000_000
                 self._stdout_lines.append(line)
+                self._stdout_line_timestamps_ms.append(received_monotonic_ms)
             else:
                 self.stderr_tail = _tail(self.stderr_tail + chunk)
                 self._stderr_line_count += 1
@@ -2421,6 +2435,7 @@ def _botified_stdout_evidence_summary(summary: dict[str, Any]) -> dict[str, Any]
         "pollution_count": _int_count(summary.get("pollution_count")),
         "forbidden_event_count": _int_count(summary.get("forbidden_event_count")),
         "parse_error_count": _int_count(summary.get("parse_error_count")),
+        "output_limits": summary.get("output_limits"),
     }
 
 
@@ -2855,11 +2870,13 @@ def _finite_float(value: Any) -> float | None:
 
 def _summarize_botified_stdout_from_process(process: ProcessLike | None) -> dict[str, Any]:
     lines = _collected_stream_lines(process, "stdout")
+    line_timestamps_ms = _collected_stdout_line_timestamps_ms(process)
     line_count = _collected_stream_line_count(process, "stdout", fallback=len(lines))
     collection_truncated = _collection_truncated(process, "stdout", collected_count=len(lines))
     collection_incomplete = bool(getattr(process, "collection_incomplete", False))
     return _summarize_botified_stdout(
         lines,
+        line_timestamps_ms=line_timestamps_ms,
         line_count=line_count,
         collection_truncated=collection_truncated,
         collection_incomplete=collection_incomplete,
@@ -2869,6 +2886,7 @@ def _summarize_botified_stdout_from_process(process: ProcessLike | None) -> dict
 def _summarize_botified_stdout(
     lines: list[str],
     *,
+    line_timestamps_ms: list[int] | None = None,
     line_count: int,
     collection_truncated: bool,
     collection_incomplete: bool,
@@ -2939,7 +2957,18 @@ def _summarize_botified_stdout(
         track_id = _botified_track_id(payload)
         if track_id is not None:
             sequence_item["track_id"] = track_id
+        received_monotonic_ms = _botified_line_timestamp_ms(
+            line_timestamps_ms,
+            line_number,
+        )
+        if received_monotonic_ms is not None:
+            sequence_item["received_monotonic_ms"] = received_monotonic_ms
         event_sequence.append(sequence_item)
+
+    output_limits = _botified_stdout_output_limits(
+        event_sequence,
+        timestamps_available=line_timestamps_ms is not None,
+    )
 
     return {
         "source": "cli_stdout",
@@ -2952,12 +2981,182 @@ def _summarize_botified_stdout(
         "forbidden_event_count": forbidden_event_count,
         "event_counts": dict(sorted(event_counts.items())),
         "event_sequence": event_sequence,
+        "output_limits": output_limits,
         "first_frame": first_frame,
         "last_frame": last_frame,
         "collection_truncated": collection_truncated,
         "collection_incomplete": collection_incomplete,
         "contract_violations": contract_violations,
     }
+
+
+def _botified_line_timestamp_ms(
+    line_timestamps_ms: list[int] | None,
+    line_number: int,
+) -> int | None:
+    if line_timestamps_ms is None:
+        return None
+    index = line_number - 1
+    if index < 0 or index >= len(line_timestamps_ms):
+        return None
+    timestamp = line_timestamps_ms[index]
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+        return None
+    return timestamp
+
+
+def _botified_stdout_output_limits(
+    event_sequence: list[dict[str, Any]],
+    *,
+    timestamps_available: bool,
+) -> dict[str, Any]:
+    timed_events = _botified_timed_events(event_sequence)
+    available = timestamps_available and len(timed_events) == len(event_sequence)
+    return {
+        "per_track_event_60s": _botified_output_limit_summary(
+            timed_events,
+            threshold=BOTIFIED_OUTPUT_LIMIT_PER_TRACK_EVENT_60S_THRESHOLD,
+            window_ms=BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+            available=available,
+            group_fields=("track_id", "event"),
+            require_track_id=True,
+        ),
+        "global_60s": _botified_output_limit_summary(
+            timed_events,
+            threshold=BOTIFIED_OUTPUT_LIMIT_GLOBAL_60S_THRESHOLD,
+            window_ms=BOTIFIED_OUTPUT_LIMIT_60S_WINDOW_MS,
+            available=available,
+        ),
+        "burst_1s": _botified_output_limit_summary(
+            timed_events,
+            threshold=BOTIFIED_OUTPUT_LIMIT_BURST_1S_THRESHOLD,
+            window_ms=BOTIFIED_OUTPUT_LIMIT_1S_WINDOW_MS,
+            available=available,
+        ),
+    }
+
+
+def _botified_timed_events(
+    event_sequence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    timed_events: list[dict[str, Any]] = []
+    for item in event_sequence:
+        received_monotonic_ms = item.get("received_monotonic_ms")
+        if isinstance(received_monotonic_ms, bool) or not isinstance(
+            received_monotonic_ms,
+            int,
+        ):
+            continue
+        line = item.get("line")
+        if isinstance(line, bool) or not isinstance(line, int):
+            continue
+        event = item.get("event")
+        if not isinstance(event, str):
+            continue
+        timed_event: dict[str, Any] = {
+            "received_monotonic_ms": received_monotonic_ms,
+            "line": line,
+            "event": event,
+        }
+        event_id = item.get("event_id")
+        if isinstance(event_id, str):
+            timed_event["event_id"] = event_id
+        track_id = item.get("track_id")
+        if isinstance(track_id, int) and not isinstance(track_id, bool):
+            timed_event["track_id"] = track_id
+        timed_events.append(timed_event)
+    return timed_events
+
+
+def _botified_output_limit_summary(
+    timed_events: list[dict[str, Any]],
+    *,
+    threshold: int,
+    window_ms: int,
+    available: bool,
+    group_fields: tuple[str, ...] = (),
+    require_track_id: bool = False,
+) -> dict[str, Any]:
+    if not available:
+        return {
+            "available": False,
+            "passed": None,
+            "max_count": 0,
+            "threshold": threshold,
+            "window_ms": window_ms,
+            "violations": [],
+        }
+
+    grouped_events: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for event in timed_events:
+        if require_track_id and "track_id" not in event:
+            continue
+        group_key = tuple(event.get(field) for field in group_fields)
+        grouped_events.setdefault(group_key, []).append(event)
+    if not group_fields:
+        grouped_events = {(): list(timed_events)}
+
+    max_count = 0
+    violations: list[dict[str, Any]] = []
+    for group_key in sorted(
+        grouped_events,
+        key=lambda key: tuple(str(part) for part in key),
+    ):
+        group_events = grouped_events[group_key]
+        window = _botified_max_window(group_events, window_ms=window_ms)
+        max_count = max(max_count, len(window))
+        if len(window) <= threshold:
+            continue
+        violation: dict[str, Any] = {
+            "count": len(window),
+            "threshold": threshold,
+            "window_ms": window_ms,
+            "event_ids": [
+                event["event_id"]
+                for event in window
+                if isinstance(event.get("event_id"), str)
+            ],
+            "lines": [event["line"] for event in window],
+        }
+        for field, value in zip(group_fields, group_key, strict=True):
+            violation[field] = value
+        violations.append(violation)
+
+    return {
+        "available": True,
+        "passed": not violations,
+        "max_count": max_count,
+        "threshold": threshold,
+        "window_ms": window_ms,
+        "violations": violations,
+    }
+
+
+def _botified_max_window(
+    timed_events: list[dict[str, Any]],
+    *,
+    window_ms: int,
+) -> list[dict[str, Any]]:
+    ordered = sorted(
+        timed_events,
+        key=lambda event: (
+            int(event["received_monotonic_ms"]),
+            int(event["line"]),
+        ),
+    )
+    best: list[dict[str, Any]] = []
+    start = 0
+    for end, event in enumerate(ordered):
+        end_ms = int(event["received_monotonic_ms"])
+        while start <= end:
+            start_ms = int(ordered[start]["received_monotonic_ms"])
+            if end_ms - start_ms < window_ms:
+                break
+            start += 1
+        candidate = ordered[start : end + 1]
+        if len(candidate) > len(best):
+            best = candidate
+    return best
 
 
 def _is_wrapped_botified_frame(line: str) -> bool:
@@ -3033,7 +3232,23 @@ def _botified_stdout_failure_reasons(summary: dict[str, Any]) -> list[str]:
         reasons.append("botified_stdout_parse_errors")
     if summary["forbidden_event_count"] > 0:
         reasons.append("botified_stdout_forbidden_event")
+    output_limits = summary.get("output_limits")
+    if isinstance(output_limits, dict):
+        if _botified_output_limit_failed(output_limits, "per_track_event_60s"):
+            reasons.append("botified_stdout_output_limit_per_track_event_60s")
+        if _botified_output_limit_failed(output_limits, "global_60s"):
+            reasons.append("botified_stdout_output_limit_global_60s")
+        if _botified_output_limit_failed(output_limits, "burst_1s"):
+            reasons.append("botified_stdout_output_limit_burst_1s")
     return reasons
+
+
+def _botified_output_limit_failed(
+    output_limits: dict[str, Any],
+    key: str,
+) -> bool:
+    summary = output_limits.get(key)
+    return isinstance(summary, dict) and summary.get("passed") is False
 
 
 def _slice_pass(
@@ -3327,6 +3542,22 @@ def _collected_stream_line_count(
     if isinstance(line_count, int) and not isinstance(line_count, bool):
         return line_count
     return fallback
+
+
+def _collected_stdout_line_timestamps_ms(
+    process: ProcessLike | None,
+) -> list[int] | None:
+    if process is None:
+        return None
+    timestamps = getattr(process, "stdout_line_timestamps_ms", None)
+    if timestamps is None:
+        return None
+    result: list[int] = []
+    for timestamp in timestamps:
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+            return None
+        result.append(timestamp)
+    return result
 
 
 def _collection_truncated(

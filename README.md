@@ -58,5 +58,5 @@ DDS JPEG @10Hz
 - KISS：一个输入源、一个服务协议、一个高频状态 schema、一个 DDS gaze target 输出、一个低频事件出口。
 - DRY：schema、几何计算、事件冷却和注视目标选择只实现一次。
 - YAGNI：不训练模型，不做通用动作识别，不做人脸识别，不做多摄像头融合，不做后台治理平台。
-- 治理克制：只在直接保护核心运行边界或用户明确要求时添加 report/audit/gate；TDD 只覆盖核心功能和高风险集成，不为测试工具、报告骨架、文档文字堆测试。
+- 治理克制：当前开发顺序以 server/CLI core runtime path 和 PC local E2E 为先；只在直接保护核心运行边界或用户明确要求时添加 report/audit/gate；release report skeleton、manifest/schema 审计层不早于 core MVP；TDD 只覆盖核心功能和高风险集成，不为测试工具、报告骨架、文档文字堆测试。
 - 低频事件交给 agent 决策；高频注视 target 由 CLI 发布 DDS，真实头部动作由运控/头控 owner 本地闭环完成。
