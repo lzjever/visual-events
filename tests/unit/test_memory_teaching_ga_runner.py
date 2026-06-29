@@ -464,3 +464,129 @@ def test_actual_fake_runner_writes_failed_report_when_teaching_scene_missing(
         "visual-evidence/index.html",
     ]:
         assert (out / relative_path).is_file()
+
+
+def test_local_smoke_requires_explicit_real_local_backends(tmp_path: Path) -> None:
+    data_dir = tmp_path / "val-data"
+    out = tmp_path / "artifacts" / "memory-teaching-ga-local-smoke"
+
+    exit_code = module.main(
+        ["--data-dir", str(data_dir), "--out", str(out), "--local-smoke"]
+    )
+
+    assert exit_code != 0
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["ok"] is False
+    assert report["mode"] == "local-smoke"
+    assert report["backend"] == "local"
+    assert report["status"] == "failed"
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["local_smoke_explicit_real_backends"]["passed"] is False
+    missing = checks["local_smoke_explicit_real_backends"]["details"]["missing"]
+    assert "--embedding-backend local" in missing
+    assert "--person-model-path" in missing
+    assert "--scene-model-path" in missing
+    assert "--inference-backend ultralytics" in missing
+    assert "--pose-model-path" in missing
+
+
+def test_local_smoke_report_distinguishes_pass_fail_insufficient_without_models(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    jpeg_bytes = _valid_jpeg_bytes()
+    _make_scene(
+        data_dir,
+        "pic_teach_me",
+        des_text="请你记住我，我是小李飞刀",
+        jpeg_bytes=jpeg_bytes,
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_person",
+        des_text="这是彭刚，请你记住",
+        jpeg_bytes=jpeg_bytes,
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        des_text="这是银河通用的办公室，请你记住",
+        jpeg_bytes=jpeg_bytes,
+    )
+    person_model = tmp_path / "runtime" / "models" / "face-buffalo-s"
+    scene_model = tmp_path / "runtime" / "models" / "scene-mobileclip2-s0"
+    pose_model = tmp_path / "runtime" / "models" / "yolov8n-pose.pt"
+    person_model.mkdir(parents=True)
+    scene_model.mkdir(parents=True)
+    pose_model.parent.mkdir(parents=True, exist_ok=True)
+    pose_model.write_bytes(b"pose")
+    out = tmp_path / "artifacts" / "memory-teaching-ga-local-smoke"
+
+    def fake_execute(**_kwargs):
+        return {
+            "self_smoke": {
+                "status": "passed",
+                "passed": True,
+                "selected_window": {"scene": "pic_teach_me"},
+            },
+            "scene_smoke": {
+                "status": "passed",
+                "passed": True,
+                "selected_window": {"scene": "pic_teach_scene_galbot"},
+            },
+            "third_person_probe": {
+                "status": "insufficient_sample",
+                "passed": False,
+                "reason": "pose_unclear",
+                "observations": [{"track_count": 1, "keypoint_tracks": 1}],
+            },
+            "api_response_records": [],
+            "botified_frame_records": [],
+        }
+
+    monkeypatch.setattr(module, "_execute_local_smoke", fake_execute)
+
+    exit_code = module.main(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--camera",
+            "front",
+            "--local-smoke",
+            "--embedding-backend",
+            "local",
+            "--person-model-path",
+            str(person_model),
+            "--scene-model-path",
+            str(scene_model),
+            "--inference-backend",
+            "ultralytics",
+            "--pose-model-path",
+            str(pose_model),
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert report["mode"] == "local-smoke"
+    assert report["real_model_evidence"] is True
+    assert report["self_smoke"]["status"] == "passed"
+    assert report["scene_smoke"]["status"] == "passed"
+    assert report["third_person_probe"]["status"] == "insufficient_sample"
+    assert all(
+        fields == [] for fields in report["forbidden_agent_payload_fields"].values()
+    )
+    payloads = json.loads((out / "teach_payloads.json").read_text(encoding="utf-8"))
+    assert payloads["mode"] == "local-smoke"
+    for record in payloads["payloads"]:
+        assert module.find_forbidden_agent_payload_fields(record["payload"]) == []
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["self_local_smoke"]["passed"] is True
+    assert checks["scene_local_smoke"]["passed"] is True
+    assert checks["third_person_local_probe"]["passed"] is True
+    assert checks["third_person_local_probe"]["details"]["status"] == "insufficient_sample"

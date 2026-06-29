@@ -6,16 +6,27 @@ import json
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from fastapi.testclient import TestClient
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import run_memory_e2e as memory_e2e
-from visual_events_server.config import MemoryEmbeddingConfig
+from visual_events_server.app import create_app, create_processor_from_config
+from visual_events_server.config import (
+    InferenceConfig,
+    MemoryConfig,
+    MemoryEmbeddingConfig,
+    MemoryMatchingConfig,
+    ServerConfig,
+)
 from visual_events_server.protocol import _parse_jpeg_dimensions
+from visual_events_server.protocol import SCHEMA_VERSION, encode_frame_message
 
 
 DEFAULT_DATA_DIR = Path("val-data")
@@ -68,6 +79,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Write stub API responses without calling a server.",
+    )
+    parser.add_argument(
+        "--local-smoke",
+        action="store_true",
+        default=False,
+        help="Run a minimal real local model backend smoke on fixed val-data samples.",
+    )
+    parser.add_argument(
+        "--embedding-backend",
+        choices=("fake", "local"),
+        default="fake",
+        help="Memory embedding backend. --local-smoke requires local.",
+    )
+    parser.add_argument(
+        "--person-model-path",
+        type=Path,
+        help="Local person embedding model bundle path. Required for --local-smoke.",
+    )
+    parser.add_argument(
+        "--scene-model-path",
+        type=Path,
+        help="Local scene embedding model bundle path. Required for --local-smoke.",
+    )
+    parser.add_argument(
+        "--inference-backend",
+        choices=("mock", "ultralytics"),
+        default="mock",
+        help="Inference backend. --local-smoke requires ultralytics.",
+    )
+    parser.add_argument(
+        "--pose-model-path",
+        type=Path,
+        help="Ultralytics pose model path. Required for --local-smoke.",
     )
     return parser.parse_args(argv)
 
@@ -500,9 +544,194 @@ def run_actual(
     return report
 
 
+def run_local_smoke(
+    *,
+    data_dir: Path,
+    out: Path,
+    camera: str = DEFAULT_CAMERA,
+    embedding_backend: str,
+    person_model_path: Path | None,
+    scene_model_path: Path | None,
+    inference_backend: str,
+    pose_model_path: Path | None,
+) -> dict[str, Any]:
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    report_path = out / "report.json"
+    preflight = _local_smoke_preflight(
+        embedding_backend=embedding_backend,
+        person_model_path=person_model_path,
+        scene_model_path=scene_model_path,
+        inference_backend=inference_backend,
+        pose_model_path=pose_model_path,
+    )
+    if not preflight["passed"]:
+        report = _local_smoke_preflight_failed_report(
+            data_dir=data_dir,
+            out=out,
+            camera=camera,
+            preflight=preflight,
+            report_path=report_path,
+        )
+        _write_json(report_path, report)
+        return report
+
+    scenes = discover_scene_dirs(data_dir)
+    manifest = manifest_risk_report(data_dir, scenes)
+    payload_records = _build_teach_payload_records_from_scenes(
+        scenes,
+        camera=camera,
+    )
+    forbidden_payload_fields = {
+        record["scene"]: find_forbidden_agent_payload_fields(record["payload"])
+        for record in payload_records
+    }
+
+    runtime_dir = out / "runtime"
+    if runtime_dir.exists():
+        shutil.rmtree(runtime_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    visual_evidence_dir = out / "visual-evidence"
+    visual_evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    timeline_path = out / "timeline.jsonl"
+    teach_payloads_path = out / "teach_payloads.json"
+    api_responses_path = out / "api_responses.jsonl"
+    botified_frames_path = out / "botified_frames.jsonl"
+    visual_states_path = out / "visual_states.jsonl"
+    evidence_index_path = visual_evidence_dir / "index.html"
+
+    timeline_records = _timeline_records(
+        scenes,
+        payload_records,
+        dry_run=False,
+    )
+    local_config = _local_smoke_config(
+        out=out,
+        embedding_backend=embedding_backend,
+        person_model_path=person_model_path,
+        scene_model_path=scene_model_path,
+        inference_backend=inference_backend,
+        pose_model_path=pose_model_path,
+    )
+    payloads_by_scene = {record["scene"]: record for record in payload_records}
+    with visual_states_path.open("w", encoding="utf-8") as states_file:
+        execution = _execute_local_smoke(
+            scenes=scenes,
+            payloads_by_scene=payloads_by_scene,
+            out=out,
+            camera=camera,
+            config=local_config,
+            states_file=states_file,
+        )
+
+    api_response_records = list(execution.get("api_response_records") or [])
+    botified_frame_records = list(execution.get("botified_frame_records") or [])
+    self_result = dict(execution.get("self_smoke") or _not_run_result())
+    scene_result = dict(execution.get("scene_smoke") or _not_run_result())
+    third_person_result = dict(
+        execution.get("third_person_probe") or _not_run_result(status="insufficient_sample")
+    )
+
+    _write_json(
+        teach_payloads_path,
+        {
+            "schema_version": 1,
+            "mode": "local-smoke",
+            "backend": "local",
+            "payloads": payload_records,
+        },
+    )
+    _write_jsonl(api_responses_path, api_response_records)
+    _write_jsonl(botified_frames_path, botified_frame_records)
+    _write_visual_evidence_index(
+        evidence_index_path,
+        scenes=scenes,
+        payload_records=payload_records,
+        manifest=manifest,
+        mode="local-smoke",
+    )
+    visual_evidence_index = [
+        {
+            "assertion_id": "memory_teaching_ga_local_smoke",
+            "kind": "html_index",
+            "path": "visual-evidence/index.html",
+        }
+    ]
+    artifact_paths = {
+        "report_json": "report.json",
+        "timeline_jsonl": "timeline.jsonl",
+        "teach_payloads_json": "teach_payloads.json",
+        "api_responses_jsonl": "api_responses.jsonl",
+        "botified_frames_jsonl": "botified_frames.jsonl",
+        "visual_states_jsonl": "visual_states.jsonl",
+        "visual_evidence_index_html": "visual-evidence/index.html",
+        "runtime_dir": "runtime",
+    }
+    _write_jsonl(timeline_path, timeline_records)
+    checks = _build_local_smoke_checks(
+        scenes=scenes,
+        payload_records=payload_records,
+        forbidden_payload_fields=forbidden_payload_fields,
+        out=out,
+        artifact_paths=artifact_paths,
+        visual_evidence_index=visual_evidence_index,
+        preflight=preflight,
+        self_result=self_result,
+        scene_result=scene_result,
+        third_person_result=third_person_result,
+    )
+    ok = all(check["passed"] for check in checks)
+    warnings = list(manifest.get("risks") or [])
+    report = {
+        "ok": ok,
+        "status": "passed" if ok else "failed",
+        "gate": "memory_teaching_ga_runner_local_smoke",
+        "mode": "local-smoke",
+        "backend": "local",
+        "inference_backend": inference_backend,
+        "real_model_evidence": True,
+        "data_dir": str(data_dir),
+        "out": str(out),
+        "camera": camera,
+        "scene_count": len(scenes),
+        "scenes": [_scene_report(scene) for scene in scenes],
+        "manifest": manifest,
+        "warnings": warnings,
+        "teach_requests": [_teach_request_summary(record) for record in payload_records],
+        "forbidden_agent_payload_fields": forbidden_payload_fields,
+        "self_smoke": self_result,
+        "scene_smoke": scene_result,
+        "third_person_probe": third_person_result,
+        "api_responses": api_response_records,
+        "debug_test_channel_enabled": False,
+        "artifacts": artifact_paths,
+        "visual_evidence_index": visual_evidence_index,
+        "checks": checks,
+        "notes": [
+            "Local smoke mode uses real local embedding and pose inference backends with explicit model paths.",
+            "Third-person local probe reports insufficient_sample when real YOLO/track/pose cannot resolve a target.",
+            "No agent-facing teach payload adds track_id, bbox, point, source frame, or test hint fields.",
+        ],
+    }
+    _write_json(report_path, report)
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.dry_run:
+    if args.local_smoke:
+        report = run_local_smoke(
+            data_dir=args.data_dir,
+            out=args.out,
+            camera=args.camera,
+            embedding_backend=args.embedding_backend,
+            person_model_path=args.person_model_path,
+            scene_model_path=args.scene_model_path,
+            inference_backend=args.inference_backend,
+            pose_model_path=args.pose_model_path,
+        )
+    elif args.dry_run:
         report = run_dry_run(data_dir=args.data_dir, out=args.out, camera=args.camera)
     else:
         report = run_actual(data_dir=args.data_dir, out=args.out, camera=args.camera)
@@ -513,8 +742,729 @@ def main(argv: list[str] | None = None) -> int:
     print(f"scenes: {report['scene_count']}")
     if report["mode"] == "actual":
         print(f"replayed scenes: {report['replayed_scene_count']}")
+    if report["mode"] == "local-smoke":
+        print(f"self: {report.get('self_smoke', {}).get('status')}")
+        print(f"scene: {report.get('scene_smoke', {}).get('status')}")
+        print(f"third-person: {report.get('third_person_probe', {}).get('status')}")
     print(f"report: {Path(args.out) / 'report.json'}")
     return 0 if report["ok"] else 1
+
+
+class _RecordingSession:
+    def __init__(self, session: Any, owner: "_RecordingSessionFactory") -> None:
+        self._session = session
+        self._owner = owner
+
+    async def process_frame(self, frame: Any) -> dict[str, Any]:
+        return await self._session.process_frame(frame)
+
+    def take_memory_frame_snapshot(self) -> Any | None:
+        take_snapshot = getattr(self._session, "take_memory_frame_snapshot", None)
+        snapshot = take_snapshot() if callable(take_snapshot) else None
+        self._owner.last_snapshot = snapshot
+        return snapshot
+
+
+class _RecordingSessionFactory:
+    def __init__(self, processor: Any) -> None:
+        self._processor = processor
+        self.last_snapshot: Any | None = None
+
+    def __call__(self) -> _RecordingSession:
+        create_session = getattr(self._processor, "create_session", None)
+        session = create_session() if callable(create_session) else self._processor
+        wrapped = _RecordingSession(session, self)
+        self.last_snapshot = None
+        return wrapped
+
+
+class LocalMemorySmokeRunner:
+    def __init__(
+        self,
+        *,
+        case: str,
+        out: Path,
+        camera: str,
+        config: ServerConfig,
+    ) -> None:
+        self.case = case
+        self.out = out
+        self.camera = camera
+        self.frame_id = 0
+        case_runtime_dir = out / "runtime" / case
+        case_config = _config_for_local_smoke_case(config, case_runtime_dir)
+        self.processor = create_processor_from_config(case_config)
+        self.session_factory = _RecordingSessionFactory(self.processor)
+        self.client = TestClient(
+            create_app(session_factory=self.session_factory, config=case_config)
+        )
+
+    def open_stream(self):
+        return self.client.websocket_connect("/v1/stream")
+
+    def send(
+        self,
+        websocket: Any,
+        source_frame: memory_e2e.SourceFrame,
+        *,
+        timestamp_ms: int,
+        states_file: Any,
+        phase: str,
+    ) -> dict[str, Any]:
+        self.frame_id += 1
+        header = {
+            "type": "frame",
+            "schema_version": SCHEMA_VERSION,
+            "camera": self.camera,
+            "frame_id": self.frame_id,
+            "timestamp_ms": timestamp_ms,
+            "encoding": "jpeg",
+            "width": source_frame.width,
+            "height": source_frame.height,
+            "head_motion": {"state": "stationary"},
+        }
+        websocket.send_bytes(encode_frame_message(header, source_frame.jpeg_bytes))
+        state = json.loads(websocket.receive_text())
+        states_file.write(
+            json.dumps(
+                {
+                    "case": self.case,
+                    "phase": phase,
+                    "source_frame": str(source_frame.path),
+                    "visual_state": state,
+                    "probe": _probe_from_state_and_snapshot(
+                        state,
+                        self.session_factory.last_snapshot,
+                    ),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        states_file.flush()
+        return state
+
+
+def _execute_local_smoke(
+    *,
+    scenes: list[SceneDir],
+    payloads_by_scene: dict[str, dict[str, Any]],
+    out: Path,
+    camera: str,
+    config: ServerConfig,
+    states_file: Any,
+) -> dict[str, Any]:
+    api_response_records: list[dict[str, Any]] = []
+    botified_frame_records: list[dict[str, Any]] = []
+
+    self_scene = _find_scene(scenes, "pic_teach_me")
+    self_record = payloads_by_scene.get("pic_teach_me")
+    if self_scene is None or self_record is None:
+        self_result = _missing_teaching_scene_result("pic_teach_me")
+        self_result["status"] = "failed"
+    else:
+        self_result = _run_local_self_smoke(
+            out=out,
+            scene=self_scene,
+            record=self_record,
+            camera=camera,
+            config=config,
+            states_file=states_file,
+            api_response_records=api_response_records,
+            botified_frame_records=botified_frame_records,
+        )
+
+    scene_scene = _find_scene(scenes, "pic_teach_scene_galbot")
+    scene_record = payloads_by_scene.get("pic_teach_scene_galbot")
+    if scene_scene is None or scene_record is None:
+        scene_result = _missing_teaching_scene_result("pic_teach_scene_galbot")
+        scene_result["status"] = "failed"
+    else:
+        scene_result = _run_local_scene_smoke(
+            out=out,
+            scene=scene_scene,
+            record=scene_record,
+            camera=camera,
+            config=config,
+            states_file=states_file,
+            api_response_records=api_response_records,
+            botified_frame_records=botified_frame_records,
+        )
+
+    third_scene = _find_scene(scenes, "pic_teach_person")
+    third_record = payloads_by_scene.get("pic_teach_person")
+    if third_scene is None or third_record is None:
+        third_result = _insufficient_sample_result(
+            reason="required_teaching_scene_missing",
+            scene="pic_teach_person",
+        )
+    else:
+        third_result = _run_local_third_person_probe(
+            out=out,
+            scene=third_scene,
+            record=third_record,
+            camera=camera,
+            config=config,
+            states_file=states_file,
+            api_response_records=api_response_records,
+        )
+
+    return {
+        "self_smoke": self_result,
+        "scene_smoke": scene_result,
+        "third_person_probe": third_result,
+        "api_response_records": api_response_records,
+        "botified_frame_records": botified_frame_records,
+    }
+
+
+def _run_local_self_smoke(
+    *,
+    out: Path,
+    scene: SceneDir,
+    record: dict[str, Any],
+    camera: str,
+    config: ServerConfig,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = LocalMemorySmokeRunner(
+        case="local-self-smoke",
+        out=out,
+        camera=camera,
+        config=config,
+    )
+    last_reason = "no_active_interaction_target"
+    last_probe: dict[str, Any] | None = None
+    selected_frame: memory_e2e.SourceFrame | None = None
+    selected_timestamp_ms: int | None = None
+    teach: dict[str, Any] | None = None
+    with runner.open_stream() as websocket:
+        for index, source_frame in enumerate(_local_smoke_source_frames(scene)):
+            timestamp_ms = 1_000 + (index * 400)
+            state = runner.send(
+                websocket,
+                source_frame,
+                timestamp_ms=timestamp_ms,
+                states_file=states_file,
+                phase="self-probe",
+            )
+            last_probe = _probe_from_state_and_snapshot(
+                state,
+                runner.session_factory.last_snapshot,
+            )
+            resolve = _post_and_record_api_response(
+                runner=runner,
+                api_response_records=api_response_records,
+                payload_index=f"{_payload_index(record)}:local-resolve-self:{index}",
+                scene=record["scene"],
+                endpoint="/v1/memory/resolve-target",
+                payload={"camera": camera, "target": record["payload"]["target"]},
+                operation="local_resolve_self_target",
+            )
+            body = resolve["body"]
+            if body.get("status") != "resolved":
+                last_reason = _response_reason(body)
+                continue
+            teach = _post_and_record_api_response(
+                runner=runner,
+                api_response_records=api_response_records,
+                payload_index=f"{_payload_index(record)}:local-teach-self",
+                scene=record["scene"],
+                endpoint=record["endpoint"],
+                payload=record["payload"],
+                operation="local_teach_person_self",
+            )
+            if teach["status_code"] >= 400 or teach["body"].get("ok") is not True:
+                last_reason = _response_reason(teach["body"])
+                teach = None
+                continue
+            selected_frame = source_frame
+            selected_timestamp_ms = timestamp_ms
+            break
+
+        if selected_frame is None or selected_timestamp_ms is None or teach is None:
+            return {
+                "status": "failed",
+                "passed": False,
+                "reason": last_reason,
+                "last_probe": last_probe,
+            }
+
+        events = _send_stable_query_and_drain_local(
+            runner,
+            websocket,
+            selected_frame,
+            base_timestamp_ms=selected_timestamp_ms,
+            states_file=states_file,
+            phase="self-replay",
+        )
+
+    known = memory_e2e.first_event(events, "known_person_present")
+    assertions = {
+        "teach_person_ok": teach["body"].get("ok") is True,
+        "known_person_present": known is not None,
+        "known_person_context": bool(
+            known
+            and known.get("memory_context", {}).get("person", {}).get("person_id")
+            == teach["body"].get("person_id")
+        ),
+    }
+    _append_botified_frame_records(
+        botified_frame_records,
+        case="local-self-smoke",
+        scene=scene.name,
+        phase="self-replay",
+        events=events,
+    )
+    passed = all(assertions.values())
+    return {
+        "status": "passed" if passed else "failed",
+        "passed": passed,
+        "reason": "" if passed else "known_person_present_not_replayed",
+        "assertions": assertions,
+        "person_id": teach["body"].get("person_id"),
+        "selected_window": _selected_window(scene, selected_frame),
+        "last_probe": last_probe,
+        "events": memory_e2e.compact_events(events),
+    }
+
+
+def _run_local_scene_smoke(
+    *,
+    out: Path,
+    scene: SceneDir,
+    record: dict[str, Any],
+    camera: str,
+    config: ServerConfig,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = LocalMemorySmokeRunner(
+        case="local-scene-smoke",
+        out=out,
+        camera=camera,
+        config=config,
+    )
+    source_frame = _load_source_frame_from_scene(scene)
+    with runner.open_stream() as websocket:
+        state = runner.send(
+            websocket,
+            source_frame,
+            timestamp_ms=1_000,
+            states_file=states_file,
+            phase="scene-seed",
+        )
+        teach = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index=f"{_payload_index(record)}:local-teach-scene",
+            scene=record["scene"],
+            endpoint=record["endpoint"],
+            payload=record["payload"],
+            operation="local_teach_scene",
+        )
+        if teach["status_code"] >= 400 or teach["body"].get("ok") is not True:
+            return {
+                "status": "failed",
+                "passed": False,
+                "reason": _response_reason(teach["body"]),
+                "last_probe": _probe_from_state_and_snapshot(
+                    state,
+                    runner.session_factory.last_snapshot,
+                ),
+            }
+        events = _send_stable_query_and_drain_local(
+            runner,
+            websocket,
+            source_frame,
+            base_timestamp_ms=1_000,
+            states_file=states_file,
+            phase="scene-replay",
+        )
+
+    scene_event = memory_e2e.first_event(events, "scene_activated")
+    assertions = {
+        "teach_scene_ok": teach["body"].get("ok") is True,
+        "scene_activated": scene_event is not None,
+        "scene_context": bool(
+            scene_event
+            and scene_event.get("memory_context", {}).get("scene", {}).get("scene_id")
+            == teach["body"].get("scene_id")
+        ),
+    }
+    _append_botified_frame_records(
+        botified_frame_records,
+        case="local-scene-smoke",
+        scene=scene.name,
+        phase="scene-replay",
+        events=events,
+    )
+    passed = all(assertions.values())
+    return {
+        "status": "passed" if passed else "failed",
+        "passed": passed,
+        "reason": "" if passed else "scene_activated_not_replayed",
+        "assertions": assertions,
+        "scene_id": teach["body"].get("scene_id"),
+        "selected_window": _selected_window(scene, source_frame),
+        "events": memory_e2e.compact_events(events),
+    }
+
+
+def _run_local_third_person_probe(
+    *,
+    out: Path,
+    scene: SceneDir,
+    record: dict[str, Any],
+    camera: str,
+    config: ServerConfig,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = LocalMemorySmokeRunner(
+        case="local-third-person-probe",
+        out=out,
+        camera=camera,
+        config=config,
+    )
+    observations: list[dict[str, Any]] = []
+    last_reason = "no_active_interaction_target"
+    with runner.open_stream() as websocket:
+        for index, source_frame in enumerate(_local_smoke_source_frames(scene)):
+            state = runner.send(
+                websocket,
+                source_frame,
+                timestamp_ms=1_000 + (index * 400),
+                states_file=states_file,
+                phase="third-person-probe",
+            )
+            probe = _probe_from_state_and_snapshot(
+                state,
+                runner.session_factory.last_snapshot,
+            )
+            observations.append(
+                {
+                    "frame": str(source_frame.path),
+                    "frame_id": state.get("frame_id"),
+                    **probe,
+                }
+            )
+            resolve = _post_and_record_api_response(
+                runner=runner,
+                api_response_records=api_response_records,
+                payload_index=f"{_payload_index(record)}:local-resolve-third:{index}",
+                scene=record["scene"],
+                endpoint="/v1/memory/resolve-target",
+                payload={"camera": camera, "target": record["payload"]["target"]},
+                operation="local_resolve_third_person_target",
+            )
+            body = resolve["body"]
+            if body.get("status") == "resolved":
+                return {
+                    "status": "passed",
+                    "passed": True,
+                    "reason": "",
+                    "resolve_target": body,
+                    "selected_window": _selected_window(scene, source_frame),
+                    "observations": observations,
+                }
+            last_reason = _response_reason(body)
+
+    return {
+        "status": "insufficient_sample",
+        "passed": False,
+        "reason": last_reason,
+        "observations": observations,
+    }
+
+
+def _send_stable_query_and_drain_local(
+    runner: LocalMemorySmokeRunner,
+    websocket: Any,
+    source_frame: memory_e2e.SourceFrame,
+    *,
+    base_timestamp_ms: int,
+    states_file: Any,
+    phase: str,
+) -> list[dict[str, Any]]:
+    for offset_ms in (400, 800):
+        runner.send(
+            websocket,
+            source_frame,
+            timestamp_ms=base_timestamp_ms + offset_ms,
+            states_file=states_file,
+            phase=f"{phase}:warmup",
+        )
+    query_timestamp_ms = base_timestamp_ms + 1_200
+    runner.send(
+        websocket,
+        source_frame,
+        timestamp_ms=query_timestamp_ms,
+        states_file=states_file,
+        phase=f"{phase}:query",
+    )
+    for attempt in range(12):
+        time.sleep(memory_e2e.QUERY_DRAIN_WAIT_SECONDS)
+        drained = runner.send(
+            websocket,
+            source_frame,
+            timestamp_ms=query_timestamp_ms + 1 + attempt,
+            states_file=states_file,
+            phase=f"{phase}:drain",
+        )
+        events = list(drained.get("semantic_events") or [])
+        if events:
+            return events
+    return []
+
+
+def _local_smoke_source_frames(
+    scene: SceneDir,
+    *,
+    max_frames: int = 16,
+) -> list[memory_e2e.SourceFrame]:
+    paths = list(scene.jpeg_paths[:max_frames])
+    if len(paths) == 1:
+        paths = [paths[0], paths[0], paths[0]]
+    return [_load_source_frame(path) for path in paths]
+
+
+def _load_source_frame(path: Path) -> memory_e2e.SourceFrame:
+    jpeg_bytes = path.read_bytes()
+    width, height = _parse_jpeg_dimensions(jpeg_bytes, frame_id=None)
+    return memory_e2e.SourceFrame(
+        path=path,
+        jpeg_bytes=jpeg_bytes,
+        width=width,
+        height=height,
+    )
+
+
+def _selected_window(
+    scene: SceneDir,
+    source_frame: memory_e2e.SourceFrame,
+) -> dict[str, Any]:
+    try:
+        frame_index = list(scene.jpeg_paths).index(source_frame.path)
+    except ValueError:
+        frame_index = None
+    return {
+        "scene": scene.name,
+        "frame": str(source_frame.path),
+        "frame_index": frame_index,
+        "mode": "fixed_val_data_frame",
+    }
+
+
+def _probe_from_state_and_snapshot(
+    state: dict[str, Any],
+    snapshot: Any | None,
+) -> dict[str, Any]:
+    visual_tracks = list(state.get("tracks") or [])
+    attention = state.get("attention") or {}
+    snapshot_tracks = list(getattr(snapshot, "tracks", []) or [])
+    keypoint_counts = []
+    pointing_arm_counts = []
+    for track in snapshot_tracks:
+        keypoints = tuple(getattr(track, "keypoints", ()) or ())
+        keypoint_counts.append(
+            {
+                "track_id": getattr(track, "track_id", None),
+                "keypoint_count": len(keypoints),
+            }
+        )
+        pointing_arm_counts.append(
+            {
+                "track_id": getattr(track, "track_id", None),
+                "pointing_arm_count": _pointing_arm_count(keypoints),
+            }
+        )
+    return {
+        "track_count": len(visual_tracks),
+        "visible_person_count": sum(
+            1
+            for track in visual_tracks
+            if track.get("class") == "person" and int(track.get("lost_ms") or 0) == 0
+        ),
+        "attention_available": bool(attention),
+        "attention_target_track_id": attention.get("target_track_id"),
+        "scene_context": state.get("scene_context"),
+        "keypoint_counts": keypoint_counts,
+        "pointing_arm_counts": pointing_arm_counts,
+    }
+
+
+def _pointing_arm_count(keypoints: tuple[Any, ...]) -> int:
+    by_name = {getattr(keypoint, "name", ""): keypoint for keypoint in keypoints}
+    count = 0
+    for side in ("left", "right"):
+        if all(
+            _valid_probe_keypoint(by_name.get(f"{side}_{joint}"))
+            for joint in ("shoulder", "elbow", "wrist")
+        ):
+            count += 1
+    return count
+
+
+def _valid_probe_keypoint(keypoint: Any | None) -> bool:
+    if keypoint is None:
+        return False
+    confidence = getattr(keypoint, "confidence", None)
+    return confidence is None or float(confidence) >= 0.2
+
+
+def _response_reason(body: dict[str, Any]) -> str:
+    detail = body.get("detail")
+    if isinstance(detail, dict):
+        return str(detail.get("code") or detail.get("message") or "request_failed")
+    return str(
+        body.get("error_code")
+        or body.get("ambiguity_type")
+        or body.get("status")
+        or body.get("code")
+        or "request_failed"
+    )
+
+
+def _local_smoke_preflight(
+    *,
+    embedding_backend: str,
+    person_model_path: Path | None,
+    scene_model_path: Path | None,
+    inference_backend: str,
+    pose_model_path: Path | None,
+) -> dict[str, Any]:
+    missing: list[str] = []
+    invalid_paths: list[str] = []
+    if embedding_backend != "local":
+        missing.append("--embedding-backend local")
+    if person_model_path is None:
+        missing.append("--person-model-path")
+    elif not person_model_path.exists():
+        invalid_paths.append(f"--person-model-path={person_model_path}")
+    if scene_model_path is None:
+        missing.append("--scene-model-path")
+    elif not scene_model_path.exists():
+        invalid_paths.append(f"--scene-model-path={scene_model_path}")
+    if inference_backend != "ultralytics":
+        missing.append("--inference-backend ultralytics")
+    if pose_model_path is None:
+        missing.append("--pose-model-path")
+    elif not pose_model_path.is_file():
+        invalid_paths.append(f"--pose-model-path={pose_model_path}")
+    return {
+        "name": "local_smoke_explicit_real_backends",
+        "passed": not missing and not invalid_paths,
+        "details": {
+            "missing": missing,
+            "invalid_paths": invalid_paths,
+            "embedding_backend": embedding_backend,
+            "inference_backend": inference_backend,
+            "person_model_path": str(person_model_path) if person_model_path else None,
+            "scene_model_path": str(scene_model_path) if scene_model_path else None,
+            "pose_model_path": str(pose_model_path) if pose_model_path else None,
+        },
+    }
+
+
+def _local_smoke_preflight_failed_report(
+    *,
+    data_dir: Path,
+    out: Path,
+    camera: str,
+    preflight: dict[str, Any],
+    report_path: Path,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "failed",
+        "gate": "memory_teaching_ga_runner_local_smoke",
+        "mode": "local-smoke",
+        "backend": "local",
+        "real_model_evidence": False,
+        "data_dir": str(data_dir),
+        "out": str(out),
+        "camera": camera,
+        "scene_count": 0,
+        "forbidden_agent_payload_fields": {},
+        "self_smoke": _not_run_result(),
+        "scene_smoke": _not_run_result(),
+        "third_person_probe": _not_run_result(status="insufficient_sample"),
+        "artifacts": {"report_json": str(report_path.relative_to(out))},
+        "checks": [preflight],
+        "notes": [
+            "Local smoke mode requires explicit local embedding and ultralytics pose model paths.",
+        ],
+    }
+
+
+def _local_smoke_config(
+    *,
+    out: Path,
+    embedding_backend: str,
+    person_model_path: Path | None,
+    scene_model_path: Path | None,
+    inference_backend: str,
+    pose_model_path: Path | None,
+) -> ServerConfig:
+    return ServerConfig(
+        runtime_dir=out / "runtime",
+        inference=InferenceConfig(
+            backend=inference_backend,
+            model_path=pose_model_path or Path("runtime/models/yolov8n-pose.pt"),
+        ),
+        memory=MemoryConfig(
+            enabled=True,
+            db_path=out / "runtime" / "memory.sqlite3",
+            frame_cache_seconds=memory_e2e.FRAME_CACHE_SECONDS,
+            query_interval_ms=memory_e2e.QUERY_INTERVAL_MS,
+            queue_size=8,
+            embedding=MemoryEmbeddingConfig(
+                backend=embedding_backend,
+                person_model_path=person_model_path,
+                scene_model_path=scene_model_path,
+            ),
+            matching=MemoryMatchingConfig(event_cooldown_ms=memory_e2e.QUERY_INTERVAL_MS),
+        ),
+    )
+
+
+def _config_for_local_smoke_case(config: ServerConfig, runtime_dir: Path) -> ServerConfig:
+    return ServerConfig(
+        runtime_dir=runtime_dir,
+        inference=config.inference,
+        tracking=config.tracking,
+        attention=config.attention,
+        events=config.events,
+        metrics=config.metrics,
+        memory=MemoryConfig(
+            enabled=config.memory.enabled,
+            db_path=runtime_dir / "memory.sqlite3",
+            frame_cache_seconds=config.memory.frame_cache_seconds,
+            query_interval_ms=config.memory.query_interval_ms,
+            queue_size=config.memory.queue_size,
+            embedding=config.memory.embedding,
+            matching=config.memory.matching,
+        ),
+    )
+
+
+def _not_run_result(*, status: str = "failed") -> dict[str, Any]:
+    return {"status": status, "passed": False, "reason": "not_run"}
+
+
+def _insufficient_sample_result(*, reason: str, scene: str) -> dict[str, Any]:
+    return {
+        "status": "insufficient_sample",
+        "passed": False,
+        "reason": reason,
+        "scene": scene,
+        "observations": [],
+    }
 
 
 def _run_actual_scene_replay(
@@ -854,7 +1804,7 @@ def _load_source_frame_from_scene(scene: SceneDir) -> memory_e2e.SourceFrame:
 
 def _post_and_record_api_response(
     *,
-    runner: memory_e2e.MemoryE2ERunner,
+    runner: Any,
     api_response_records: list[dict[str, Any]],
     payload_index: int | str,
     scene: str,
@@ -1355,6 +2305,81 @@ def _build_actual_checks(
             "name": "object_resolve_unsupported_no_write",
             "passed": bool(object_result.get("passed")),
             "details": object_result,
+        },
+        {
+            "name": "artifact_skeleton",
+            "passed": all(artifact_exists.values()) and all(evidence_exists.values()),
+            "details": {
+                "artifacts": artifact_exists,
+                "visual_evidence": evidence_exists,
+            },
+        },
+    ]
+
+
+def _build_local_smoke_checks(
+    *,
+    scenes: list[SceneDir],
+    payload_records: list[dict[str, Any]],
+    forbidden_payload_fields: dict[str, list[str]],
+    out: Path,
+    artifact_paths: dict[str, str],
+    visual_evidence_index: list[dict[str, Any]],
+    preflight: dict[str, Any],
+    self_result: dict[str, Any],
+    scene_result: dict[str, Any],
+    third_person_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    expected_teach_scenes = {
+        "pic_teach_me",
+        "pic_teach_person",
+        "pic_teach_scene_galbot",
+    }
+    actual_teach_scenes = {record["scene"] for record in payload_records}
+    artifact_exists = {
+        key: (out / relative_path).exists()
+        for key, relative_path in artifact_paths.items()
+        if key != "report_json"
+    }
+    evidence_exists = {
+        item["path"]: (out / item["path"]).is_file() for item in visual_evidence_index
+    }
+    third_status = third_person_result.get("status")
+    return [
+        preflight,
+        {
+            "name": "discover_jpeg_scene_dirs",
+            "passed": bool(scenes),
+            "details": {"scene_count": len(scenes)},
+        },
+        {
+            "name": "expected_local_smoke_scenes",
+            "passed": expected_teach_scenes <= actual_teach_scenes,
+            "details": {
+                "expected": sorted(expected_teach_scenes),
+                "actual": sorted(actual_teach_scenes),
+                "missing": sorted(expected_teach_scenes - actual_teach_scenes),
+            },
+        },
+        {
+            "name": "agent_payload_forbidden_fields_absent",
+            "passed": all(not fields for fields in forbidden_payload_fields.values()),
+            "details": forbidden_payload_fields,
+        },
+        {
+            "name": "self_local_smoke",
+            "passed": self_result.get("status") == "passed",
+            "details": self_result,
+        },
+        {
+            "name": "scene_local_smoke",
+            "passed": scene_result.get("status") == "passed",
+            "details": scene_result,
+        },
+        {
+            "name": "third_person_local_probe",
+            "passed": third_status in {"passed", "insufficient_sample"},
+            "details": third_person_result,
         },
         {
             "name": "artifact_skeleton",
