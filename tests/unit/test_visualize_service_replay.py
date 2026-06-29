@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
-from tools.visualize_service_replay import (
+from tools.visual_evidence_helpers import (
     _engagement_state,
     _event_summary,
     _evidence_summary,
     _memory_event_summary,
-    _progress_line,
     _reacquire_summary,
-    _render_html,
     _scene_context_summary,
+    frame_header_lines,
+    render_frame_card,
+    render_html_document,
 )
+from tools.visualize_service_replay import _progress_line
 
 
 def _visual_state() -> dict:
@@ -115,6 +116,17 @@ def _memory_events() -> list[dict]:
     ]
 
 
+def _frame_evidence(tmp_path: Path, state: dict, *, scene: str = "fixtures/scene") -> dict:
+    return {
+        "frame_id": 1,
+        "scene": scene,
+        "source_name": "frame_001.jpg",
+        "image_path": tmp_path / "frames" / "frame_001.jpg",
+        "state_path": tmp_path / "states" / "frame_001.json",
+        "state": state,
+    }
+
+
 def test_visual_debug_helpers_summarize_memory_events() -> None:
     known_person, scene, familiar_unknown = _memory_events()
 
@@ -147,20 +159,15 @@ def test_visual_debug_helpers_summarize_memory_events() -> None:
 def test_visual_debug_html_includes_memory_event_summary(tmp_path: Path) -> None:
     state = _visual_state()
     state["semantic_events"] = _memory_events()
-    args = argparse.Namespace(
-        out=tmp_path,
+    frame = _frame_evidence(tmp_path, state)
+
+    rendered = render_html_document(
+        root=tmp_path,
         server="ws://127.0.0.1:8765/v1/stream",
         scene=Path("fixtures/scene"),
+        frames=[frame],
+        jsonl_path=tmp_path / "visual_state.jsonl",
     )
-    result = {
-        "index": 1,
-        "source": Path("frame_001.jpg"),
-        "output_image": tmp_path / "frames" / "frame_001.jpg",
-        "output_state": tmp_path / "states" / "frame_001.json",
-        "response": state,
-    }
-
-    rendered = _render_html(args, [result], tmp_path / "visual_state.jsonl")
 
     assert (
         "known_person_present track=7 memory=matched_id=person_000001 name=张三 "
@@ -218,22 +225,13 @@ def test_visual_debug_helpers_summarize_scene_reacquire_and_evidence() -> None:
 
 def test_visual_debug_html_and_progress_include_short_summaries(tmp_path: Path) -> None:
     state = _visual_state()
-    args = argparse.Namespace(
-        out=tmp_path,
-        server="ws://127.0.0.1:8765/v1/stream",
-        scene=Path("fixtures/scene"),
-    )
-    result = {
-        "index": 1,
-        "source": Path("frame_001.jpg"),
-        "output_image": tmp_path / "frames" / "frame_001.jpg",
-        "output_state": tmp_path / "states" / "frame_001.json",
-        "response": state,
-    }
+    frame = _frame_evidence(tmp_path, state)
 
-    rendered = _render_html(args, [result], tmp_path / "visual_state.jsonl")
+    rendered = render_frame_card(tmp_path, frame)
 
-    assert "scene=engagement=no_engage_target reasons=too_far,camera_motion_not_stationary" in rendered
+    assert "frame=1 frame_001.jpg" in rendered
+    assert "scene=fixtures/scene" in rendered
+    assert "scene_context=engagement=no_engage_target reasons=too_far,camera_motion_not_stationary" in rendered
     assert "reacq=reacq 4-&gt;7 elapsed_ms=850" in rendered
     assert (
         "person_waving track=7 evidence=runtime_person_slot=2 reacq=4-&gt;7 "
@@ -249,8 +247,8 @@ def test_visual_debug_html_and_progress_include_short_summaries(tmp_path: Path) 
 
 
 def test_visual_debug_helpers_tolerate_missing_fields() -> None:
-    assert _scene_context_summary(None) == "-"
-    assert _scene_context_summary({}) == "-"
+    assert _scene_context_summary(None) == "scene_context=none"
+    assert _scene_context_summary({}) == "scene_context=none"
     assert _engagement_state({}) == "-"
     assert _reacquire_summary({}) == "-"
     assert _evidence_summary({"event": "person_waving"}) == "-"
@@ -259,3 +257,29 @@ def test_visual_debug_helpers_tolerate_missing_fields() -> None:
 
     progress = _progress_line(1, 1, Path("frame.jpg"), {"semantic_events": "bad"})
     assert progress == "[1/1] frame.jpg: tracks=0 attention=- engagement=- events=0"
+
+
+def test_visual_debug_frame_header_lines_include_wrapper_metadata() -> None:
+    state = {"camera": "front", "frame_id": 12}
+
+    lines = frame_header_lines(state, scene="lobby", frame_id=99)
+
+    assert "frame=99" in lines
+    assert "camera=front" in lines
+    assert "scene=lobby" in lines
+    assert "scene_context=none" in lines
+
+
+def test_visual_debug_frame_card_shows_none_for_missing_context_and_events(tmp_path: Path) -> None:
+    state = {"camera": "front", "tracks": [], "semantic_events": []}
+
+    rendered = render_frame_card(
+        tmp_path,
+        _frame_evidence(tmp_path, state, scene="lobby"),
+        anchor="frame-1",
+    )
+
+    assert 'id="frame-1"' in rendered
+    assert "scene=lobby" in rendered
+    assert "scene_context=none" in rendered
+    assert "events=none" in rendered
