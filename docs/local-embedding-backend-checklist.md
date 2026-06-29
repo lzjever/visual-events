@@ -72,7 +72,7 @@
 
 ### 5. 场景 embedding 行为
 
-- [ ] `teach_scene` v0.3 只接受 `target.mode=scene` 整图教学；bbox/point/region 场景教学必须明确拒绝且不写入，等查询侧支持同类 region query 后再开放。
+- [ ] `teach_scene` v0.3 只接受 `target.kind=scene` 整图教学；bbox/point/region 场景教学必须明确拒绝且不写入，等查询侧支持同类 region query 后再开放。
 - [ ] scene 图像预处理使用等比例 resize shorter side / cover resize 后 center crop 到 `input_size`，不直接压扁非方图。
 - [ ] `scene_activated` 继续通过现有 retriever、threshold、cooldown 输出低频事件。
 - [ ] 不引入文本生成、场景分类标签器或 LLM；scene 语义来自用户教学文本。
