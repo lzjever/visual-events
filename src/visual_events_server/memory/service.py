@@ -168,13 +168,21 @@ class AppMemoryService:
         return events
 
     async def teach_person(self, request: dict[str, Any]) -> dict[str, Any]:
+        store_before = self._store_count_snapshot()
         try:
             cached = self._fresh_cached_frame(request)
         except MemoryServiceError as exc:
             if _public_person_target(request) is not None and exc.code == "frame_cache_expired":
-                raise _target_ambiguous_error("stale_interaction") from exc
+                error = _target_ambiguous_error("stale_interaction")
+                _attach_store_delta_to_error(error, self._store_delta(store_before))
+                raise error from exc
             raise
-        target = self._resolve_person_teach_target(cached, request)
+        try:
+            target = self._resolve_person_teach_target(cached, request)
+        except MemoryServiceError as exc:
+            if exc.code == "target_ambiguous":
+                _attach_store_delta_to_error(exc, self._store_delta(store_before))
+            raise
         if target.target_type not in {"person", "region"}:
             raise MemoryServiceError(
                 "invalid_target_type",
@@ -191,6 +199,7 @@ class AppMemoryService:
             raise MemoryServiceError(exc.code, exc.message, status_code=503) from exc
 
         now_ms = self._clock_ms()
+        crop_hash = _sha256_hex(embedding_bytes)
         person_id = _public_id("person")
         created = self.store.create_person_with_embedding(
             person_id=person_id,
@@ -201,7 +210,7 @@ class AppMemoryService:
             source_target_type=target.source_target_mode,
             source_track_ref=_source_track_ref(cached, target),
             source_frame_ref=_source_frame_ref(cached),
-            crop_hash=_sha256_hex(embedding_bytes),
+            crop_hash=crop_hash,
             crop_path_or_artifact_ref=None,
             resolver_target_ref=_resolver_target_ref(cached, target),
             resolution_reason=target.source_target_mode,
@@ -213,6 +222,11 @@ class AppMemoryService:
             "embedding_id": created["embedding_id"],
             "embedding_count": 1,
             "target_quality": target.quality,
+            "evidence": self._target_evidence(
+                cached,
+                target,
+                crop_hash=crop_hash,
+            ),
         }
 
     async def teach_scene(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -237,6 +251,7 @@ class AppMemoryService:
             raise MemoryServiceError(exc.code, exc.message, status_code=503) from exc
 
         now_ms = self._clock_ms()
+        crop_hash = _sha256_hex(embedding_bytes)
         scene_id = _public_id("scene")
         created = self.store.create_scene_with_embedding(
             scene_id=scene_id,
@@ -249,7 +264,7 @@ class AppMemoryService:
             source_target_type=target.source_target_mode,
             source_track_ref=_source_track_ref(cached, target),
             source_frame_ref=_source_frame_ref(cached),
-            crop_hash=_sha256_hex(embedding_bytes),
+            crop_hash=crop_hash,
             crop_path_or_artifact_ref=None,
             resolver_target_ref=_resolver_target_ref(cached, target),
             resolution_reason=target.source_target_mode,
@@ -261,24 +276,40 @@ class AppMemoryService:
             "embedding_id": created["embedding_id"],
             "embedding_count": 1,
             "target_quality": target.quality,
+            "evidence": self._target_evidence(
+                cached,
+                target,
+                crop_hash=crop_hash,
+            ),
         }
 
     async def resolve_target(self, request: dict[str, Any]) -> dict[str, Any]:
+        store_before = self._store_count_snapshot()
         public_person_target = _public_person_target(request)
         try:
             cached = self._fresh_cached_frame(request)
         except MemoryServiceError as exc:
             if public_person_target is not None and exc.code == "frame_cache_expired":
-                return _ambiguous_target_response("stale_interaction")
+                return {
+                    **_ambiguous_target_response("stale_interaction"),
+                    "store_delta": self._store_delta(store_before),
+                }
             raise
         if public_person_target is not None:
-            return self._preview_public_person_target(cached, public_person_target)
+            response = self._preview_public_person_target(cached, public_person_target)
+            response["store_delta"] = self._store_delta(store_before)
+            return response
         preview = self._preview_cached_target(cached, _target_request(request))
-        return {
+        response = {
             "ok": True,
             "status": preview.status,
             "candidates": [_candidate_to_dict(candidate) for candidate in preview.candidates],
         }
+        evidence = self._preview_evidence(cached, preview)
+        if evidence is not None:
+            response["evidence"] = evidence
+        response["store_delta"] = self._store_delta(store_before)
+        return response
 
     async def merge_anonymous_person(self, request: dict[str, Any]) -> dict[str, Any]:
         anonymous_id = _required_text(request, "anonymous_id")
@@ -462,6 +493,7 @@ class AppMemoryService:
                             _candidate_to_dict(candidate)
                             for candidate in preview.candidates
                         ],
+                        "evidence": self._request_evidence(cached),
                     },
                 )
         try:
@@ -511,12 +543,18 @@ class AppMemoryService:
             target, ambiguity_type = self._active_interaction_target(cached)
             if target is not None:
                 return target
-            raise _target_ambiguous_error(ambiguity_type)
+            raise _target_ambiguous_error(
+                ambiguity_type,
+                evidence=self._request_evidence(cached),
+            )
         if intent == "third_person_introduction":
             target, ambiguity_type = self._third_person_introduction_target(cached)
             if target is not None:
                 return target
-            raise _target_ambiguous_error(ambiguity_type)
+            raise _target_ambiguous_error(
+                ambiguity_type,
+                evidence=self._request_evidence(cached),
+            )
         raise MemoryServiceError(
             "unsupported_person_intent",
             f"unsupported person target intent {intent}",
@@ -531,7 +569,10 @@ class AppMemoryService:
         if intent == "self_introduction":
             resolved, ambiguity_type = self._active_interaction_target(cached)
             if resolved is None:
-                return _ambiguous_target_response(ambiguity_type)
+                return _ambiguous_target_response(
+                    ambiguity_type,
+                    evidence=self._request_evidence(cached),
+                )
             return {
                 "ok": True,
                 "status": "resolved",
@@ -541,11 +582,15 @@ class AppMemoryService:
                         reason="active_interaction_target",
                     )
                 ],
+                "evidence": self._target_evidence(cached, resolved),
             }
         if intent == "third_person_introduction":
             resolved, ambiguity_type = self._third_person_introduction_target(cached)
             if resolved is None:
-                return _ambiguous_target_response(ambiguity_type)
+                return _ambiguous_target_response(
+                    ambiguity_type,
+                    evidence=self._request_evidence(cached),
+                )
             return {
                 "ok": True,
                 "status": "resolved",
@@ -555,9 +600,13 @@ class AppMemoryService:
                         reason="pose_pointing_to_person",
                     )
                 ],
+                "evidence": self._target_evidence(cached, resolved),
             }
         return {
-            **_ambiguous_target_response("target_unclear"),
+            **_ambiguous_target_response(
+                "target_unclear",
+                evidence=self._request_evidence(cached),
+            ),
             "error_code": "unsupported_person_intent",
         }
 
@@ -928,6 +977,72 @@ class AppMemoryService:
         )
         queue.append(event)
 
+    def _store_count_snapshot(self) -> dict[str, int]:
+        return self.store.memory_table_counts()
+
+    def _store_delta(self, before: dict[str, int]) -> dict[str, dict[str, int]]:
+        after = self._store_count_snapshot()
+        return {
+            "before": before,
+            "after": after,
+            "delta": {
+                table: after.get(table, 0) - before.get(table, 0)
+                for table in sorted(set(before) | set(after))
+            },
+        }
+
+    def _request_evidence(self, cached: CachedFrame) -> dict[str, Any]:
+        evidence: dict[str, Any] = {}
+        if cached.memory_snapshot is not None:
+            evidence["request_snapshot_ref"] = cached.memory_snapshot.snapshot_ref
+        evidence.update(
+            {
+                "source_frame_ref": _source_frame_ref(cached),
+                "frame_id": cached.frame.frame_id,
+                "frame_timestamp_ms": cached.frame.timestamp_ms,
+                "observed_at_ms": cached.observed_at_ms,
+                "frame_cache_ttl_ms": self._cache.max_age_ms,
+            }
+        )
+        return evidence
+
+    def _target_evidence(
+        self,
+        cached: CachedFrame,
+        target: ResolvedTarget,
+        *,
+        crop_hash: str | None = None,
+    ) -> dict[str, Any]:
+        evidence = self._request_evidence(cached)
+        evidence["resolution_reason"] = target.source_target_mode
+        source_track_ref = _source_track_ref(cached, target)
+        if source_track_ref is not None:
+            evidence["source_track_ref"] = source_track_ref
+        evidence["resolver_target_ref"] = _resolver_target_ref(cached, target)
+        if crop_hash is not None:
+            evidence["crop_hash"] = crop_hash
+        return evidence
+
+    def _preview_evidence(
+        self,
+        cached: CachedFrame,
+        preview: Any,
+    ) -> dict[str, Any] | None:
+        evidence = self._request_evidence(cached)
+        if preview.status == "resolved" and preview.candidates:
+            candidate = preview.candidates[0]
+            evidence["resolution_reason"] = candidate.reason
+            if candidate.track_id is not None:
+                evidence["source_track_ref"] = _candidate_source_track_ref(
+                    cached,
+                    candidate,
+                )
+            evidence["resolver_target_ref"] = _candidate_resolver_target_ref(
+                cached,
+                candidate,
+            )
+        return evidence
+
 
 def _target_request(request: dict[str, Any]) -> TargetRequest:
     target = _required_mapping(request, "target")
@@ -963,8 +1078,12 @@ def _public_person_target(request: dict[str, Any]) -> dict[str, Any] | None:
     return target
 
 
-def _ambiguous_target_response(ambiguity_type: str) -> dict[str, Any]:
-    return {
+def _ambiguous_target_response(
+    ambiguity_type: str,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    response = {
         "ok": True,
         "status": "ambiguous",
         "retryable": True,
@@ -972,15 +1091,33 @@ def _ambiguous_target_response(ambiguity_type: str) -> dict[str, Any]:
         "ambiguity_type": ambiguity_type,
         "candidates": [],
     }
+    if evidence is not None:
+        response["evidence"] = evidence
+    return response
 
 
-def _target_ambiguous_error(ambiguity_type: str) -> MemoryServiceError:
+def _target_ambiguous_error(
+    ambiguity_type: str,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> MemoryServiceError:
     return MemoryServiceError(
         "target_ambiguous",
         "target requires an active interaction target",
         status_code=409,
-        details=_ambiguous_target_response(ambiguity_type),
+        details=_ambiguous_target_response(
+            ambiguity_type,
+            evidence=evidence,
+        ),
     )
+
+
+def _attach_store_delta_to_error(
+    error: MemoryServiceError,
+    store_delta: dict[str, dict[str, int]],
+) -> None:
+    if "store_delta" not in error.details:
+        error.details["store_delta"] = store_delta
 
 
 def _recognition_track_eligible(track: TrackSnapshot) -> bool:
@@ -1025,6 +1162,22 @@ def _resolver_target_ref(cached: CachedFrame, target: ResolvedTarget) -> str:
         return source_track_ref
     bbox = ",".join(_short_float(value) for value in target.bbox_xyxy)
     return f"{target.source_target_mode}:{target.target_type}:{bbox}"
+
+
+def _candidate_source_track_ref(cached: CachedFrame, candidate: Any) -> str | None:
+    if candidate.track_id is None:
+        return None
+    return f"{cached.frame.camera}:track:{candidate.track_id}"
+
+
+def _candidate_resolver_target_ref(cached: CachedFrame, candidate: Any) -> str:
+    if candidate.target_type == "scene":
+        return "scene"
+    source_track_ref = _candidate_source_track_ref(cached, candidate)
+    if source_track_ref is not None:
+        return source_track_ref
+    bbox = ",".join(_short_float(value) for value in candidate.bbox_xyxy)
+    return f"{candidate.reason}:{candidate.target_type}:{bbox}"
 
 
 def _sha256_hex(payload: bytes) -> str:

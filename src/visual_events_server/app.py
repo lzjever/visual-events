@@ -22,6 +22,10 @@ from .memory import (
     MemoryStore,
 )
 from .memory.api_contract import (
+    ConversationSummaryRequest,
+    CorrectIdentityRequest,
+    LinkExternalUserRequest,
+    MergeAnonymousPersonRequest,
     ResolveTargetRequest,
     TeachPersonRequest,
     TeachSceneRequest,
@@ -196,18 +200,21 @@ def create_app(
     @app.post("/v1/memory/person/{person_id}/conversation-summary")
     async def add_conversation_summary(
         person_id: str,
-        payload: dict[str, Any] = Body(...),
+        payload: ConversationSummaryRequest = Body(...),
     ) -> dict[str, Any]:
         return await _memory_response(
-            app.state.memory_service.add_conversation_summary(person_id, payload)
+            app.state.memory_service.add_conversation_summary(
+                person_id,
+                payload.to_internal_request(),
+            )
         )
 
     @app.post("/v1/memory/link-external-user")
     async def link_external_user(
-        payload: dict[str, Any] = Body(...),
+        payload: LinkExternalUserRequest = Body(...),
     ) -> dict[str, Any]:
         return await _memory_response(
-            app.state.memory_service.link_external_user(payload)
+            app.state.memory_service.link_external_user(payload.to_internal_request())
         )
 
     @app.get("/v1/memory/person/by-external-user/{external_user_ref}")
@@ -220,17 +227,21 @@ def create_app(
 
     @app.post("/v1/memory/merge-anonymous-person")
     async def merge_anonymous_person(
-        payload: dict[str, Any] = Body(...),
+        payload: MergeAnonymousPersonRequest = Body(...),
     ) -> dict[str, Any]:
         return await _memory_response(
-            app.state.memory_service.merge_anonymous_person(payload)
+            app.state.memory_service.merge_anonymous_person(
+                payload.to_internal_request()
+            )
         )
 
     @app.post("/v1/memory/correct-identity")
     async def correct_identity(
-        payload: dict[str, Any] = Body(...),
+        payload: CorrectIdentityRequest = Body(...),
     ) -> dict[str, Any]:
-        return await _memory_response(app.state.memory_service.correct_identity(payload))
+        return await _memory_response(
+            app.state.memory_service.correct_identity(payload.to_internal_request())
+        )
 
     @app.post("/v1/memory/resolve-target")
     async def resolve_target(

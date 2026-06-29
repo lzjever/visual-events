@@ -40,11 +40,9 @@ class ResolveTarget(_BaseTarget):
     kind: Literal["person", "scene", "object"]
 
 
-class _BaseMemoryRequest(_StrictModel):
-    camera: str = Field(min_length=1)
-
+class _RejectLowLevelFieldsModel(_StrictModel):
     @model_validator(mode="after")
-    def _reject_low_level_fields(self) -> "_BaseMemoryRequest":
+    def _reject_low_level_fields(self) -> "_RejectLowLevelFieldsModel":
         forbidden_path = _find_forbidden_agent_field(self.model_dump())
         if forbidden_path is not None:
             field_path = ".".join(forbidden_path)
@@ -53,6 +51,10 @@ class _BaseMemoryRequest(_StrictModel):
                 f"{field_path}"
             )
         return self
+
+
+class _BaseMemoryRequest(_RejectLowLevelFieldsModel):
+    camera: str = Field(min_length=1)
 
 
 class TeachPersonRequest(_BaseMemoryRequest):
@@ -95,6 +97,41 @@ class ResolveTargetRequest(_BaseMemoryRequest):
             "camera": self.camera,
             "target": target,
         }
+
+
+class ConversationSummaryRequest(_RejectLowLevelFieldsModel):
+    summary: str = Field(min_length=1)
+    source: str | None = Field(default=None, min_length=1)
+    source_conversation_id: str | None = Field(default=None, min_length=1)
+
+    def to_internal_request(self) -> dict[str, Any]:
+        return self.model_dump(exclude_none=True)
+
+
+class LinkExternalUserRequest(_RejectLowLevelFieldsModel):
+    person_id: str = Field(min_length=1)
+    external_user_ref: str = Field(min_length=1)
+
+    def to_internal_request(self) -> dict[str, Any]:
+        return self.model_dump()
+
+
+class MergeAnonymousPersonRequest(_RejectLowLevelFieldsModel):
+    anonymous_id: str = Field(min_length=1)
+    person_id: str | None = Field(default=None, min_length=1)
+    profile: dict[str, Any] | None = None
+    merge_reason: str | None = Field(default=None, min_length=1)
+
+    def to_internal_request(self) -> dict[str, Any]:
+        return self.model_dump(exclude_none=True)
+
+
+class CorrectIdentityRequest(_RejectLowLevelFieldsModel):
+    memory_match_id: str = Field(min_length=1)
+    wrong_person_id: str = Field(min_length=1)
+
+    def to_internal_request(self) -> dict[str, Any]:
+        return self.model_dump()
 
 
 def unsupported_target_kind_response() -> dict[str, Any]:

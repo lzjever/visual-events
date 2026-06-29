@@ -416,6 +416,63 @@ def test_public_memory_routes_reject_low_level_agent_payload_fields():
     assert service.calls == []
 
 
+def test_public_memory_management_routes_reject_unknown_and_low_level_fields_without_calling_service():
+    base_payloads = {
+        "/v1/memory/person/person_000001/conversation-summary": {
+            "summary": "上次问过新品尺码。",
+            "source": "agent",
+        },
+        "/v1/memory/link-external-user": {
+            "person_id": "person_000001",
+            "external_user_ref": "wechat:zhangsan",
+        },
+        "/v1/memory/merge-anonymous-person": {
+            "anonymous_id": "anon_000001",
+            "profile": {"display_name": "李四"},
+        },
+        "/v1/memory/correct-identity": {
+            "memory_match_id": "match_000001",
+            "wrong_person_id": "person_000001",
+        },
+    }
+    forbidden_values = {
+        "track_id": 7,
+        "bbox": [0, 0, 10, 10],
+        "bbox_xyxy": [0, 0, 10, 10],
+        "point_uv": [0.5, 0.5],
+        "test_hint": "fixture",
+        "source_scene": "pic_teach_scene",
+        "source_frame": 7,
+    }
+    service = FakeMemoryService()
+    client = TestClient(create_app(memory_service=service))
+
+    for path, base_payload in base_payloads.items():
+        unknown_payload = {**base_payload, "unexpected": "nope"}
+        assert client.post(path, json=unknown_payload).status_code == 422
+
+        for field, value in forbidden_values.items():
+            top_level_payload = {**base_payload, field: value}
+            assert client.post(path, json=top_level_payload).status_code == 422
+
+    merge_payload = base_payloads["/v1/memory/merge-anonymous-person"]
+    for field, value in forbidden_values.items():
+        low_level_payload = deepcopy(merge_payload)
+        low_level_payload["profile"] = {
+            **merge_payload["profile"],
+            field: value,
+        }
+        assert (
+            client.post(
+                "/v1/memory/merge-anonymous-person",
+                json=low_level_payload,
+            ).status_code
+            == 422
+        )
+
+    assert service.calls == []
+
+
 def test_public_resolve_target_rejects_object_without_calling_memory_service():
     service = FakeMemoryService()
     client = TestClient(create_app(memory_service=service))

@@ -34,6 +34,25 @@ class VectorCandidate:
     distance: float
 
 
+_MEMORY_COUNT_TABLES = (
+    "person_profiles",
+    "person_embeddings",
+    "person_embedding_vectors",
+    "scene_memories",
+    "scene_embeddings",
+    "scene_embedding_vectors",
+    "anonymous_profiles",
+    "anonymous_embeddings",
+    "anonymous_embedding_vectors",
+    "embedding_provenance",
+    "conversation_summaries",
+    "external_user_links",
+    "memory_match_records",
+    "profile_merge_history",
+    "negative_identity_matches",
+)
+
+
 class MemoryStore:
     def __init__(
         self,
@@ -80,6 +99,16 @@ class MemoryStore:
     def close(self) -> None:
         with self._lock:
             self.connection.close()
+
+    def memory_table_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        with self._lock:
+            for table in _MEMORY_COUNT_TABLES:
+                row = self.connection.execute(
+                    f"SELECT COUNT(*) AS count FROM {table}",
+                ).fetchone()
+                counts[table] = int(row["count"])
+        return counts
 
     def upsert_person_profile(
         self,

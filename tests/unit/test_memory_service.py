@@ -430,14 +430,12 @@ async def test_self_introduction_requires_active_interaction_target_and_does_not
             },
         }
     )
-    assert preview == {
-        "ok": True,
-        "status": "ambiguous",
-        "retryable": True,
-        "ask_user_hint": True,
-        "ambiguity_type": "no_active_interaction_target",
-        "candidates": [],
-    }
+    assert preview["ok"] is True
+    assert preview["status"] == "ambiguous"
+    assert preview["retryable"] is True
+    assert preview["ask_user_hint"] is True
+    assert preview["ambiguity_type"] == "no_active_interaction_target"
+    assert preview["candidates"] == []
     _assert_allowed_ambiguity(preview)
 
     with pytest.raises(MemoryServiceError) as exc:
@@ -499,6 +497,12 @@ async def test_self_introduction_uses_active_interaction_target_for_write(tmp_pa
     matches = subject.store.search_person_embeddings(expected_embedding, limit=1)
     assert matches[0].matched_id == person["person_id"]
     provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
+    assert person["evidence"]["source_frame_ref"] == provenance["source_frame_ref"]
+    assert person["evidence"]["request_snapshot_ref"] == "snapshot:front:1"
+    assert person["evidence"]["source_track_ref"] == provenance["source_track_ref"]
+    assert person["evidence"]["resolver_target_ref"] == provenance["resolver_target_ref"]
+    assert person["evidence"]["resolution_reason"] == provenance["resolution_reason"]
+    assert person["evidence"]["crop_hash"] == provenance["crop_hash"]
     assert provenance["source_track_ref"] == "front:track:7"
     assert provenance["resolver_target_ref"] == "front:track:7"
     assert provenance["resolution_reason"] == "active_interaction_target"
@@ -507,6 +511,54 @@ async def test_self_introduction_uses_active_interaction_target_for_write(tmp_pa
         (matches[0].embedding_id,),
     ).fetchone()
     assert row["source_target_type"] == "active_interaction_target"
+
+
+@pytest.mark.asyncio
+async def test_resolve_self_introduction_returns_snapshot_evidence_and_zero_store_delta(
+    tmp_path,
+):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    source_frame = frame()
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(frame_message=source_frame),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    before_counts = _store_counts(subject.store)
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    preview = await subject.resolve_target(
+        {
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "self_introduction",
+                "referent_text": "我",
+            },
+        }
+    )
+
+    assert preview["status"] == "resolved"
+    assert preview["candidates"][0]["track_id"] == 7
+    assert preview["evidence"] == {
+        "request_snapshot_ref": "snapshot:front:1",
+        "source_frame_ref": "front:1:1000",
+        "frame_id": 1,
+        "frame_timestamp_ms": 1000,
+        "observed_at_ms": 10000,
+        "frame_cache_ttl_ms": 1000,
+        "resolution_reason": "active_interaction_target",
+        "source_track_ref": "front:track:7",
+        "resolver_target_ref": "front:track:7",
+    }
+    _assert_zero_store_delta(preview["store_delta"])
+    assert _store_counts(subject.store) == before_counts
+    assert backend.person_inputs == []
+    assert backend.scene_inputs == []
 
 
 @pytest.mark.asyncio
@@ -757,6 +809,7 @@ async def test_third_person_introduction_pose_unclear_does_not_write(tmp_path):
 
     assert preview["status"] == "ambiguous"
     assert preview["ambiguity_type"] == "pose_unclear"
+    _assert_zero_store_delta(preview["store_delta"])
     _assert_allowed_ambiguity(preview)
 
     with pytest.raises(MemoryServiceError) as exc:
@@ -769,9 +822,11 @@ async def test_third_person_introduction_pose_unclear_does_not_write(tmp_path):
 
     assert exc.value.code == "target_ambiguous"
     assert exc.value.details["ambiguity_type"] == "pose_unclear"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
     _assert_allowed_ambiguity(exc.value.details)
     assert backend.person_inputs == []
     assert _count_rows(subject.store, "person_profiles") == 0
+    assert _count_rows(subject.store, "person_embeddings") == 0
 
 
 @pytest.mark.asyncio
@@ -1392,6 +1447,15 @@ def _count_rows(store: MemoryStore, table: str) -> int:
         f"SELECT COUNT(*) AS count FROM {table}",
     ).fetchone()
     return int(row["count"])
+
+
+def _store_counts(store: MemoryStore) -> dict[str, int]:
+    return store.memory_table_counts()
+
+
+def _assert_zero_store_delta(store_delta: dict) -> None:
+    assert store_delta["before"] == store_delta["after"]
+    assert all(value == 0 for value in store_delta["delta"].values())
 
 
 def _assert_allowed_ambiguity(payload: dict) -> None:

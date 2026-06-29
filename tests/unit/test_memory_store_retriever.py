@@ -472,6 +472,61 @@ def test_anonymous_profile_embedding_and_retrieval_round_trip(tmp_path) -> None:
     assert store.get_active_anonymous_profile("anon_inactive") is None
 
 
+def test_memory_table_counts_include_sqlite_vec_tables_after_embedding_writes(
+    tmp_path,
+) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    store.upsert_person_profile(
+        person_id="person_1",
+        display_name="张三",
+        description="店长",
+        tags=(),
+        now_ms=1000,
+    )
+    store.add_person_embedding(
+        person_id="person_1",
+        result=embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        source_target_type="track_id",
+        now_ms=1000,
+    )
+    store.create_anonymous_profile(
+        anonymous_id="anon_1",
+        seen_count=1,
+        first_seen_at_ms=1000,
+        last_seen_at_ms=1000,
+        familiar_score=0.25,
+    )
+    store.add_anonymous_embedding(
+        anonymous_id="anon_1",
+        result=embedding([0.0, 1.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        source_target_type="track_id",
+        now_ms=1000,
+    )
+    store.create_scene_memory(
+        scene_id="scene_1",
+        title="货柜",
+        description="门口货柜",
+        activation_hint="有人停留时介绍货品",
+        target_type="scene",
+        now_ms=1000,
+    )
+    store.add_scene_embedding(
+        scene_id="scene_1",
+        result=embedding([0.0, 0.0, 1.0, 0.0], embedding_type="scene", model="fake-scene"),
+        source_target_type="scene",
+        now_ms=1000,
+    )
+
+    counts = store.memory_table_counts()
+
+    assert counts["person_embeddings"] == 1
+    assert counts["person_embedding_vectors"] == 1
+    assert counts["anonymous_embeddings"] == 1
+    assert counts["anonymous_embedding_vectors"] == 1
+    assert counts["scene_embeddings"] == 1
+    assert counts["scene_embedding_vectors"] == 1
+
+
 def test_anonymous_merge_low_level_methods_copy_and_mark_profile(tmp_path) -> None:
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
     store.upsert_person_profile(
