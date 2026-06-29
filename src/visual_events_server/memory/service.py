@@ -513,7 +513,10 @@ class AppMemoryService:
                 return target
             raise _target_ambiguous_error(ambiguity_type)
         if intent == "third_person_introduction":
-            raise _target_ambiguous_error("introducer_unclear")
+            target, ambiguity_type = self._third_person_introduction_target(cached)
+            if target is not None:
+                return target
+            raise _target_ambiguous_error(ambiguity_type)
         raise MemoryServiceError(
             "unsupported_person_intent",
             f"unsupported person target intent {intent}",
@@ -540,7 +543,19 @@ class AppMemoryService:
                 ],
             }
         if intent == "third_person_introduction":
-            return _ambiguous_target_response("introducer_unclear")
+            resolved, ambiguity_type = self._third_person_introduction_target(cached)
+            if resolved is None:
+                return _ambiguous_target_response(ambiguity_type)
+            return {
+                "ok": True,
+                "status": "resolved",
+                "candidates": [
+                    _resolved_target_to_candidate_dict(
+                        resolved,
+                        reason="pose_pointing_to_person",
+                    )
+                ],
+            }
         return {
             **_ambiguous_target_response("target_unclear"),
             "error_code": "unsupported_person_intent",
@@ -593,6 +608,44 @@ class AppMemoryService:
                 bbox_xyxy=resolved.bbox_xyxy,
                 track_id=resolved.track_id,
                 quality=resolved.quality,
+            ),
+            "",
+        )
+
+    def _third_person_introduction_target(
+        self,
+        cached: CachedFrame,
+    ) -> tuple[ResolvedTarget | None, str]:
+        introducer, ambiguity_type = self._active_interaction_target(cached)
+        if introducer is None or introducer.track_id is None:
+            return None, ambiguity_type
+
+        snapshot = cached.memory_snapshot
+        if snapshot is None:
+            return None, "no_active_interaction_target"
+        try:
+            preview = self._resolver.preview_pose_pointing_person(
+                introducer_track_id=introducer.track_id,
+                image_width=snapshot.image_size[0],
+                image_height=snapshot.image_size[1],
+                tracks=snapshot.tracks,
+            )
+        except TargetResolveError:
+            return None, "target_unclear"
+
+        if preview.status != "resolved" or not preview.candidates:
+            return None, preview.ambiguity_type or "target_unclear"
+
+        candidate = preview.candidates[0]
+        if candidate.track_id is None:
+            return None, "target_unclear"
+        return (
+            ResolvedTarget(
+                source_target_mode="pose_pointing_to_person",
+                target_type=candidate.target_type,
+                bbox_xyxy=candidate.bbox_xyxy,
+                track_id=candidate.track_id,
+                quality="usable",
             ),
             "",
         )

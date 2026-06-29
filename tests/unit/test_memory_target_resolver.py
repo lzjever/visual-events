@@ -10,6 +10,7 @@ from visual_events_server.memory.target_resolver import (
     TargetResolveError,
     TargetResolver,
 )
+from visual_events_server.inference.base import PoseKeypoint
 from visual_events_server.tracking import TrackSnapshot
 
 
@@ -19,6 +20,7 @@ def track(
     bbox_xyxy: tuple[float, float, float, float],
     hits: int = 2,
     lost_ms: int = 0,
+    keypoints: tuple[PoseKeypoint, ...] = (),
 ) -> TrackSnapshot:
     return TrackSnapshot(
         track_id=track_id,
@@ -33,6 +35,7 @@ def track(
         lost_ms=lost_ms,
         hits=hits,
         misses=0,
+        keypoints=keypoints,
     )
 
 
@@ -43,6 +46,18 @@ def attention(track_id: int) -> AttentionResult:
         reason="largest_stable_person",
         confidence=0.91,
         largest_person_stable=True,
+    )
+
+
+def kp(name: str, x: float, y: float, confidence: float = 0.9) -> PoseKeypoint:
+    return PoseKeypoint(name=name, x=x, y=y, confidence=confidence)
+
+
+def pointing_right_keypoints(*, confidence: float = 0.9) -> tuple[PoseKeypoint, ...]:
+    return (
+        kp("left_shoulder", 180.0, 220.0, confidence),
+        kp("left_elbow", 300.0, 250.0, confidence),
+        kp("left_wrist", 380.0, 260.0, confidence),
     )
 
 
@@ -59,6 +74,108 @@ def test_resolves_attention_target_to_matching_track_bbox() -> None:
     assert resolved.target_type == "person"
     assert resolved.track_id == 7
     assert resolved.bbox_xyxy == (100.0, 80.0, 380.0, 420.0)
+
+
+def test_pose_pointing_resolves_third_person_candidate() -> None:
+    preview = TargetResolver().preview_pose_pointing_person(
+        introducer_track_id=1,
+        image_width=800,
+        image_height=600,
+        tracks=[
+            track(
+                1,
+                bbox_xyxy=(100.0, 100.0, 300.0, 500.0),
+                keypoints=pointing_right_keypoints(),
+            ),
+            track(2, bbox_xyxy=(500.0, 170.0, 650.0, 420.0)),
+            track(3, bbox_xyxy=(60.0, 150.0, 180.0, 420.0)),
+        ],
+    )
+
+    assert preview.status == "resolved"
+    assert preview.ambiguity_type == ""
+    assert [candidate.track_id for candidate in preview.candidates] == [2]
+    assert preview.candidates[0].reason == "pose_pointing_to_person"
+
+
+def test_pose_pointing_missing_keypoints_is_pose_unclear() -> None:
+    preview = TargetResolver().preview_pose_pointing_person(
+        introducer_track_id=1,
+        image_width=800,
+        image_height=600,
+        tracks=[
+            track(1, bbox_xyxy=(100.0, 100.0, 300.0, 500.0)),
+            track(2, bbox_xyxy=(500.0, 170.0, 650.0, 420.0)),
+        ],
+    )
+
+    assert preview.status == "ambiguous"
+    assert preview.ambiguity_type == "pose_unclear"
+    assert preview.candidates == []
+
+
+def test_pose_pointing_close_candidates_are_ambiguous() -> None:
+    preview = TargetResolver().preview_pose_pointing_person(
+        introducer_track_id=1,
+        image_width=900,
+        image_height=600,
+        tracks=[
+            track(
+                1,
+                bbox_xyxy=(100.0, 100.0, 300.0, 500.0),
+                keypoints=pointing_right_keypoints(),
+            ),
+            track(2, bbox_xyxy=(500.0, 170.0, 620.0, 410.0)),
+            track(3, bbox_xyxy=(500.0, 190.0, 620.0, 430.0)),
+        ],
+    )
+
+    assert preview.status == "ambiguous"
+    assert preview.ambiguity_type == "multiple_candidates"
+    assert [candidate.reason for candidate in preview.candidates[:2]] == [
+        "pose_pointing_to_person",
+        "pose_pointing_to_person",
+    ]
+
+
+def test_pose_pointing_same_ray_near_and_far_hits_are_ambiguous() -> None:
+    preview = TargetResolver().preview_pose_pointing_person(
+        introducer_track_id=1,
+        image_width=1400,
+        image_height=700,
+        tracks=[
+            track(
+                1,
+                bbox_xyxy=(100.0, 100.0, 300.0, 500.0),
+                keypoints=pointing_right_keypoints(),
+            ),
+            track(2, bbox_xyxy=(405.0, 220.0, 455.0, 320.0)),
+            track(3, bbox_xyxy=(1080.0, 340.0, 1180.0, 540.0)),
+        ],
+    )
+
+    assert preview.status == "ambiguous"
+    assert preview.ambiguity_type == "multiple_candidates"
+    assert {candidate.track_id for candidate in preview.candidates[:2]} == {2, 3}
+
+
+def test_pose_pointing_without_forward_hit_is_target_unclear() -> None:
+    preview = TargetResolver().preview_pose_pointing_person(
+        introducer_track_id=1,
+        image_width=800,
+        image_height=600,
+        tracks=[
+            track(
+                1,
+                bbox_xyxy=(100.0, 100.0, 300.0, 500.0),
+                keypoints=pointing_right_keypoints(),
+            ),
+            track(2, bbox_xyxy=(520.0, 450.0, 660.0, 580.0)),
+        ],
+    )
+
+    assert preview.status == "not_found"
+    assert preview.ambiguity_type == "target_unclear"
 
 
 def test_resolves_point_to_visible_track_containing_point() -> None:
