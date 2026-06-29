@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from copy import deepcopy
@@ -731,109 +732,112 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
             ),
         )
     )
-    client = TestClient(create_app(processor=MemoryVisualProcessor(), config=config))
-
-    with client.websocket_connect("/v1/stream") as websocket:
-        websocket.send_bytes(
-            encode_frame_message(
-                frame_header(frame_id=1, timestamp_ms=1710000000000),
-                JPEG_BYTES,
-            )
-        )
-        assert json.loads(websocket.receive_text())["semantic_events"] == []
-
-        person = client.post(
-            "/v1/memory/teach/person",
-            json={
-                "camera": "front",
-                "target": {
-                    "kind": "person",
-                    "intent": "self_introduction",
-                    "referent_text": "我",
-                },
-                "profile": {
-                    "display_name": "张三",
-                    "description": "店长",
-                    "tags": ["staff"],
-                },
-            },
-        )
-        assert person.status_code == 200
-        person_id = person.json()["person_id"]
-
-        scene = client.post(
-            "/v1/memory/teach/scene",
-            json={
-                "camera": "front",
-                "target": {
-                    "kind": "scene",
-                    "intent": "teach_scene",
-                    "referent_text": "当前展示区",
-                },
-                "memory": {
-                    "title": "新品展示区",
-                    "description": "夏季外套区域",
-                    "activation_hint": "介绍新品活动",
-                    "region_id": "display_zone",
-                },
-            },
-        )
-        assert scene.status_code == 200
-
-        assert client.post(
-            f"/v1/memory/person/{person_id}/conversation-summary",
-            json={
-                "summary": "上次问过新品尺码，偏好浅色外套。",
-                "source": "agent",
-                "source_conversation_id": "conv-1",
-            },
-        ).json()["ok"] is True
-        assert client.post(
-            "/v1/memory/link-external-user",
-            json={
-                "person_id": person_id,
-                "external_user_ref": "wechat:zhangsan",
-            },
-        ).json() == {"ok": True, "person_id": person_id}
-        external = client.get(
-            "/v1/memory/person/by-external-user/wechat:zhangsan"
-        ).json()
-        assert external["person"]["display_name"] == "张三"
-        assert external["conversation_summaries"] == ["上次问过新品尺码，偏好浅色外套。"]
-
-        websocket.send_bytes(
-            encode_frame_message(
-                frame_header(frame_id=2, timestamp_ms=1710000000600),
-                JPEG_BYTES,
-            )
-        )
-        message = json.loads(websocket.receive_text())
-        events_by_type = {
-            event["event"]: event
-            for event in message["semantic_events"]
-            if event["event"] in {"known_person_present", "scene_activated"}
-        }
-        collected_event_names = [
-            event["event"] for event in message["semantic_events"]
-        ]
-        for frame_id in range(3, 8):
-            if {"known_person_present", "scene_activated"}.issubset(events_by_type):
-                break
-            time.sleep(0.05)
+    with TestClient(
+        create_app(processor=MemoryVisualProcessor(), config=config)
+    ) as client:
+        with client.websocket_connect("/v1/stream") as websocket:
             websocket.send_bytes(
                 encode_frame_message(
-                    frame_header(
-                        frame_id=frame_id,
-                        timestamp_ms=1710000000600 + frame_id,
-                    ),
+                    frame_header(frame_id=1, timestamp_ms=1710000000000),
+                    JPEG_BYTES,
+                )
+            )
+            assert json.loads(websocket.receive_text())["semantic_events"] == []
+
+            person = client.post(
+                "/v1/memory/teach/person",
+                json={
+                    "camera": "front",
+                    "target": {
+                        "kind": "person",
+                        "intent": "self_introduction",
+                        "referent_text": "我",
+                    },
+                    "profile": {
+                        "display_name": "张三",
+                        "description": "店长",
+                        "tags": ["staff"],
+                    },
+                },
+            )
+            assert person.status_code == 200
+            person_id = person.json()["person_id"]
+
+            scene = client.post(
+                "/v1/memory/teach/scene",
+                json={
+                    "camera": "front",
+                    "target": {
+                        "kind": "scene",
+                        "intent": "teach_scene",
+                        "referent_text": "当前展示区",
+                    },
+                    "memory": {
+                        "title": "新品展示区",
+                        "description": "夏季外套区域",
+                        "activation_hint": "介绍新品活动",
+                        "region_id": "display_zone",
+                    },
+                },
+            )
+            assert scene.status_code == 200
+
+            assert client.post(
+                f"/v1/memory/person/{person_id}/conversation-summary",
+                json={
+                    "summary": "上次问过新品尺码，偏好浅色外套。",
+                    "source": "agent",
+                    "source_conversation_id": "conv-1",
+                },
+            ).json()["ok"] is True
+            assert client.post(
+                "/v1/memory/link-external-user",
+                json={
+                    "person_id": person_id,
+                    "external_user_ref": "wechat:zhangsan",
+                },
+            ).json() == {"ok": True, "person_id": person_id}
+            external = client.get(
+                "/v1/memory/person/by-external-user/wechat:zhangsan"
+            ).json()
+            assert external["person"]["display_name"] == "张三"
+            assert external["conversation_summaries"] == [
+                "上次问过新品尺码，偏好浅色外套。"
+            ]
+
+            websocket.send_bytes(
+                encode_frame_message(
+                    frame_header(frame_id=2, timestamp_ms=1710000000600),
                     JPEG_BYTES,
                 )
             )
             message = json.loads(websocket.receive_text())
-            for event in message["semantic_events"]:
-                collected_event_names.append(event["event"])
-                if event["event"] in {"known_person_present", "scene_activated"}:
-                    events_by_type[event["event"]] = event
+            events_by_type = {
+                event["event"]: event
+                for event in message["semantic_events"]
+                if event["event"] in {"known_person_present", "scene_activated"}
+            }
+            collected_event_names = [
+                event["event"] for event in message["semantic_events"]
+            ]
+            for frame_id in range(3, 8):
+                if {"known_person_present", "scene_activated"}.issubset(events_by_type):
+                    break
+                time.sleep(0.05)
+                websocket.send_bytes(
+                    encode_frame_message(
+                        frame_header(
+                            frame_id=frame_id,
+                            timestamp_ms=1710000000600 + frame_id,
+                        ),
+                        JPEG_BYTES,
+                    )
+                )
+                message = json.loads(websocket.receive_text())
+                for event in message["semantic_events"]:
+                    collected_event_names.append(event["event"])
+                    if event["event"] in {"known_person_present", "scene_activated"}:
+                        events_by_type[event["event"]] = event
 
     assert sorted(collected_event_names) == [
         "known_person_present",
@@ -911,7 +915,7 @@ def test_local_memory_config_uses_bundle_dimensions_for_store(
 
     assert app.state.memory_service.store.person_dim == 3
     assert app.state.memory_service.store.scene_dim == 5
-    app.state.memory_service.store.close()
+    asyncio.run(app.state.memory_service.close())
 
 
 def test_configured_memory_resolve_target_endpoint_previews_without_writing(tmp_path):
@@ -935,23 +939,24 @@ def test_configured_memory_resolve_target_endpoint_previews_without_writing(tmp_
             ),
         )
     )
-    client = TestClient(create_app(processor=MemoryVisualProcessor(), config=config))
+    with TestClient(
+        create_app(processor=MemoryVisualProcessor(), config=config)
+    ) as client:
+        with client.websocket_connect("/v1/stream") as websocket:
+            websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
+            json.loads(websocket.receive_text())
 
-    with client.websocket_connect("/v1/stream") as websocket:
-        websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
-        json.loads(websocket.receive_text())
-
-        response = client.post(
-            "/v1/memory/resolve-target",
-            json={
-                "camera": "front",
-                "target": {
-                    "kind": "person",
-                    "intent": "self_introduction",
-                    "referent_text": "我",
+            response = client.post(
+                "/v1/memory/resolve-target",
+                json={
+                    "camera": "front",
+                    "target": {
+                        "kind": "person",
+                        "intent": "self_introduction",
+                        "referent_text": "我",
+                    },
                 },
-            },
-        )
+            )
 
     assert response.status_code == 200
     assert response.json()["status"] == "resolved"

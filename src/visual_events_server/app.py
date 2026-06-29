@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -154,12 +156,29 @@ class DisabledMemoryService:
     async def resolve_target(self, request: dict[str, Any]) -> dict[str, Any]:
         raise self._disabled()
 
+    async def close(self) -> None:
+        return None
+
     def _disabled(self) -> MemoryServiceError:
         return MemoryServiceError(
             "memory_disabled",
             "memory service is disabled",
             status_code=503,
         )
+
+
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):
+    try:
+        yield
+    finally:
+        if not getattr(app.state, "_owns_memory_service", False):
+            return
+        close = getattr(app.state.memory_service, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
 
 def create_app(
@@ -169,13 +188,23 @@ def create_app(
     config: ServerConfig | None = None,
     memory_service: MemoryService | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="visual-events-server", version="0.1.0")
+    app = FastAPI(
+        title="visual-events-server",
+        version="0.1.0",
+        lifespan=_app_lifespan,
+    )
     app_config = config or ServerConfig()
+    owns_memory_service = memory_service is None
     app.state.config = app_config
     app.state.session_factory = session_factory or _session_factory_from_processor(
         processor or MockVisualFrameProcessor()
     )
-    app.state.memory_service = memory_service or _memory_service_from_config(app_config)
+    app.state.memory_service = (
+        _memory_service_from_config(app_config)
+        if memory_service is None
+        else memory_service
+    )
+    app.state._owns_memory_service = owns_memory_service
 
     @app.get("/healthz")
     async def healthz() -> dict[str, bool | int]:
@@ -448,6 +477,8 @@ def _memory_service_from_config(config: ServerConfig) -> MemoryService:
         familiar_threshold=config.memory.matching.familiar_threshold,
         scene_threshold=config.memory.matching.scene_threshold,
         event_cooldown_ms=config.memory.matching.event_cooldown_ms,
+        teach_queue_size=config.memory.embedding.teach_queue_size,
+        teach_queue_timeout_ms=config.memory.embedding.teach_queue_timeout_ms,
     )
 
 

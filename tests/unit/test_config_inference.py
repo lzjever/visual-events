@@ -147,6 +147,8 @@ queue_size = 4
 backend = "fake"
 person_model_path = "runtime/models/face.onnx"
 scene_model_path = "runtime/models/scene.onnx"
+teach_queue_size = 6
+teach_queue_timeout_ms = 250
 
 [memory.matching]
 known_person_threshold = 0.83
@@ -171,6 +173,8 @@ event_cooldown_ms = 30000
     assert config.memory.embedding.backend == "fake"
     assert config.memory.embedding.person_model_path == Path("runtime/models/face.onnx")
     assert config.memory.embedding.scene_model_path == Path("runtime/models/scene.onnx")
+    assert config.memory.embedding.teach_queue_size == 6
+    assert config.memory.embedding.teach_queue_timeout_ms == 250
     assert config.memory.matching.known_person_threshold == 0.83
     assert config.memory.matching.known_person_margin == 0.07
     assert config.memory.matching.anonymous_threshold == 0.76
@@ -192,6 +196,25 @@ familiar_seen_count = 0
     )
 
     with pytest.raises(ValueError, match="familiar_seen_count"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("[memory.embedding]\nteach_queue_size = -1", "teach_queue_size"),
+        ("[memory.embedding]\nteach_queue_timeout_ms = 0", "teach_queue_timeout_ms"),
+    ],
+)
+def test_load_config_rejects_invalid_memory_embedding_teach_queue_values(
+    tmp_path,
+    body,
+    expected,
+):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=expected):
         load_config(config_path)
 
 

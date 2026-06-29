@@ -9,6 +9,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any
@@ -17,7 +18,7 @@ from visual_events_server.attention import AttentionResult
 from visual_events_server.protocol import FrameMessage
 from visual_events_server.tracking import TrackSnapshot
 
-from .embedding import EmbeddingUnavailable, MemoryEmbeddingBackend
+from .embedding import EmbeddingResult, EmbeddingUnavailable, MemoryEmbeddingBackend
 from .events import (
     MemoryEventGate,
     MemoryMatch,
@@ -83,11 +84,17 @@ class AppMemoryService:
         event_cooldown_ms: int,
         clock_ms: Callable[[], int] | None = None,
         target_resolver: TargetResolver | None = None,
+        teach_queue_size: int = 2,
+        teach_queue_timeout_ms: int = 500,
     ) -> None:
         if query_interval_ms <= 0:
             raise ValueError("query_interval_ms must be positive")
         if queue_size <= 0:
             raise ValueError("queue_size must be positive")
+        if teach_queue_size < 0:
+            raise ValueError("teach_queue_size must be non-negative")
+        if teach_queue_timeout_ms <= 0:
+            raise ValueError("teach_queue_timeout_ms must be positive")
         self.store = store
         self.embedding_backend = embedding_backend
         self.query_interval_ms = int(query_interval_ms)
@@ -115,6 +122,35 @@ class AppMemoryService:
             asyncio.Future[list[tuple[str, dict[str, Any]]]],
         ] = {}
         self._query_state_lock = threading.Lock()
+        self._teach_embedding_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="memory-teach-embedding",
+        )
+        self._teach_embedding_futures: set[Future[EmbeddingResult]] = set()
+        self._teach_embedding_futures_lock = threading.Lock()
+        self._teach_embedding_slots = asyncio.BoundedSemaphore(
+            1 + int(teach_queue_size)
+        )
+        self._teach_queue_timeout_s = int(teach_queue_timeout_ms) / 1000.0
+        self._lifecycle_condition = asyncio.Condition()
+        self._active_teach_requests = 0
+        self._close_lock = asyncio.Lock()
+        self._closed = False
+        self._store_closed = False
+
+    async def close(self) -> None:
+        async with self._close_lock:
+            if self._store_closed:
+                return
+            async with self._lifecycle_condition:
+                self._closed = True
+            await self._wait_for_active_teach_requests()
+            await self._wait_for_pending_queries()
+            self._teach_embedding_executor.shutdown(wait=False, cancel_futures=True)
+            await self._wait_for_teach_embedding_futures()
+            self._teach_embedding_executor.shutdown(wait=True, cancel_futures=True)
+            self.store.close()
+            self._store_closed = True
 
     async def observe_visual_state(
         self,
@@ -124,6 +160,8 @@ class AppMemoryService:
         visual_state: dict[str, Any],
         memory_snapshot: MemoryFrameSnapshot | None = None,
     ) -> None:
+        if self._closed:
+            return
         self._cache.update(
             connection_id=connection_id,
             frame=frame,
@@ -168,120 +206,131 @@ class AppMemoryService:
         return events
 
     async def teach_person(self, request: dict[str, Any]) -> dict[str, Any]:
-        store_before = self._store_count_snapshot()
+        await self._enter_teach_request()
         try:
-            cached = self._fresh_cached_frame(request)
-        except MemoryServiceError as exc:
-            if _public_person_target(request) is not None and exc.code == "frame_cache_expired":
-                error = _target_ambiguous_error("stale_interaction")
-                _attach_store_delta_to_error(error, self._store_delta(store_before))
-                raise error from exc
-            raise
-        try:
-            target = self._resolve_person_teach_target(cached, request)
-        except MemoryServiceError as exc:
-            if exc.code == "target_ambiguous":
-                _attach_store_delta_to_error(exc, self._store_delta(store_before))
-            raise
-        if target.target_type not in {"person", "region"}:
-            raise MemoryServiceError(
-                "invalid_target_type",
-                "teach_person target must resolve to a person or region",
+            store_before = self._store_count_snapshot()
+            try:
+                cached = self._fresh_cached_frame(request)
+            except MemoryServiceError as exc:
+                if (
+                    _public_person_target(request) is not None
+                    and exc.code == "frame_cache_expired"
+                ):
+                    error = _target_ambiguous_error("stale_interaction")
+                    _attach_store_delta_to_error(error, self._store_delta(store_before))
+                    raise error from exc
+                raise
+            try:
+                target = self._resolve_person_teach_target(cached, request)
+            except MemoryServiceError as exc:
+                if exc.code == "target_ambiguous":
+                    _attach_store_delta_to_error(exc, self._store_delta(store_before))
+                raise
+            if target.target_type not in {"person", "region"}:
+                raise MemoryServiceError(
+                    "invalid_target_type",
+                    "teach_person target must resolve to a person or region",
+                )
+            profile = _required_mapping(request, "profile")
+            display_name = _required_text(profile, "display_name")
+            description = _optional_text(profile.get("description"))
+            tags = tuple(str(tag) for tag in profile.get("tags", []) if str(tag))
+            embedding_bytes = _person_embedding_bytes(cached.frame.jpeg_bytes, target)
+            embedding = await self._run_teach_embedding(
+                self.embedding_backend.embed_person,
+                embedding_bytes,
             )
-        profile = _required_mapping(request, "profile")
-        display_name = _required_text(profile, "display_name")
-        description = _optional_text(profile.get("description"))
-        tags = tuple(str(tag) for tag in profile.get("tags", []) if str(tag))
-        embedding_bytes = _person_embedding_bytes(cached.frame.jpeg_bytes, target)
-        try:
-            embedding = self.embedding_backend.embed_person(embedding_bytes)
-        except EmbeddingUnavailable as exc:
-            raise MemoryServiceError(exc.code, exc.message, status_code=503) from exc
 
-        now_ms = self._clock_ms()
-        crop_hash = _sha256_hex(embedding_bytes)
-        person_id = _public_id("person")
-        created = self.store.create_person_with_embedding(
-            person_id=person_id,
-            display_name=display_name,
-            description=description,
-            tags=tags,
-            embedding=embedding,
-            source_target_type=target.source_target_mode,
-            source_track_ref=_source_track_ref(cached, target),
-            source_frame_ref=_source_frame_ref(cached),
-            crop_hash=crop_hash,
-            crop_path_or_artifact_ref=None,
-            resolver_target_ref=_resolver_target_ref(cached, target),
-            resolution_reason=target.source_target_mode,
-            now_ms=now_ms,
-        )
-        return {
-            "ok": True,
-            "person_id": created["person_id"],
-            "embedding_id": created["embedding_id"],
-            "embedding_count": 1,
-            "target_quality": target.quality,
-            "evidence": self._target_evidence(
-                cached,
-                target,
+            now_ms = self._clock_ms()
+            crop_hash = _sha256_hex(embedding_bytes)
+            person_id = _public_id("person")
+            created = self.store.create_person_with_embedding(
+                person_id=person_id,
+                display_name=display_name,
+                description=description,
+                tags=tags,
+                embedding=embedding,
+                source_target_type=target.source_target_mode,
+                source_track_ref=_source_track_ref(cached, target),
+                source_frame_ref=_source_frame_ref(cached),
                 crop_hash=crop_hash,
-            ),
-        }
+                crop_path_or_artifact_ref=None,
+                resolver_target_ref=_resolver_target_ref(cached, target),
+                resolution_reason=target.source_target_mode,
+                now_ms=now_ms,
+            )
+            return {
+                "ok": True,
+                "person_id": created["person_id"],
+                "embedding_id": created["embedding_id"],
+                "embedding_count": 1,
+                "target_quality": target.quality,
+                "evidence": self._target_evidence(
+                    cached,
+                    target,
+                    crop_hash=crop_hash,
+                ),
+            }
+        finally:
+            await self._exit_teach_request()
 
     async def teach_scene(self, request: dict[str, Any]) -> dict[str, Any]:
-        target_request = _target_request(request)
-        if target_request.mode != "scene":
-            raise MemoryServiceError(
-                "unsupported_scene_target",
-                "teach_scene only supports target.mode=scene until region scene "
-                "queries are supported",
-            )
-        cached = self._fresh_cached_frame(request)
-        target = self._resolve_cached_target(cached, target_request)
-        memory = _required_mapping(request, "memory")
-        title = _required_text(memory, "title")
-        description = _optional_text(memory.get("description"))
-        activation_hint = _optional_text(memory.get("activation_hint"))
-        region_id = _optional_text(memory.get("region_id")) or None
-        embedding_bytes = _target_bytes(cached.frame.jpeg_bytes, target)
+        await self._enter_teach_request()
         try:
-            embedding = self.embedding_backend.embed_scene(embedding_bytes)
-        except EmbeddingUnavailable as exc:
-            raise MemoryServiceError(exc.code, exc.message, status_code=503) from exc
+            target_request = _target_request(request)
+            if target_request.mode != "scene":
+                raise MemoryServiceError(
+                    "unsupported_scene_target",
+                    "teach_scene only supports target.mode=scene until region scene "
+                    "queries are supported",
+                )
+            cached = self._fresh_cached_frame(request)
+            target = self._resolve_cached_target(cached, target_request)
+            memory = _required_mapping(request, "memory")
+            title = _required_text(memory, "title")
+            description = _optional_text(memory.get("description"))
+            activation_hint = _optional_text(memory.get("activation_hint"))
+            region_id = _optional_text(memory.get("region_id")) or None
+            embedding_bytes = _target_bytes(cached.frame.jpeg_bytes, target)
+            embedding = await self._run_teach_embedding(
+                self.embedding_backend.embed_scene,
+                embedding_bytes,
+            )
 
-        now_ms = self._clock_ms()
-        crop_hash = _sha256_hex(embedding_bytes)
-        scene_id = _public_id("scene")
-        created = self.store.create_scene_with_embedding(
-            scene_id=scene_id,
-            title=title,
-            description=description,
-            activation_hint=activation_hint,
-            target_type=target.target_type,
-            region_id=region_id,
-            embedding=embedding,
-            source_target_type=target.source_target_mode,
-            source_track_ref=_source_track_ref(cached, target),
-            source_frame_ref=_source_frame_ref(cached),
-            crop_hash=crop_hash,
-            crop_path_or_artifact_ref=None,
-            resolver_target_ref=_resolver_target_ref(cached, target),
-            resolution_reason=target.source_target_mode,
-            now_ms=now_ms,
-        )
-        return {
-            "ok": True,
-            "scene_id": created["scene_id"],
-            "embedding_id": created["embedding_id"],
-            "embedding_count": 1,
-            "target_quality": target.quality,
-            "evidence": self._target_evidence(
-                cached,
-                target,
+            now_ms = self._clock_ms()
+            crop_hash = _sha256_hex(embedding_bytes)
+            scene_id = _public_id("scene")
+            created = self.store.create_scene_with_embedding(
+                scene_id=scene_id,
+                title=title,
+                description=description,
+                activation_hint=activation_hint,
+                target_type=target.target_type,
+                region_id=region_id,
+                embedding=embedding,
+                source_target_type=target.source_target_mode,
+                source_track_ref=_source_track_ref(cached, target),
+                source_frame_ref=_source_frame_ref(cached),
                 crop_hash=crop_hash,
-            ),
-        }
+                crop_path_or_artifact_ref=None,
+                resolver_target_ref=_resolver_target_ref(cached, target),
+                resolution_reason=target.source_target_mode,
+                now_ms=now_ms,
+            )
+            return {
+                "ok": True,
+                "scene_id": created["scene_id"],
+                "embedding_id": created["embedding_id"],
+                "embedding_count": 1,
+                "target_quality": target.quality,
+                "evidence": self._target_evidence(
+                    cached,
+                    target,
+                    crop_hash=crop_hash,
+                ),
+            }
+        finally:
+            await self._exit_teach_request()
 
     async def resolve_target(self, request: dict[str, Any]) -> dict[str, Any]:
         store_before = self._store_count_snapshot()
@@ -470,6 +519,98 @@ class AppMemoryService:
             return self._cache.get_fresh(camera)
         except FrameCacheError as exc:
             raise MemoryServiceError(exc.code, exc.message, status_code=409) from exc
+
+    async def _enter_teach_request(self) -> None:
+        async with self._lifecycle_condition:
+            if self._closed:
+                raise MemoryServiceError(
+                    "memory_service_closed",
+                    "memory service is closed",
+                    status_code=503,
+                )
+            self._active_teach_requests += 1
+
+    async def _exit_teach_request(self) -> None:
+        async with self._lifecycle_condition:
+            self._active_teach_requests -= 1
+            if self._active_teach_requests == 0:
+                self._lifecycle_condition.notify_all()
+
+    async def _wait_for_active_teach_requests(self) -> None:
+        async with self._lifecycle_condition:
+            while self._active_teach_requests:
+                await self._lifecycle_condition.wait()
+
+    async def _wait_for_pending_queries(self) -> None:
+        pending = list(self._pending_queries_by_camera.values())
+        if pending:
+            await asyncio.gather(
+                *(asyncio.shield(future) for future in pending),
+                return_exceptions=True,
+            )
+        self._pending_queries_by_camera.clear()
+
+    async def _wait_for_teach_embedding_futures(self) -> None:
+        while True:
+            with self._teach_embedding_futures_lock:
+                futures = list(self._teach_embedding_futures)
+            if not futures:
+                return
+            await asyncio.gather(
+                *(asyncio.wrap_future(future) for future in futures),
+                return_exceptions=True,
+            )
+
+    async def _run_teach_embedding(
+        self,
+        embed: Callable[[bytes], EmbeddingResult],
+        payload: bytes,
+    ) -> EmbeddingResult:
+        try:
+            await asyncio.wait_for(
+                self._teach_embedding_slots.acquire(),
+                timeout=self._teach_queue_timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            raise MemoryServiceError(
+                "embedding_queue_full",
+                "memory teach embedding queue is full",
+                status_code=503,
+            ) from exc
+
+        try:
+            loop = asyncio.get_running_loop()
+            try:
+                future = self._teach_embedding_executor.submit(embed, payload)
+            except RuntimeError as exc:
+                self._teach_embedding_slots.release()
+                raise MemoryServiceError(
+                    "memory_service_closed",
+                    "memory service is closed",
+                    status_code=503,
+                ) from exc
+            self._track_teach_embedding_future(future, loop)
+            return await asyncio.wrap_future(future)
+        except EmbeddingUnavailable as exc:
+            raise MemoryServiceError(exc.code, exc.message, status_code=503) from exc
+
+    def _track_teach_embedding_future(
+        self,
+        future: Future[EmbeddingResult],
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        with self._teach_embedding_futures_lock:
+            self._teach_embedding_futures.add(future)
+
+        def on_done(done: Future[EmbeddingResult]) -> None:
+            with self._teach_embedding_futures_lock:
+                self._teach_embedding_futures.discard(done)
+            try:
+                loop.call_soon_threadsafe(self._teach_embedding_slots.release)
+            except RuntimeError:
+                self._teach_embedding_slots.release()
+
+        future.add_done_callback(on_done)
 
     def _resolve_cached_target(
         self,

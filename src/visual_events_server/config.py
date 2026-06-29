@@ -30,6 +30,8 @@ class MemoryEmbeddingConfig:
     backend: str = "disabled"
     person_model_path: Path | None = None
     scene_model_path: Path | None = None
+    teach_queue_size: int = 2
+    teach_queue_timeout_ms: int = 500
 
 
 @dataclass(frozen=True)
@@ -209,10 +211,20 @@ def _parse_memory_embedding_config(data: dict[str, Any]) -> MemoryEmbeddingConfi
         raise ValueError(
             "[memory.embedding].backend must be 'disabled', 'fake', or 'local'"
         )
+    teach_queue_size = int(data.get("teach_queue_size", defaults.teach_queue_size))
+    teach_queue_timeout_ms = int(
+        data.get("teach_queue_timeout_ms", defaults.teach_queue_timeout_ms)
+    )
+    if teach_queue_size < 0:
+        raise ValueError("[memory.embedding].teach_queue_size must be non-negative")
+    if teach_queue_timeout_ms <= 0:
+        raise ValueError("[memory.embedding].teach_queue_timeout_ms must be positive")
     return MemoryEmbeddingConfig(
         backend=backend,
         person_model_path=_optional_path(data.get("person_model_path")),
         scene_model_path=_optional_path(data.get("scene_model_path")),
+        teach_queue_size=teach_queue_size,
+        teach_queue_timeout_ms=teach_queue_timeout_ms,
     )
 
 

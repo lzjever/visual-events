@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import threading
 import time
+from contextlib import suppress
 from io import BytesIO
 
 import pytest
@@ -35,6 +37,43 @@ class BlockingQueryEmbeddingBackend(FakeEmbeddingBackend):
             if not self.release.wait(timeout=2.0):
                 raise AssertionError("blocking embedding backend was not released")
         return super().embed_person(image_crop)
+
+
+class BlockingTeachEmbeddingBackend(FakeEmbeddingBackend):
+    def __init__(
+        self,
+        *,
+        person_dim: int,
+        scene_dim: int,
+        block_person: bool = False,
+        block_scene: bool = False,
+        wait_timeout_s: float = 0.5,
+    ) -> None:
+        super().__init__(person_dim=person_dim, scene_dim=scene_dim)
+        self.block_person = block_person
+        self.block_scene = block_scene
+        self.wait_timeout_s = wait_timeout_s
+        self.person_entered = threading.Event()
+        self.scene_entered = threading.Event()
+        self.release = threading.Event()
+
+    def embed_person(self, image_crop: bytes):
+        if self.block_person:
+            self.person_entered.set()
+            if not self.release.wait(timeout=self.wait_timeout_s):
+                raise AssertionError(
+                    "blocking person embedding backend was not released"
+                )
+        return super().embed_person(image_crop)
+
+    def embed_scene(self, image_or_crop: bytes):
+        if self.block_scene:
+            self.scene_entered.set()
+            if not self.release.wait(timeout=self.wait_timeout_s):
+                raise AssertionError(
+                    "blocking scene embedding backend was not released"
+                )
+        return super().embed_scene(image_or_crop)
 
 
 class SequencePersonEmbeddingBackend(FakeEmbeddingBackend):
@@ -100,6 +139,28 @@ ALLOWED_AMBIGUITY_TYPES = {
     "unsupported_target_kind",
     "quality_too_low",
 }
+_CREATED_SERVICES: list[AppMemoryService] = []
+
+
+@pytest.fixture(autouse=True)
+async def close_created_memory_services():
+    _CREATED_SERVICES.clear()
+    try:
+        yield
+    finally:
+        while _CREATED_SERVICES:
+            await _close_service(_CREATED_SERVICES.pop())
+
+
+def _track_service(subject: AppMemoryService) -> AppMemoryService:
+    _CREATED_SERVICES.append(subject)
+    return subject
+
+
+async def _close_service(subject: AppMemoryService) -> None:
+    result = subject.close()
+    if inspect.isawaitable(result):
+        await result
 
 
 def frame(*, frame_id: int = 1, timestamp_ms: int = 1_000) -> FrameMessage:
@@ -287,26 +348,32 @@ def service(
     *,
     now_ms: int = 10_000,
     embedding_backend: FakeEmbeddingBackend | None = None,
+    teach_queue_size: int = 2,
+    teach_queue_timeout_ms: int = 500,
 ) -> AppMemoryService:
     clock = lambda: now_ms
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
-    return AppMemoryService(
-        store=store,
-        embedding_backend=embedding_backend
-        if embedding_backend is not None
-        else FakeEmbeddingBackend(person_dim=8, scene_dim=8),
-        frame_cache_seconds=1,
-        query_interval_ms=500,
-        queue_size=4,
-        known_person_threshold=0.95,
-        known_person_margin=0.05,
-        anonymous_threshold=0.95,
-        anonymous_margin=0.05,
-        familiar_seen_count=3,
-        familiar_threshold=0.95,
-        scene_threshold=0.95,
-        event_cooldown_ms=5_000,
-        clock_ms=clock,
+    return _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=embedding_backend
+            if embedding_backend is not None
+            else FakeEmbeddingBackend(person_dim=8, scene_dim=8),
+            frame_cache_seconds=1,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.05,
+            familiar_seen_count=3,
+            familiar_threshold=0.95,
+            scene_threshold=0.95,
+            event_cooldown_ms=5_000,
+            clock_ms=clock,
+            teach_queue_size=teach_queue_size,
+            teach_queue_timeout_ms=teach_queue_timeout_ms,
+        )
     )
 
 
@@ -323,6 +390,240 @@ def _assert_rgb_close(
     tolerance: int = 35,
 ) -> None:
     assert all(abs(left - right) <= tolerance for left, right in zip(actual, expected))
+
+
+@pytest.mark.asyncio
+async def test_teach_person_embedding_does_not_block_event_loop_when_backend_blocks(
+    tmp_path,
+):
+    backend = BlockingTeachEmbeddingBackend(
+        person_dim=8,
+        scene_dim=8,
+        block_person=True,
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    teach = asyncio.create_task(
+        subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "张三"},
+            }
+        )
+    )
+
+    try:
+        started = time.perf_counter()
+        await asyncio.sleep(0)
+        assert time.perf_counter() - started < 0.1
+        assert await asyncio.to_thread(backend.person_entered.wait, 1.0)
+    finally:
+        backend.release.set()
+        with suppress(Exception):
+            await asyncio.wait_for(teach, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_teach_scene_embedding_does_not_block_event_loop_when_backend_blocks(
+    tmp_path,
+):
+    backend = BlockingTeachEmbeddingBackend(
+        person_dim=8,
+        scene_dim=8,
+        block_scene=True,
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    teach = asyncio.create_task(
+        subject.teach_scene(
+            {
+                "camera": "front",
+                "target": {"mode": "scene"},
+                "memory": {"title": "新品展示区"},
+            }
+        )
+    )
+
+    try:
+        started = time.perf_counter()
+        await asyncio.sleep(0)
+        assert time.perf_counter() - started < 0.1
+        assert await asyncio.to_thread(backend.scene_entered.wait, 1.0)
+    finally:
+        backend.release.set()
+        with suppress(Exception):
+            await asyncio.wait_for(teach, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_teach_embedding_backpressure_rejects_second_write_and_first_persists(
+    tmp_path,
+):
+    backend = BlockingTeachEmbeddingBackend(
+        person_dim=8,
+        scene_dim=8,
+        block_person=True,
+        wait_timeout_s=2.0,
+    )
+    subject = service(
+        tmp_path,
+        embedding_backend=backend,
+        teach_queue_size=0,
+        teach_queue_timeout_ms=25,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    first = asyncio.create_task(
+        subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "第一位"},
+            }
+        )
+    )
+    assert await asyncio.to_thread(backend.person_entered.wait, 1.0)
+
+    try:
+        with pytest.raises(MemoryServiceError) as exc:
+            await subject.teach_person(
+                {
+                    "camera": "front",
+                    "target": {"mode": "track_id", "track_id": 7},
+                    "profile": {"display_name": "第二位"},
+                }
+            )
+
+        assert exc.value.code == "embedding_queue_full"
+        assert exc.value.status_code == 503
+        assert _count_rows(subject.store, "person_profiles") == 0
+        assert _count_rows(subject.store, "person_embeddings") == 0
+        assert _count_rows(subject.store, "embedding_provenance") == 0
+    finally:
+        backend.release.set()
+
+    created = await asyncio.wait_for(first, 1.0)
+
+    assert created["person_id"].startswith("person_")
+    assert _count_rows(subject.store, "person_profiles") == 1
+    assert _count_rows(subject.store, "person_embeddings") == 1
+    assert _count_rows(subject.store, "embedding_provenance") == 1
+
+
+@pytest.mark.asyncio
+async def test_teach_embedding_slot_survives_cancelled_request_until_job_finishes(
+    tmp_path,
+):
+    backend = BlockingTeachEmbeddingBackend(
+        person_dim=8,
+        scene_dim=8,
+        block_person=True,
+        wait_timeout_s=2.0,
+    )
+    subject = service(
+        tmp_path,
+        embedding_backend=backend,
+        teach_queue_size=0,
+        teach_queue_timeout_ms=25,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    first = asyncio.create_task(
+        subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "第一位"},
+            }
+        )
+    )
+    assert await asyncio.to_thread(backend.person_entered.wait, 1.0)
+
+    try:
+        first.cancel()
+        with suppress(asyncio.CancelledError):
+            await first
+
+        with pytest.raises(MemoryServiceError) as exc:
+            await asyncio.wait_for(
+                subject.teach_person(
+                    {
+                        "camera": "front",
+                        "target": {"mode": "track_id", "track_id": 7},
+                        "profile": {"display_name": "第二位"},
+                    }
+                ),
+                timeout=0.5,
+            )
+
+        assert exc.value.code == "embedding_queue_full"
+        assert _count_rows(subject.store, "person_profiles") == 0
+        assert _count_rows(subject.store, "person_embeddings") == 0
+        assert _count_rows(subject.store, "embedding_provenance") == 0
+    finally:
+        backend.release.set()
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_in_flight_teach_before_closing_store(tmp_path):
+    backend = BlockingTeachEmbeddingBackend(
+        person_dim=8,
+        scene_dim=8,
+        block_person=True,
+        wait_timeout_s=2.0,
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    teach = asyncio.create_task(
+        subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "第一位"},
+            }
+        )
+    )
+    assert await asyncio.to_thread(backend.person_entered.wait, 1.0)
+
+    close_task = asyncio.create_task(_close_service(subject))
+    try:
+        await asyncio.sleep(0.05)
+        assert not close_task.done()
+        assert _count_rows(subject.store, "person_profiles") == 0
+    finally:
+        backend.release.set()
+
+    await asyncio.wait_for(close_task, 1.0)
+    await asyncio.wait_for(teach, 1.0)
 
 
 @pytest.mark.asyncio
@@ -641,21 +942,23 @@ async def test_self_introduction_stale_snapshot_uses_allowed_ambiguity_type(tmp_
 
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
-    subject = AppMemoryService(
-        store=store,
-        embedding_backend=backend,
-        frame_cache_seconds=1,
-        query_interval_ms=500,
-        queue_size=4,
-        known_person_threshold=0.95,
-        known_person_margin=0.05,
-        anonymous_threshold=0.95,
-        anonymous_margin=0.05,
-        familiar_seen_count=3,
-        familiar_threshold=0.95,
-        scene_threshold=0.95,
-        event_cooldown_ms=5_000,
-        clock_ms=clock,
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=backend,
+            frame_cache_seconds=1,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.05,
+            familiar_seen_count=3,
+            familiar_threshold=0.95,
+            scene_threshold=0.95,
+            event_cooldown_ms=5_000,
+            clock_ms=clock,
+        )
     )
     source_frame = frame()
     await subject.observe_visual_state(
@@ -1338,21 +1641,23 @@ async def test_observe_visual_state_does_not_wait_for_blocking_memory_query(tmp_
     clock = lambda: now
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
     backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
-    subject = AppMemoryService(
-        store=store,
-        embedding_backend=backend,
-        frame_cache_seconds=5,
-        query_interval_ms=500,
-        queue_size=4,
-        known_person_threshold=0.95,
-        known_person_margin=0.05,
-        anonymous_threshold=0.95,
-        anonymous_margin=0.05,
-        familiar_seen_count=3,
-        familiar_threshold=0.95,
-        scene_threshold=0.95,
-        event_cooldown_ms=5_000,
-        clock_ms=clock,
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=backend,
+            frame_cache_seconds=5,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.05,
+            familiar_seen_count=3,
+            familiar_threshold=0.95,
+            scene_threshold=0.95,
+            event_cooldown_ms=5_000,
+            clock_ms=clock,
+        )
     )
 
     first_frame = frame(frame_id=1, timestamp_ms=1_000)
@@ -1406,6 +1711,32 @@ async def test_observe_visual_state_does_not_wait_for_blocking_memory_query(tmp_
     assert [event["event"] for event in events] == ["known_person_present"]
     assert events[0]["memory_context"]["person"]["person_id"] == person["person_id"]
     assert events[0]["evidence"]["source_frame_id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_in_flight_query_before_closing_store(tmp_path):
+    backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
+    backend.block_queries = True
+    subject = service(tmp_path, embedding_backend=backend)
+
+    query_frame = frame(frame_id=1, timestamp_ms=1_000)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=query_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=query_frame),
+    )
+    assert await asyncio.to_thread(backend.entered.wait, 1.0)
+
+    close_task = asyncio.create_task(_close_service(subject))
+    try:
+        await asyncio.sleep(0.05)
+        assert not close_task.done()
+        assert _count_rows(subject.store, "anonymous_profiles") == 0
+    finally:
+        backend.release.set()
+
+    await asyncio.wait_for(close_task, 1.0)
 
 
 async def _wait_for_memory_query_idle(
@@ -1536,21 +1867,23 @@ async def test_teach_person_rejects_expired_cached_frame_without_writing(tmp_pat
     now = 10_000
     clock = lambda: now
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
-    subject = AppMemoryService(
-        store=store,
-        embedding_backend=FakeEmbeddingBackend(person_dim=8, scene_dim=8),
-        frame_cache_seconds=1,
-        query_interval_ms=500,
-        queue_size=4,
-        known_person_threshold=0.95,
-        known_person_margin=0.05,
-        anonymous_threshold=0.95,
-        anonymous_margin=0.05,
-        familiar_seen_count=3,
-        familiar_threshold=0.95,
-        scene_threshold=0.95,
-        event_cooldown_ms=5_000,
-        clock_ms=clock,
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=FakeEmbeddingBackend(person_dim=8, scene_dim=8),
+            frame_cache_seconds=1,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.05,
+            familiar_seen_count=3,
+            familiar_threshold=0.95,
+            scene_threshold=0.95,
+            event_cooldown_ms=5_000,
+            clock_ms=clock,
+        )
     )
     await subject.observe_visual_state(
         connection_id="ws_1",
@@ -1577,21 +1910,23 @@ async def test_teach_summary_link_and_low_frequency_memory_events(tmp_path):
     now = 10_000
     clock = lambda: now
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
-    subject = AppMemoryService(
-        store=store,
-        embedding_backend=FakeEmbeddingBackend(person_dim=8, scene_dim=8),
-        frame_cache_seconds=5,
-        query_interval_ms=500,
-        queue_size=4,
-        known_person_threshold=0.95,
-        known_person_margin=0.05,
-        anonymous_threshold=0.95,
-        anonymous_margin=0.05,
-        familiar_seen_count=3,
-        familiar_threshold=0.95,
-        scene_threshold=0.95,
-        event_cooldown_ms=5_000,
-        clock_ms=clock,
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=FakeEmbeddingBackend(person_dim=8, scene_dim=8),
+            frame_cache_seconds=5,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.05,
+            familiar_seen_count=3,
+            familiar_threshold=0.95,
+            scene_threshold=0.95,
+            event_cooldown_ms=5_000,
+            clock_ms=clock,
+        )
     )
 
     first_frame = frame(frame_id=1, timestamp_ms=1_000)
@@ -1705,21 +2040,23 @@ async def test_unknown_person_becomes_familiar_unknown_then_merge_suppresses_ano
         scene_dim=4,
     )
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
-    subject = AppMemoryService(
-        store=store,
-        embedding_backend=backend,
-        frame_cache_seconds=5,
-        query_interval_ms=500,
-        queue_size=4,
-        known_person_threshold=0.95,
-        known_person_margin=0.05,
-        anonymous_threshold=0.95,
-        anonymous_margin=0.0,
-        familiar_seen_count=2,
-        familiar_threshold=0.95,
-        scene_threshold=1.1,
-        event_cooldown_ms=0,
-        clock_ms=clock,
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=backend,
+            frame_cache_seconds=5,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.0,
+            familiar_seen_count=2,
+            familiar_threshold=0.95,
+            scene_threshold=1.1,
+            event_cooldown_ms=0,
+            clock_ms=clock,
+        )
     )
 
     first_frame = frame(frame_id=1, timestamp_ms=1_000)
@@ -1805,21 +2142,23 @@ async def test_correct_identity_blocks_same_wrong_candidate_without_deleting_pro
         scene_dim=4,
     )
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
-    subject = AppMemoryService(
-        store=store,
-        embedding_backend=backend,
-        frame_cache_seconds=5,
-        query_interval_ms=500,
-        queue_size=4,
-        known_person_threshold=0.95,
-        known_person_margin=0.0,
-        anonymous_threshold=0.95,
-        anonymous_margin=0.0,
-        familiar_seen_count=3,
-        familiar_threshold=0.95,
-        scene_threshold=1.1,
-        event_cooldown_ms=0,
-        clock_ms=lambda: now,
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=backend,
+            frame_cache_seconds=5,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.0,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.0,
+            familiar_seen_count=3,
+            familiar_threshold=0.95,
+            scene_threshold=1.1,
+            event_cooldown_ms=0,
+            clock_ms=lambda: now,
+        )
     )
     store.upsert_person_profile(
         person_id="person_wrong",
