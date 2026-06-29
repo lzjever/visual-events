@@ -1,5 +1,6 @@
 import json
 import time
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -195,6 +196,12 @@ class FakeMemoryService:
         }
 
 
+class ConflictResolveMemoryService(FakeMemoryService):
+    async def resolve_target(self, request: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("resolve_target", request))
+        return {"ok": True, "status": "conflict", "candidates": []}
+
+
 class FailingMemoryService(FakeMemoryService):
     async def observe_visual_state(
         self,
@@ -212,7 +219,11 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
 
     person_request = {
         "camera": "front",
-        "target": {"mode": "attention_target"},
+        "target": {
+            "kind": "person",
+            "intent": "self_introduction",
+            "referent_text": "我",
+        },
         "profile": {"display_name": "张三"},
     }
     assert client.post("/v1/memory/teach/person", json=person_request).json() == {
@@ -222,7 +233,11 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
 
     scene_request = {
         "camera": "front",
-        "target": {"mode": "scene"},
+        "target": {
+            "kind": "scene",
+            "intent": "teach_scene",
+            "referent_text": "当前展示区",
+        },
         "memory": {"title": "新品展示区"},
     }
     assert client.post("/v1/memory/teach/scene", json=scene_request).json() == {
@@ -282,7 +297,11 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
 
     resolve_request = {
         "camera": "front",
-        "target": {"mode": "track_id", "track_id": 7},
+        "target": {
+            "kind": "scene",
+            "intent": "teach_scene",
+            "referent_text": "当前展示区",
+        },
     }
     assert client.post(
         "/v1/memory/resolve-target",
@@ -302,15 +321,137 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
     }
 
     assert service.calls == [
-        ("teach_person", person_request),
-        ("teach_scene", scene_request),
+        (
+            "teach_person",
+            {
+                "camera": "front",
+                "target": {"mode": "attention_target"},
+                "profile": {"display_name": "张三"},
+            },
+        ),
+        (
+            "teach_scene",
+            {
+                "camera": "front",
+                "target": {"mode": "scene"},
+                "memory": {"title": "新品展示区"},
+            },
+        ),
         ("add_conversation_summary", ("person_000001", summary_request)),
         ("link_external_user", link_request),
         ("get_person_by_external_user", "wechat:zhangsan"),
         ("merge_anonymous_person", merge_request),
         ("correct_identity", correction_request),
-        ("resolve_target", resolve_request),
+        (
+            "resolve_target",
+            {
+                "camera": "front",
+                "target": {"mode": "scene"},
+            },
+        ),
     ]
+
+
+def test_public_memory_routes_reject_low_level_agent_payload_fields():
+    base_payloads = {
+        "/v1/memory/resolve-target": {
+            "camera": "front",
+            "target": {
+                "kind": "scene",
+                "intent": "teach_scene",
+                "referent_text": "当前展示区",
+            },
+        },
+        "/v1/memory/teach/person": {
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "self_introduction",
+                "referent_text": "我",
+            },
+            "profile": {"display_name": "张三"},
+        },
+        "/v1/memory/teach/scene": {
+            "camera": "front",
+            "target": {
+                "kind": "scene",
+                "intent": "teach_scene",
+                "referent_text": "当前展示区",
+            },
+            "memory": {"title": "新品展示区"},
+        },
+    }
+    forbidden_values = {
+        "track_id": 7,
+        "bbox": [0, 0, 10, 10],
+        "bbox_xyxy": [0, 0, 10, 10],
+        "point_uv": [0.5, 0.5],
+        "test_hint": "fixture",
+        "source_scene": "pic_teach_scene",
+        "source_frame": 7,
+    }
+    service = FakeMemoryService()
+    client = TestClient(create_app(memory_service=service))
+
+    for path, base_payload in base_payloads.items():
+        for field, value in forbidden_values.items():
+            payload = deepcopy(base_payload)
+            if field.startswith("source_"):
+                payload[field] = value
+            else:
+                payload["target"][field] = value
+            response = client.post(path, json=payload)
+            assert response.status_code == 422
+
+    assert service.calls == []
+
+
+def test_public_resolve_target_rejects_object_without_calling_memory_service():
+    service = FakeMemoryService()
+    client = TestClient(create_app(memory_service=service))
+
+    response = client.post(
+        "/v1/memory/resolve-target",
+        json={
+            "camera": "front",
+            "target": {
+                "kind": "object",
+                "intent": "teach_object",
+                "referent_text": "手机",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "status": "not_found",
+        "error_code": "unsupported_target_kind",
+        "retryable": False,
+        "ask_user_hint": False,
+        "ambiguity_type": "unsupported_target_kind",
+        "candidates": [],
+    }
+    assert service.calls == []
+
+
+def test_public_resolve_target_does_not_expose_conflict_as_resolver_status():
+    client = TestClient(create_app(memory_service=ConflictResolveMemoryService()))
+
+    response = client.post(
+        "/v1/memory/resolve-target",
+        json={
+            "camera": "front",
+            "target": {
+                "kind": "scene",
+                "intent": "teach_scene",
+                "referent_text": "当前展示区",
+            },
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "invalid_memory_response"
 
 
 def test_default_memory_endpoints_fail_fast_when_memory_service_is_disabled():
@@ -318,7 +459,15 @@ def test_default_memory_endpoints_fail_fast_when_memory_service_is_disabled():
 
     response = client.post(
         "/v1/memory/teach/person",
-        json={"camera": "front", "target": {"mode": "attention_target"}},
+        json={
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "self_introduction",
+                "referent_text": "我",
+            },
+            "profile": {"display_name": "张三"},
+        },
     )
 
     assert response.status_code == 503
@@ -438,7 +587,11 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
             "/v1/memory/teach/person",
             json={
                 "camera": "front",
-                "target": {"mode": "track_id", "track_id": 7},
+                "target": {
+                    "kind": "person",
+                    "intent": "self_introduction",
+                    "referent_text": "我",
+                },
                 "profile": {
                     "display_name": "张三",
                     "description": "店长",
@@ -453,7 +606,11 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
             "/v1/memory/teach/scene",
             json={
                 "camera": "front",
-                "target": {"mode": "scene"},
+                "target": {
+                    "kind": "scene",
+                    "intent": "teach_scene",
+                    "referent_text": "当前展示区",
+                },
                 "memory": {
                     "title": "新品展示区",
                     "description": "夏季外套区域",
@@ -627,7 +784,14 @@ def test_configured_memory_resolve_target_endpoint_previews_without_writing(tmp_
 
         response = client.post(
             "/v1/memory/resolve-target",
-            json={"camera": "front", "target": {"mode": "track_id", "track_id": 7}},
+            json={
+                "camera": "front",
+                "target": {
+                    "kind": "person",
+                    "intent": "self_introduction",
+                    "referent_text": "我",
+                },
+            },
         )
 
     assert response.status_code == 200

@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from visual_events_server.memory.api_contract import (
+    ResolveTargetRequest,
+    TeachPersonRequest,
+    TeachSceneRequest,
+)
+
+from tools import run_memory_teaching_ga_e2e as module
+
+
+def _make_scene(
+    data_dir: Path,
+    name: str,
+    *,
+    frames: int = 1,
+    des_text: str | None = None,
+) -> Path:
+    scene_dir = data_dir / name
+    scene_dir.mkdir(parents=True)
+    for index in range(frames):
+        (scene_dir / f"img_{index:03d}.jpeg").write_bytes(b"jpeg")
+    if des_text is not None:
+        (scene_dir / "des.txt").write_text(des_text, encoding="utf-8")
+    return scene_dir
+
+
+def _write_manifest(data_dir: Path, scene_names: list[str]) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "schema_version": 1,
+        "scene_count": len(scene_names),
+        "scenes": [{"scene_name": name} for name in scene_names],
+    }
+    (data_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _records_by_scene(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {record["scene"]: record for record in records}
+
+
+def test_discovers_all_jpeg_scene_dirs_without_manifest_as_authority(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    _make_scene(data_dir, "alpha")
+    _make_scene(data_dir, "beta", frames=2)
+    _make_scene(data_dir, "gamma")
+    _write_manifest(data_dir, ["alpha", "stale_manifest_scene"])
+
+    scenes = module.discover_scene_dirs(data_dir)
+    manifest = module.manifest_risk_report(data_dir, scenes)
+
+    assert [scene.name for scene in scenes] == ["alpha", "beta", "gamma"]
+    assert manifest["matches_actual_scene_dirs"] is False
+    assert manifest["manifest_scene_count"] == 2
+    assert manifest["actual_scene_count"] == 3
+    assert manifest["missing_from_manifest"] == ["beta", "gamma"]
+    assert manifest["manifest_only_scenes"] == ["stale_manifest_scene"]
+    assert manifest["risks"]
+
+
+def test_maps_des_txt_to_stable_agent_payloads_without_low_level_fields(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    _make_scene(
+        data_dir,
+        "pic_teach_me",
+        des_text="请你记住我，我是小李飞刀",
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_person",
+        des_text="这是彭刚，请你记住",
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        des_text="这是银河通用的办公室，请你记住",
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_item_phone",
+        des_text="这是手机，请你记住",
+    )
+
+    records = module.build_teach_payload_records(data_dir, camera="front")
+    by_scene = _records_by_scene(records)
+
+    assert by_scene["pic_teach_me"]["endpoint"] == "/v1/memory/teach/person"
+    assert by_scene["pic_teach_me"]["payload"] == {
+        "camera": "front",
+        "target": {
+            "kind": "person",
+            "intent": "self_introduction",
+            "referent_text": "我",
+        },
+        "profile": {"display_name": "小李飞刀"},
+    }
+    assert by_scene["pic_teach_person"]["payload"] == {
+        "camera": "front",
+        "target": {
+            "kind": "person",
+            "intent": "third_person_introduction",
+            "referent_text": "这位/彭刚",
+        },
+        "profile": {"display_name": "彭刚"},
+    }
+    assert by_scene["pic_teach_scene_galbot"]["payload"] == {
+        "camera": "front",
+        "target": {
+            "kind": "scene",
+            "intent": "teach_scene",
+            "referent_text": "这里/银河通用办公室",
+        },
+        "memory": {"title": "银河通用办公室"},
+    }
+    assert by_scene["pic_teach_item_phone"]["endpoint"] == "/v1/memory/resolve-target"
+    assert by_scene["pic_teach_item_phone"]["payload"] == {
+        "camera": "front",
+        "target": {
+            "kind": "object",
+            "intent": "teach_object",
+            "referent_text": "手机",
+        },
+    }
+    assert by_scene["pic_teach_item_phone"]["expected"] == {
+        "negative_only": True,
+        "status": "not_found",
+        "error_code": "unsupported_target_kind",
+        "writes_memory": False,
+    }
+
+    for record in records:
+        assert module.find_forbidden_agent_payload_fields(record["payload"]) == []
+
+
+def test_generated_payloads_parse_with_public_memory_api_contract(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    _make_scene(data_dir, "pic_teach_me", des_text="请你记住我，我是小李飞刀")
+    _make_scene(data_dir, "pic_teach_person", des_text="这是彭刚，请你记住")
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        des_text="这是银河通用的办公室，请你记住",
+    )
+    _make_scene(data_dir, "pic_teach_item_phone", des_text="这是手机，请你记住")
+
+    records = module.build_teach_payload_records(data_dir, camera="front")
+
+    for record in records:
+        if record["endpoint"] == "/v1/memory/teach/person":
+            TeachPersonRequest.model_validate(record["payload"])
+        elif record["endpoint"] == "/v1/memory/teach/scene":
+            TeachSceneRequest.model_validate(record["payload"])
+        elif record["endpoint"] == "/v1/memory/resolve-target":
+            ResolveTargetRequest.model_validate(record["payload"])
+        else:
+            raise AssertionError(f"unexpected endpoint: {record['endpoint']}")
+
+
+def test_dry_run_writes_minimal_artifact_skeleton_and_evidence_index(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    for name in ["pci_stand", "pic_hello"]:
+        _make_scene(data_dir, name, frames=2)
+    _make_scene(data_dir, "pic_teach_me", des_text="请你记住我，我是小李飞刀")
+    _make_scene(data_dir, "pic_teach_person", des_text="这是彭刚，请你记住")
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        des_text="这是银河通用的办公室，请你记住",
+    )
+    _make_scene(data_dir, "pic_teach_item_phone", des_text="这是手机，请你记住")
+    _write_manifest(data_dir, ["pci_stand"])
+    out = tmp_path / "artifacts" / "memory-teaching-ga"
+
+    exit_code = module.main(
+        ["--data-dir", str(data_dir), "--out", str(out), "--dry-run"]
+    )
+
+    assert exit_code == 0
+    required_files = [
+        "report.json",
+        "timeline.jsonl",
+        "teach_payloads.json",
+        "api_responses.jsonl",
+        "botified_frames.jsonl",
+        "visual-evidence/index.html",
+    ]
+    for relative_path in required_files:
+        assert (out / relative_path).is_file()
+
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert report["mode"] == "dry-run"
+    assert report["scene_count"] == 6
+    assert report["manifest"]["matches_actual_scene_dirs"] is False
+    assert report["warnings"]
+    assert report["visual_evidence_index"]
+    for evidence in report["visual_evidence_index"]:
+        assert (out / evidence["path"]).is_file()
+
+    payloads = json.loads((out / "teach_payloads.json").read_text(encoding="utf-8"))
+    assert payloads["schema_version"] == 1
+    assert len(payloads["payloads"]) == 4
+    for record in payloads["payloads"]:
+        assert module.find_forbidden_agent_payload_fields(record["payload"]) == []
+
+    responses = [
+        json.loads(line)
+        for line in (out / "api_responses.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    object_response = next(
+        response
+        for response in responses
+        if response["scene"] == "pic_teach_item_phone"
+    )
+    assert object_response["dry_run"] is True
+    assert object_response["response"]["status"] == "not_found"
+    assert object_response["response"]["error_code"] == "unsupported_target_kind"

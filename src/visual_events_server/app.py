@@ -21,6 +21,13 @@ from .memory import (
     MemoryServiceError,
     MemoryStore,
 )
+from .memory.api_contract import (
+    ResolveTargetRequest,
+    TeachPersonRequest,
+    TeachSceneRequest,
+    unsupported_target_kind_response,
+    validate_resolve_target_response,
+)
 from .metrics import JsonlMetricsSink, MetricsSink
 from .processor import (
     BackendVisualFrameProcessor,
@@ -170,15 +177,19 @@ def create_app(
 
     @app.post("/v1/memory/teach/person")
     async def teach_person(
-        payload: dict[str, Any] = Body(...),
+        payload: TeachPersonRequest = Body(...),
     ) -> dict[str, Any]:
-        return await _memory_response(app.state.memory_service.teach_person(payload))
+        return await _memory_response(
+            app.state.memory_service.teach_person(payload.to_internal_request())
+        )
 
     @app.post("/v1/memory/teach/scene")
     async def teach_scene(
-        payload: dict[str, Any] = Body(...),
+        payload: TeachSceneRequest = Body(...),
     ) -> dict[str, Any]:
-        return await _memory_response(app.state.memory_service.teach_scene(payload))
+        return await _memory_response(
+            app.state.memory_service.teach_scene(payload.to_internal_request())
+        )
 
     @app.post("/v1/memory/person/{person_id}/conversation-summary")
     async def add_conversation_summary(
@@ -221,9 +232,15 @@ def create_app(
 
     @app.post("/v1/memory/resolve-target")
     async def resolve_target(
-        payload: dict[str, Any] = Body(...),
+        payload: ResolveTargetRequest = Body(...),
     ) -> dict[str, Any]:
-        return await _memory_response(app.state.memory_service.resolve_target(payload))
+        if payload.target.kind == "object":
+            return unsupported_target_kind_response()
+        response = await _memory_response(
+            app.state.memory_service.resolve_target(payload.to_internal_request())
+        )
+        _validate_resolve_target_response(response)
+        return response
 
     @app.websocket("/v1/stream")
     async def stream(websocket: WebSocket) -> None:
@@ -305,6 +322,16 @@ async def _memory_response(awaitable: Any) -> dict[str, Any]:
         raise HTTPException(
             status_code=400,
             detail={"code": "invalid_memory_request", "message": str(exc)},
+        ) from exc
+
+
+def _validate_resolve_target_response(response: dict[str, Any]) -> None:
+    try:
+        validate_resolve_target_response(response)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "invalid_memory_response", "message": str(exc)},
         ) from exc
 
 
