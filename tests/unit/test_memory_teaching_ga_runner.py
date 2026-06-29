@@ -57,6 +57,13 @@ def _valid_jpeg_bytes(color: tuple[int, int, int] = (128, 128, 128)) -> bytes:
     return buffer.getvalue()
 
 
+def _assert_image_verifies(path: Path) -> None:
+    from PIL import Image
+
+    with Image.open(path) as image:
+        image.verify()
+
+
 def _records_by_scene(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {record["scene"]: record for record in records}
 
@@ -473,6 +480,10 @@ def test_dry_run_writes_minimal_artifact_skeleton_and_evidence_index(
     assert report["manifest"]["matches_actual_scene_dirs"] is False
     assert report["warnings"]
     assert report["visual_evidence_index"]
+    assert all(
+        evidence["kind"] == "html_index"
+        for evidence in report["visual_evidence_index"]
+    )
     for evidence in report["visual_evidence_index"]:
         assert (out / evidence["path"]).is_file()
 
@@ -578,6 +589,25 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
         "universe": "MemoryStore.memory_table_counts",
         "allowed_diagnostic_whitelist": [],
     }
+    visual_items = report["visual_evidence_index"]
+    overlay_items = [
+        item for item in visual_items if item["kind"] == "image_overlay"
+    ]
+    overlays_by_assertion = {
+        item["assertion_id"]: item for item in overlay_items
+    }
+    assert {
+        "self_introduction_known_person",
+        "third_person_pose_pointing",
+        "teach_scene_scene_activated",
+        "object_unsupported_no_write",
+    } <= set(overlays_by_assertion)
+    for item in overlay_items:
+        assert item["scene"]
+        assert item["report_section"]
+        image_path = out / item["path"]
+        assert image_path.is_file()
+        _assert_image_verifies(image_path)
 
     checks = {check["name"]: check for check in report["checks"]}
     assert checks["all_scenes_replayed"]["passed"] is True
@@ -667,6 +697,42 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     stability_window = third_person["resolve_target"]["evidence"]["stability_window"]
     assert stability_window["active_snapshot_count"] >= 2
     assert stability_window["active_target_track_id"] == 7
+    third_overlay = overlays_by_assertion["third_person_pose_pointing"]
+    third_evidence = third_person["resolve_target"]["evidence"]
+    assert third_overlay["resolver_target_ref"] == third_person["resolver_target_ref"]
+    assert third_overlay["introducer_ref"] == third_person["introducer_ref"]
+    assert third_overlay["stored_embedding_source_track_ref"] == (
+        third_person["stored_embedding_source_track_ref"]
+    )
+    assert third_overlay["crop_hash"] == third_person["stored_crop_hash"]
+    assert third_overlay["crop_path_or_artifact_ref"] == (
+        third_person["stored_crop_path_or_artifact_ref"]
+    )
+    assert third_overlay["request_snapshot_ref"] == third_evidence[
+        "request_snapshot_ref"
+    ]
+    assert third_overlay["source_frame_ref"] == third_evidence["source_frame_ref"]
+    assert third_overlay["pose_stability_window"]["selected_target_track_id"] == (
+        third_evidence["pose_stability_window"]["selected_target_track_id"]
+    )
+    assert third_overlay["candidate_score"] == third_person[
+        "pose_pointing_scoring"
+    ]["candidate_scores"][0]["score"]
+    assert third_overlay["target_bbox_xyxy"] == third_person["resolve_target"][
+        "candidates"
+    ][0]["bbox_xyxy"]
+    object_overlay = overlays_by_assertion["object_unsupported_no_write"]
+    assert object_overlay["error_code"] == (
+        object_no_write["resolve_target"]["error_code"]
+    )
+    assert object_overlay["error_code"] == "unsupported_target_kind"
+    assert object_overlay["status"] == object_no_write["resolve_target"]["status"]
+    assert object_overlay["store_delta_summary"]["before_equals_after"] is True
+    assert object_overlay["store_delta_summary"]["delta_all_zero"] is True
+    assert all(
+        value == 0
+        for value in object_overlay["store_delta_summary"]["delta"].values()
+    )
     assert third_person["assertions"][
         "stored_embedding_source_is_target"
     ] is True

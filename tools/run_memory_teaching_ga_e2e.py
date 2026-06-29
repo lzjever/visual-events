@@ -524,14 +524,6 @@ def run_actual(
     )
     _write_jsonl(api_responses_path, api_response_records)
     _write_jsonl(botified_frames_path, botified_frame_records)
-    _write_visual_evidence_index(
-        evidence_index_path,
-        scenes=scenes,
-        payload_records=payload_records,
-        manifest=manifest,
-        mode="actual",
-    )
-
     visual_evidence_index = [
         {
             "assertion_id": "memory_teaching_ga_actual_fake",
@@ -539,6 +531,25 @@ def run_actual(
             "path": "visual-evidence/index.html",
         }
     ]
+    visual_evidence_index.extend(
+        _build_minimal_visual_overlay_items(
+            out=out,
+            scenes=scenes,
+            mode="actual",
+            self_result=self_result,
+            third_person_result=third_person_result,
+            scene_result=scene_result,
+            object_result=object_result,
+        )
+    )
+    _write_visual_evidence_index(
+        evidence_index_path,
+        scenes=scenes,
+        payload_records=payload_records,
+        manifest=manifest,
+        mode="actual",
+        visual_evidence_index=visual_evidence_index,
+    )
     artifact_paths = {
         "report_json": "report.json",
         "timeline_jsonl": "timeline.jsonl",
@@ -602,7 +613,7 @@ def run_actual(
         "checks": checks,
         "notes": [
             "Actual fake mode: in-process FastAPI/TestClient server with deterministic fake memory embeddings.",
-            "No local model backend, CLI subprocess, visual overlay, or schema changes are used.",
+            "No local model backend, CLI subprocess, or schema changes are used.",
             "Real val-data JPEG bytes are streamed once per discovered scene directory.",
         ],
     }
@@ -711,13 +722,6 @@ def run_local_smoke(
     )
     _write_jsonl(api_responses_path, api_response_records)
     _write_jsonl(botified_frames_path, botified_frame_records)
-    _write_visual_evidence_index(
-        evidence_index_path,
-        scenes=scenes,
-        payload_records=payload_records,
-        manifest=manifest,
-        mode="local-smoke",
-    )
     visual_evidence_index = [
         {
             "assertion_id": "memory_teaching_ga_local_smoke",
@@ -725,6 +729,25 @@ def run_local_smoke(
             "path": "visual-evidence/index.html",
         }
     ]
+    visual_evidence_index.extend(
+        _build_minimal_visual_overlay_items(
+            out=out,
+            scenes=scenes,
+            mode="local-smoke",
+            self_result=self_result,
+            third_person_result=third_person_result,
+            scene_result=scene_result,
+            object_result=None,
+        )
+    )
+    _write_visual_evidence_index(
+        evidence_index_path,
+        scenes=scenes,
+        payload_records=payload_records,
+        manifest=manifest,
+        mode="local-smoke",
+        visual_evidence_index=visual_evidence_index,
+    )
     artifact_paths = {
         "report_json": "report.json",
         "timeline_jsonl": "timeline.jsonl",
@@ -3699,6 +3722,479 @@ def _stub_botified_frame_records(
     ]
 
 
+def _build_minimal_visual_overlay_items(
+    *,
+    out: Path,
+    scenes: list[SceneDir],
+    mode: str,
+    self_result: dict[str, Any] | None,
+    third_person_result: dict[str, Any] | None,
+    scene_result: dict[str, Any] | None,
+    object_result: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    scene_by_name = {scene.name: scene for scene in scenes}
+    visual_evidence_dir = out / "visual-evidence"
+    visual_evidence_dir.mkdir(parents=True, exist_ok=True)
+    self_item = _build_self_visual_overlay_item(
+        out=out,
+        scene=scene_by_name.get("pic_teach_me"),
+        result=self_result or {},
+        report_section=(
+            "self_smoke"
+            if mode == "local-smoke"
+            else "checks.self_introduction_known_person_present.details"
+        ),
+    )
+    if self_item is not None:
+        items.append(self_item)
+    third_item = _build_third_person_visual_overlay_item(
+        out=out,
+        scene=scene_by_name.get("pic_teach_person"),
+        result=third_person_result or {},
+        report_section=(
+            "third_person_probe"
+            if mode == "local-smoke"
+            else "third_person_introduction"
+        ),
+    )
+    if third_item is not None:
+        items.append(third_item)
+    scene_item = _build_scene_visual_overlay_item(
+        out=out,
+        scene=scene_by_name.get("pic_teach_scene_galbot"),
+        result=scene_result or {},
+        report_section=(
+            "scene_smoke"
+            if mode == "local-smoke"
+            else "checks.teach_scene_scene_activated.details"
+        ),
+    )
+    if scene_item is not None:
+        items.append(scene_item)
+    object_item = _build_object_visual_overlay_item(
+        out=out,
+        scene=scene_by_name.get("pic_teach_item_phone"),
+        result=object_result or {},
+    )
+    if object_item is not None:
+        items.append(object_item)
+    return items
+
+
+def _build_self_visual_overlay_item(
+    *,
+    out: Path,
+    scene: SceneDir | None,
+    result: dict[str, Any],
+    report_section: str,
+) -> dict[str, Any] | None:
+    if scene is None or result.get("passed") is not True:
+        return None
+    source_path = _overlay_source_frame_path(scene, result)
+    if source_path is None:
+        return None
+    event = _first_compact_event(result, "known_person_present")
+    evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+    item = {
+        "assertion_id": "self_introduction_known_person",
+        "kind": "image_overlay",
+        "path": "visual-evidence/self-introduction-known-person.jpg",
+        "scene": scene.name,
+        "report_section": report_section,
+        "person_id": result.get("person_id"),
+        "event_id": event.get("event_id"),
+        "memory_match_id": evidence.get("memory_match_id"),
+        "crop_hash": result.get("teach_crop_hash"),
+        "crop_path_or_artifact_ref": result.get("teach_crop_path_or_artifact_ref"),
+        "selected_frame": _selected_frame_path(result),
+        "source_frame": str(source_path),
+    }
+    ok = _write_image_overlay(
+        source_path=source_path,
+        output_path=out / item["path"],
+        title="Self introduction / known person",
+        lines=[
+            f"person_id: {_short_text(item.get('person_id'))}",
+            f"event_id: {_short_text(item.get('event_id'))}",
+            f"crop_hash: {_short_text(item.get('crop_hash'))}",
+        ],
+    )
+    return item if ok else None
+
+
+def _build_third_person_visual_overlay_item(
+    *,
+    out: Path,
+    scene: SceneDir | None,
+    result: dict[str, Any],
+    report_section: str,
+) -> dict[str, Any] | None:
+    if scene is None or result.get("passed") is not True:
+        return None
+    source_path = _overlay_source_frame_path(scene, result)
+    if source_path is None:
+        return None
+    resolve_target = (
+        result.get("resolve_target")
+        if isinstance(result.get("resolve_target"), dict)
+        else {}
+    )
+    resolve_evidence = _response_evidence(resolve_target)
+    target_bbox_xyxy = _first_resolve_candidate_bbox(resolve_target)
+    pose_stability_window = (
+        resolve_evidence.get("pose_stability_window")
+        if isinstance(resolve_evidence.get("pose_stability_window"), dict)
+        else {}
+    )
+    scoring = (
+        result.get("pose_pointing_scoring")
+        if isinstance(result.get("pose_pointing_scoring"), dict)
+        else {}
+    )
+    candidate_score = _candidate_score_for_target(
+        scoring,
+        _track_id_from_ref(result.get("resolver_target_ref")),
+    )
+    item = {
+        "assertion_id": "third_person_pose_pointing",
+        "kind": "image_overlay",
+        "path": "visual-evidence/third-person-pose-pointing.jpg",
+        "scene": scene.name,
+        "report_section": report_section,
+        "resolver_target_ref": result.get("resolver_target_ref"),
+        "introducer_ref": result.get("introducer_ref"),
+        "stored_embedding_source_track_ref": result.get(
+            "stored_embedding_source_track_ref"
+        ),
+        "request_snapshot_ref": resolve_evidence.get("request_snapshot_ref"),
+        "source_frame_ref": resolve_evidence.get("source_frame_ref"),
+        "pose_stability_window": _pose_stability_window_summary(
+            pose_stability_window,
+        ),
+        "candidate_score": candidate_score,
+        "target_bbox_xyxy": target_bbox_xyxy,
+        "crop_hash": result.get("stored_crop_hash"),
+        "crop_path_or_artifact_ref": result.get("stored_crop_path_or_artifact_ref"),
+        "selected_frame": _selected_frame_path(result),
+        "source_frame": str(source_path),
+    }
+    target_ref = item.get("resolver_target_ref")
+    introducer_ref = item.get("introducer_ref")
+    boxes = (
+        [
+            {
+                "label": f"target {_short_text(target_ref, max_len=24)}",
+                "bbox_xyxy": target_bbox_xyxy,
+                "color": (0, 190, 255),
+            }
+        ]
+        if target_bbox_xyxy is not None
+        else []
+    )
+    lines = [
+        f"target: {_short_text(target_ref)}",
+        f"introducer: {_short_text(introducer_ref)}",
+        f"candidate_score: {_short_text(candidate_score)}",
+        f"crop_hash: {_short_text(item.get('crop_hash'))}",
+    ]
+    ok = _write_image_overlay(
+        source_path=source_path,
+        output_path=out / item["path"],
+        title="Third-person pose pointing",
+        lines=lines,
+        boxes=boxes,
+    )
+    return item if ok else None
+
+
+def _build_scene_visual_overlay_item(
+    *,
+    out: Path,
+    scene: SceneDir | None,
+    result: dict[str, Any],
+    report_section: str,
+) -> dict[str, Any] | None:
+    if scene is None or result.get("passed") is not True:
+        return None
+    source_path = _overlay_source_frame_path(scene, result)
+    if source_path is None:
+        return None
+    event = _first_compact_event(result, "scene_activated")
+    evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+    item = {
+        "assertion_id": "teach_scene_scene_activated",
+        "kind": "image_overlay",
+        "path": "visual-evidence/teach-scene-scene-activated.jpg",
+        "scene": scene.name,
+        "report_section": report_section,
+        "scene_id": result.get("scene_id"),
+        "event_id": event.get("event_id"),
+        "memory_match_id": evidence.get("memory_match_id"),
+        "crop_hash": result.get("teach_crop_hash"),
+        "crop_path_or_artifact_ref": result.get("teach_crop_path_or_artifact_ref"),
+        "selected_frame": _selected_frame_path(result),
+        "source_frame": str(source_path),
+    }
+    ok = _write_image_overlay(
+        source_path=source_path,
+        output_path=out / item["path"],
+        title="Teach scene / scene activated",
+        lines=[
+            f"scene_id: {_short_text(item.get('scene_id'))}",
+            f"event_id: {_short_text(item.get('event_id'))}",
+            f"crop_hash: {_short_text(item.get('crop_hash'))}",
+        ],
+    )
+    return item if ok else None
+
+
+def _build_object_visual_overlay_item(
+    *,
+    out: Path,
+    scene: SceneDir | None,
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    if scene is None or result.get("passed") is not True:
+        return None
+    source_path = _overlay_source_frame_path(scene, result)
+    if source_path is None:
+        return None
+    resolve_target = (
+        result.get("resolve_target")
+        if isinstance(result.get("resolve_target"), dict)
+        else {}
+    )
+    store_delta_summary = _store_delta_summary(result.get("store_delta"))
+    item = {
+        "assertion_id": "object_unsupported_no_write",
+        "kind": "image_overlay",
+        "path": "visual-evidence/object-unsupported-no-write.jpg",
+        "scene": scene.name,
+        "report_section": "object_no_write",
+        "status": resolve_target.get("status"),
+        "error_code": resolve_target.get("error_code"),
+        "store_delta_summary": store_delta_summary,
+        "source_frame": str(source_path),
+    }
+    ok = _write_image_overlay(
+        source_path=source_path,
+        output_path=out / item["path"],
+        title="Object unsupported / no write",
+        lines=[
+            f"status: {_short_text(item.get('status'))}",
+            f"error_code: {_short_text(item.get('error_code'))}",
+            f"no_write: {store_delta_summary.get('delta_all_zero')}",
+        ],
+    )
+    return item if ok else None
+
+
+def _overlay_source_frame_path(
+    scene: SceneDir,
+    result: dict[str, Any],
+) -> Path | None:
+    selected = _selected_frame_path(result)
+    if selected:
+        selected_path = Path(selected)
+        if selected_path.is_file():
+            return selected_path
+    if scene.jpeg_paths:
+        return scene.jpeg_paths[0]
+    return None
+
+
+def _selected_frame_path(result: dict[str, Any]) -> str | None:
+    selected_window = result.get("selected_window")
+    if not isinstance(selected_window, dict):
+        return None
+    frame = selected_window.get("frame")
+    return frame if isinstance(frame, str) and frame else None
+
+
+def _first_compact_event(result: dict[str, Any], event_name: str) -> dict[str, Any]:
+    events = result.get("events") if isinstance(result.get("events"), list) else []
+    for event in events:
+        if isinstance(event, dict) and event.get("event") == event_name:
+            return event
+    return {}
+
+
+def _track_id_from_ref(ref: Any) -> int | None:
+    if not isinstance(ref, str):
+        return None
+    marker = ":track:"
+    if marker not in ref:
+        return None
+    try:
+        return int(ref.rsplit(marker, 1)[1])
+    except ValueError:
+        return None
+
+
+def _candidate_score_for_target(
+    scoring: dict[str, Any],
+    target_track_id: int | None,
+) -> float | None:
+    candidates = scoring.get("candidate_scores")
+    if not isinstance(candidates, list):
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if target_track_id is not None and candidate.get("track_id") != target_track_id:
+            continue
+        score = candidate.get("score")
+        return float(score) if isinstance(score, (int, float)) else None
+    return None
+
+
+def _first_resolve_candidate_bbox(resolve_target: dict[str, Any]) -> list[float] | None:
+    candidates = resolve_target.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    candidate = candidates[0]
+    if not isinstance(candidate, dict):
+        return None
+    bbox = candidate.get("bbox_xyxy")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        return [float(value) for value in bbox]
+    except (TypeError, ValueError):
+        return None
+
+
+def _pose_stability_window_summary(window: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "size",
+        "fresh_snapshot_count",
+        "required_pose_snapshot_count",
+        "selected_target_track_id",
+        "selected_arm_side",
+        "selected_count",
+        "failure_reason",
+    )
+    return {key: window.get(key) for key in keys if key in window}
+
+
+def _store_delta_summary(store_delta: Any) -> dict[str, Any]:
+    if not isinstance(store_delta, dict):
+        return {
+            "before_equals_after": False,
+            "delta_all_zero": False,
+            "delta": {},
+        }
+    before = store_delta.get("before")
+    after = store_delta.get("after")
+    delta = store_delta.get("delta")
+    delta_dict = delta if isinstance(delta, dict) else {}
+    return {
+        "before_equals_after": before == after,
+        "delta_all_zero": bool(delta_dict)
+        and all(value == 0 for value in delta_dict.values()),
+        "delta": delta_dict,
+    }
+
+
+def _write_image_overlay(
+    *,
+    source_path: Path,
+    output_path: Path,
+    title: str,
+    lines: list[str],
+    boxes: list[dict[str, Any]] | None = None,
+    arrows: list[dict[str, Any]] | None = None,
+) -> bool:
+    try:
+        from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+    except Exception:
+        return False
+
+    try:
+        with Image.open(source_path) as image:
+            canvas = image.convert("RGB")
+    except (OSError, UnidentifiedImageError):
+        return False
+
+    draw = ImageDraw.Draw(canvas)
+    try:
+        font = ImageFont.load_default()
+    except OSError:
+        font = None
+    width, _height = canvas.size
+    text_lines = [title, *[line for line in lines if line]]
+    panel_height = 18 + 16 * len(text_lines)
+    draw.rectangle((0, 0, width, panel_height), fill=(0, 0, 0))
+    y = 8
+    for index, line in enumerate(text_lines):
+        fill = (255, 255, 255) if index else (255, 230, 120)
+        draw.text((10, y), line[:140], fill=fill, font=font)
+        y += 16
+
+    for box in boxes or []:
+        bbox = box.get("bbox_xyxy")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        color = box.get("color") or (255, 255, 0)
+        xyxy = tuple(float(value) for value in bbox)
+        draw.rectangle(xyxy, outline=color, width=4)
+        label = str(box.get("label") or "")
+        if label:
+            label_y = max(panel_height + 2, xyxy[1] - 18)
+            draw.rectangle(
+                (xyxy[0], label_y, xyxy[0] + 160, label_y + 18),
+                fill=(0, 0, 0),
+            )
+            draw.text(
+                (xyxy[0] + 4, label_y + 2),
+                label[:40],
+                fill=color,
+                font=font,
+            )
+
+    for arrow in arrows or []:
+        start = arrow.get("start_xy")
+        end = arrow.get("end_xy")
+        if (
+            not isinstance(start, (list, tuple))
+            or not isinstance(end, (list, tuple))
+            or len(start) != 2
+            or len(end) != 2
+        ):
+            continue
+        color = arrow.get("color") or (255, 80, 80)
+        start_xy = (float(start[0]), float(start[1]))
+        end_xy = (float(end[0]), float(end[1]))
+        draw.line((start_xy, end_xy), fill=color, width=5)
+        radius = 7
+        draw.ellipse(
+            (
+                end_xy[0] - radius,
+                end_xy[1] - radius,
+                end_xy[0] + radius,
+                end_xy[1] + radius,
+            ),
+            fill=color,
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        canvas.save(output_path, format="JPEG", quality=90)
+    except OSError:
+        return False
+    return True
+
+
+def _short_text(value: Any, *, max_len: int = 32) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    if len(text) <= max_len:
+        return text
+    return f"{text[: max_len - 3]}..."
+
+
 def _write_visual_evidence_index(
     path: Path,
     *,
@@ -3706,6 +4202,7 @@ def _write_visual_evidence_index(
     payload_records: list[dict[str, Any]],
     manifest: dict[str, Any],
     mode: str = "dry-run",
+    visual_evidence_index: list[dict[str, Any]] | None = None,
 ) -> None:
     scene_items = "\n".join(
         (
@@ -3728,6 +4225,7 @@ def _write_visual_evidence_index(
         if manifest.get("matches_actual_scene_dirs")
         else "manifest mismatch recorded as non-blocking risk"
     )
+    overlay_items = _visual_evidence_overlay_items_html(visual_evidence_index or [])
     document = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -3751,10 +4249,52 @@ def _write_visual_evidence_index(
   <ul>
     {payload_items}
   </ul>
+  <h2>Overlay Evidence</h2>
+  {overlay_items}
 </body>
 </html>
 """
     path.write_text(document, encoding="utf-8")
+
+
+def _visual_evidence_overlay_items_html(
+    visual_evidence_index: list[dict[str, Any]],
+) -> str:
+    overlay_items = [
+        item
+        for item in visual_evidence_index
+        if item.get("kind") != "html_index"
+    ]
+    if not overlay_items:
+        return "<p>No overlay images generated for this mode.</p>"
+    rows = []
+    for item in overlay_items:
+        href = _visual_evidence_href(item.get("path"))
+        join_fields = {
+            key: value
+            for key, value in item.items()
+            if key not in {"assertion_id", "kind", "path"}
+        }
+        rows.append(
+            "<li>"
+            f"<a href=\"{html.escape(href)}\">"
+            f"<code>{html.escape(str(item.get('assertion_id') or 'overlay'))}</code>"
+            "</a> "
+            f"<code>{html.escape(str(item.get('scene') or ''))}</code> "
+            f"<code>{html.escape(str(item.get('report_section') or ''))}</code>"
+            f"<pre>{html.escape(json.dumps(join_fields, ensure_ascii=False, indent=2))}</pre>"
+            "</li>"
+        )
+    return "<ul>\n" + "\n".join(rows) + "\n</ul>"
+
+
+def _visual_evidence_href(path: Any) -> str:
+    if not isinstance(path, str) or not path:
+        return "#"
+    prefix = "visual-evidence/"
+    if path.startswith(prefix):
+        return path[len(prefix) :]
+    return path
 
 
 def _build_checks(
