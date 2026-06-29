@@ -48,11 +48,11 @@ def _write_manifest(data_dir: Path, scene_names: list[str]) -> None:
     )
 
 
-def _valid_jpeg_bytes() -> bytes:
+def _valid_jpeg_bytes(color: tuple[int, int, int] = (128, 128, 128)) -> bytes:
     from PIL import Image
 
     buffer = BytesIO()
-    Image.new("RGB", (1280, 720), color=(128, 128, 128)).save(buffer, format="JPEG")
+    Image.new("RGB", (1280, 720), color=color).save(buffer, format="JPEG")
     return buffer.getvalue()
 
 
@@ -327,32 +327,39 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     tmp_path: Path,
 ) -> None:
     data_dir = tmp_path / "val-data"
-    jpeg_bytes = _valid_jpeg_bytes()
+    scene_jpegs = {
+        "pci_stand": _valid_jpeg_bytes((128, 128, 128)),
+        "pic_hello": _valid_jpeg_bytes((48, 128, 196)),
+        "pic_teach_me": _valid_jpeg_bytes((196, 64, 64)),
+        "pic_teach_person": _valid_jpeg_bytes((64, 180, 96)),
+        "pic_teach_scene_galbot": _valid_jpeg_bytes((220, 190, 72)),
+        "pic_teach_item_phone": _valid_jpeg_bytes((140, 80, 196)),
+    }
     for name in ["pci_stand", "pic_hello"]:
-        _make_scene(data_dir, name, frames=2, jpeg_bytes=jpeg_bytes)
+        _make_scene(data_dir, name, frames=2, jpeg_bytes=scene_jpegs[name])
     _make_scene(
         data_dir,
         "pic_teach_me",
         des_text="请你记住我，我是小李飞刀",
-        jpeg_bytes=jpeg_bytes,
+        jpeg_bytes=scene_jpegs["pic_teach_me"],
     )
     _make_scene(
         data_dir,
         "pic_teach_person",
         des_text="这是彭刚，请你记住",
-        jpeg_bytes=jpeg_bytes,
+        jpeg_bytes=scene_jpegs["pic_teach_person"],
     )
     _make_scene(
         data_dir,
         "pic_teach_scene_galbot",
         des_text="这是银河通用的办公室，请你记住",
-        jpeg_bytes=jpeg_bytes,
+        jpeg_bytes=scene_jpegs["pic_teach_scene_galbot"],
     )
     _make_scene(
         data_dir,
         "pic_teach_item_phone",
         des_text="这是手机，请你记住",
-        jpeg_bytes=jpeg_bytes,
+        jpeg_bytes=scene_jpegs["pic_teach_item_phone"],
     )
     out = tmp_path / "artifacts" / "memory-teaching-ga"
 
@@ -365,6 +372,14 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert report["backend"] == "fake"
     assert report["scene_count"] == 6
     assert report["replayed_scene_count"] == 6
+    expected_scene_names = sorted(scene_jpegs)
+    assert report["post_teach_scene_replay"]["runner_case"] == (
+        "ga-post-teach-scene-replay"
+    )
+    assert report["post_teach_scene_replay"]["replayed_scene_count"] == 6
+    assert report["post_teach_scene_replay"]["replayed_scene_names"] == (
+        expected_scene_names
+    )
     assert all(
         fields == [] for fields in report["forbidden_agent_payload_fields"].values()
     )
@@ -395,7 +410,43 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert checks["self_introduction_known_person_present"]["passed"] is True
     assert checks["third_person_known_person_present"]["passed"] is True
     assert checks["teach_scene_scene_activated"]["passed"] is True
+    assert checks["post_teach_all_scenes_memory_behavior"]["passed"] is True
     assert checks["object_resolve_unsupported_no_write"]["passed"] is True
+
+    post_teach = report["post_teach_scene_replay"]
+    assert post_teach == checks["post_teach_all_scenes_memory_behavior"]["details"]
+    assert post_teach["assertions"] == {
+        "all_required_teaching_scenes_present": True,
+        "all_scenes_replayed": True,
+        "self_positive_scene_confirmed": True,
+        "third_person_positive_scene_confirmed": True,
+        "scene_positive_scene_confirmed": True,
+        "non_self_scenes_no_taught_self_confirmed": True,
+        "non_third_person_scenes_no_taught_third_person_confirmed": True,
+        "non_scene_scenes_no_taught_scene_confirmed": True,
+    }
+    assert post_teach["self_person_id"]
+    assert post_teach["third_person_id"]
+    assert post_teach["scene_id"]
+    post_scenes = {scene["scene"]: scene for scene in post_teach["scenes"]}
+    assert sorted(post_scenes) == expected_scene_names
+    assert post_scenes["pic_teach_me"]["flags"][
+        "taught_self_known_person_present"
+    ] is True
+    assert post_scenes["pic_teach_person"]["flags"][
+        "taught_third_person_known_person_present"
+    ] is True
+    assert post_scenes["pic_teach_scene_galbot"]["flags"][
+        "taught_scene_activated"
+    ] is True
+    for scene_name, scene_result in post_scenes.items():
+        flags = scene_result["flags"]
+        if scene_name != "pic_teach_me":
+            assert flags["taught_self_known_person_present"] is False
+        if scene_name != "pic_teach_person":
+            assert flags["taught_third_person_known_person_present"] is False
+        if scene_name != "pic_teach_scene_galbot":
+            assert flags["taught_scene_activated"] is False
 
     third_person = report["third_person_introduction"]
     assert third_person == checks["third_person_known_person_present"]["details"]
@@ -516,6 +567,16 @@ def test_actual_fake_runner_writes_failed_report_when_teaching_scene_missing(
     assert checks["third_person_known_person_present"]["details"]["error"] == (
         "required_teaching_scene_missing"
     )
+    assert checks["post_teach_all_scenes_memory_behavior"]["passed"] is False
+    assert checks["post_teach_all_scenes_memory_behavior"]["details"]["reason"] == (
+        "required_teaching_scene_missing"
+    )
+    assert checks["post_teach_all_scenes_memory_behavior"]["details"]["missing"] == [
+        "pic_teach_person"
+    ]
+    assert report["post_teach_scene_replay"]["reason"] == (
+        "required_teaching_scene_missing"
+    )
 
     for relative_path in [
         "timeline.jsonl",
@@ -525,6 +586,172 @@ def test_actual_fake_runner_writes_failed_report_when_teaching_scene_missing(
         "visual-evidence/index.html",
     ]:
         assert (out / relative_path).is_file()
+
+
+def test_post_teach_scene_replay_uses_one_runner_case(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    scene_jpegs = {
+        "other_scene": _valid_jpeg_bytes((32, 32, 32)),
+        "pic_teach_me": _valid_jpeg_bytes((196, 64, 64)),
+        "pic_teach_person": _valid_jpeg_bytes((64, 180, 96)),
+        "pic_teach_scene_galbot": _valid_jpeg_bytes((220, 190, 72)),
+    }
+    _make_scene(data_dir, "other_scene", jpeg_bytes=scene_jpegs["other_scene"])
+    _make_scene(
+        data_dir,
+        "pic_teach_me",
+        des_text="请你记住我，我是小李飞刀",
+        jpeg_bytes=scene_jpegs["pic_teach_me"],
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_person",
+        des_text="这是彭刚，请你记住",
+        jpeg_bytes=scene_jpegs["pic_teach_person"],
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        des_text="这是银河通用的办公室，请你记住",
+        jpeg_bytes=scene_jpegs["pic_teach_scene_galbot"],
+    )
+    scenes = module.discover_scene_dirs(data_dir)
+    records = module._build_teach_payload_records_from_scenes(
+        scenes,
+        camera="front",
+    )
+    created_cases: list[str] = []
+
+    class FakeRunner:
+        def __init__(self, **kwargs: Any) -> None:
+            created_cases.append(kwargs["case"])
+            self.case = kwargs["case"]
+            self.source_frame = kwargs["source_frame"]
+            self.processor = SimpleNamespace(mode="single")
+            self.frame_id = 0
+
+        def open_stream(self):
+            return self
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def send(self, _websocket: Any, *, timestamp_ms: int, states_file: Any, phase: str):
+            self.frame_id += 1
+            states_file.write(
+                json.dumps(
+                    {
+                        "case": self.case,
+                        "phase": phase,
+                        "timestamp_ms": timestamp_ms,
+                    }
+                )
+                + "\n"
+            )
+            return {"semantic_events": []}
+
+        def start_query_and_drain(
+            self,
+            websocket: Any,
+            *,
+            query_timestamp_ms: int,
+            states_file: Any,
+            phase: str,
+        ) -> list[dict[str, Any]]:
+            self.send(
+                websocket,
+                timestamp_ms=query_timestamp_ms,
+                states_file=states_file,
+                phase=f"{phase}:query",
+            )
+            self.send(
+                websocket,
+                timestamp_ms=query_timestamp_ms + 1,
+                states_file=states_file,
+                phase=f"{phase}:drain",
+            )
+            scene_name = self.source_frame.path.parent.name
+            if scene_name == "pic_teach_me":
+                return [
+                    {
+                        "event": "known_person_present",
+                        "track_id": 7,
+                        "memory_context": {"person": {"person_id": "person_self"}},
+                    }
+                ]
+            if scene_name == "pic_teach_person":
+                return [
+                    {
+                        "event": "known_person_present",
+                        "track_id": 8,
+                        "memory_context": {"person": {"person_id": "person_third"}},
+                    }
+                ]
+            if scene_name == "pic_teach_scene_galbot":
+                return [
+                    {
+                        "event": "scene_activated",
+                        "track_id": None,
+                        "memory_context": {"scene": {"scene_id": "scene_ga"}},
+                    }
+                ]
+            return [
+                {
+                    "event": "familiar_unknown_present",
+                    "track_id": 7,
+                    "memory_context": {"anonymous": {"anonymous_id": "anon_1"}},
+                }
+            ]
+
+    def fake_post_and_record_api_response(**kwargs: Any) -> dict[str, Any]:
+        scene = kwargs["scene"]
+        body_by_scene = {
+            "pic_teach_me": {"ok": True, "person_id": "person_self"},
+            "pic_teach_person": {"ok": True, "person_id": "person_third"},
+            "pic_teach_scene_galbot": {"ok": True, "scene_id": "scene_ga"},
+        }
+        body = body_by_scene[scene]
+        kwargs["api_response_records"].append(
+            {
+                "scene": scene,
+                "operation": kwargs["operation"],
+                "payload": kwargs["payload"],
+                "response": body,
+                "status_code": 200,
+                "dry_run": False,
+            }
+        )
+        return {"status_code": 200, "body": body}
+
+    monkeypatch.setattr(module, "_actual_runner", lambda **kwargs: FakeRunner(**kwargs))
+    monkeypatch.setattr(
+        module,
+        "_post_and_record_api_response",
+        fake_post_and_record_api_response,
+    )
+
+    states_path = tmp_path / "visual_states.jsonl"
+    with states_path.open("w", encoding="utf-8") as states_file:
+        result = module._run_actual_post_teach_scene_replay(
+            scenes=scenes,
+            payload_records_by_scene={record["scene"]: record for record in records},
+            out=tmp_path,
+            camera="front",
+            states_file=states_file,
+            api_response_records=[],
+            botified_frame_records=[],
+        )
+
+    assert created_cases == ["ga-post-teach-scene-replay"]
+    assert result["runner_case"] == "ga-post-teach-scene-replay"
+    assert result["passed"] is True
+    assert result["replayed_scene_names"] == sorted(scene_jpegs)
 
 
 def test_local_smoke_requires_explicit_real_local_backends(tmp_path: Path) -> None:

@@ -49,6 +49,7 @@ TEACH_SCENE_ORDER = (
     "pic_teach_scene_galbot",
     "pic_teach_item_phone",
 )
+POST_TEACH_SCENE_REPLAY_CASE = "ga-post-teach-scene-replay"
 
 
 @dataclass(frozen=True)
@@ -390,6 +391,10 @@ def run_actual(
     self_result: dict[str, Any] = {"passed": False, "error": "not_run"}
     third_person_result: dict[str, Any] = {"passed": False, "error": "not_run"}
     scene_result: dict[str, Any] = {"passed": False, "error": "not_run"}
+    post_teach_scene_replay_result: dict[str, Any] = {
+        "passed": False,
+        "error": "not_run",
+    }
     object_result: dict[str, Any] = {"passed": False, "error": "not_run"}
 
     with visual_states_path.open("w", encoding="utf-8") as states_file:
@@ -445,6 +450,16 @@ def run_actual(
                 api_response_records=api_response_records,
                 botified_frame_records=botified_frame_records,
             )
+
+        post_teach_scene_replay_result = _run_actual_post_teach_scene_replay(
+            scenes=scenes,
+            payload_records_by_scene=payload_records_by_scene,
+            out=out,
+            camera=camera,
+            states_file=states_file,
+            api_response_records=api_response_records,
+            botified_frame_records=botified_frame_records,
+        )
 
         object_scene = _find_scene(scenes, "pic_teach_item_phone")
         object_record = payload_records_by_scene.get("pic_teach_item_phone")
@@ -508,6 +523,7 @@ def run_actual(
         self_result=self_result,
         third_person_result=third_person_result,
         scene_result=scene_result,
+        post_teach_scene_replay_result=post_teach_scene_replay_result,
         object_result=object_result,
     )
     warnings = list(manifest.get("risks") or [])
@@ -530,6 +546,7 @@ def run_actual(
         "forbidden_agent_payload_fields": forbidden_payload_fields,
         "api_responses": api_response_records,
         "third_person_introduction": third_person_result,
+        "post_teach_scene_replay": post_teach_scene_replay_result,
         "object_no_write": object_result,
         "debug_test_channel_enabled": False,
         "artifacts": artifact_paths,
@@ -1645,6 +1662,228 @@ def _run_actual_scene_replay(
     }
 
 
+def _run_actual_post_teach_scene_replay(
+    *,
+    scenes: list[SceneDir],
+    payload_records_by_scene: dict[str, dict[str, Any]],
+    out: Path,
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    required_scene_names = (
+        "pic_teach_me",
+        "pic_teach_person",
+        "pic_teach_scene_galbot",
+    )
+    scenes_by_name = {scene.name: scene for scene in scenes}
+    missing = [
+        name
+        for name in required_scene_names
+        if name not in scenes_by_name or name not in payload_records_by_scene
+    ]
+    if missing:
+        return _post_teach_scene_replay_missing_result(missing)
+
+    runner = _actual_runner(
+        case=POST_TEACH_SCENE_REPLAY_CASE,
+        out=out,
+        source_frame=_load_source_frame_from_scene(scenes_by_name["pic_teach_me"]),
+        camera=camera,
+    )
+    timestamp_ms = memory_e2e.QUERY_INTERVAL_MS
+    timestamp_step_ms = memory_e2e.QUERY_INTERVAL_MS * 2
+
+    with runner.open_stream() as websocket:
+        self_record = payload_records_by_scene["pic_teach_me"]
+        runner.processor.mode = "single"
+        runner.source_frame = _load_source_frame_from_scene(
+            scenes_by_name["pic_teach_me"]
+        )
+        runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=timestamp_ms,
+            states_file=states_file,
+            phase="post-teach-self-seed",
+        )
+        last_query_timestamp_ms = timestamp_ms
+        self_teach = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index=f"{_payload_index(self_record)}:post-teach",
+            scene=self_record["scene"],
+            endpoint=self_record["endpoint"],
+            payload=self_record["payload"],
+            operation="post_teach_person_self",
+        )
+        timestamp_ms += timestamp_step_ms
+
+        third_person_record = payload_records_by_scene["pic_teach_person"]
+        runner.processor.mode = "third_person"
+        runner.source_frame = _load_source_frame_from_scene(
+            scenes_by_name["pic_teach_person"]
+        )
+        runner.send(
+            websocket,
+            timestamp_ms=last_query_timestamp_ms + memory_e2e.QUERY_INTERVAL_MS - 1,
+            states_file=states_file,
+            phase="post-teach-third-person-seed",
+        )
+        third_person_teach = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index=f"{_payload_index(third_person_record)}:post-teach",
+            scene=third_person_record["scene"],
+            endpoint=third_person_record["endpoint"],
+            payload=third_person_record["payload"],
+            operation="post_teach_person_third_person",
+        )
+        timestamp_ms += timestamp_step_ms
+
+        scene_record = payload_records_by_scene["pic_teach_scene_galbot"]
+        runner.processor.mode = "single"
+        runner.source_frame = _load_source_frame_from_scene(
+            scenes_by_name["pic_teach_scene_galbot"]
+        )
+        runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=timestamp_ms,
+            states_file=states_file,
+            phase="post-teach-scene-seed",
+        )
+        scene_teach = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index=f"{_payload_index(scene_record)}:post-teach",
+            scene=scene_record["scene"],
+            endpoint=scene_record["endpoint"],
+            payload=scene_record["payload"],
+            operation="post_teach_scene",
+        )
+        timestamp_ms += timestamp_step_ms
+
+        self_person_id = self_teach["body"].get("person_id")
+        third_person_id = third_person_teach["body"].get("person_id")
+        scene_id = scene_teach["body"].get("scene_id")
+        replayed_scene_names: list[str] = []
+        replayed_scenes: list[dict[str, Any]] = []
+
+        for scene in scenes:
+            runner.source_frame = _load_source_frame_from_scene(scene)
+            runner.processor.mode = (
+                "third_person" if scene.name == "pic_teach_person" else "single"
+            )
+            events = runner.start_query_and_drain(
+                websocket,
+                query_timestamp_ms=timestamp_ms,
+                states_file=states_file,
+                phase=f"post-teach-scene-replay:{scene.name}",
+            )
+            replayed_scene_names.append(scene.name)
+            flags = {
+                "taught_self_known_person_present": (
+                    _known_person_event_for_person(events, self_person_id) is not None
+                ),
+                "taught_third_person_known_person_present": (
+                    _known_person_event_for_person(events, third_person_id) is not None
+                ),
+                "taught_scene_activated": (
+                    _scene_event_for_scene(events, scene_id) is not None
+                ),
+            }
+            replayed_scenes.append(
+                {
+                    "scene": scene.name,
+                    "events": memory_e2e.compact_events(events),
+                    "flags": flags,
+                }
+            )
+            _append_botified_frame_records(
+                botified_frame_records,
+                case=POST_TEACH_SCENE_REPLAY_CASE,
+                scene=scene.name,
+                phase="post-teach-scene-replay",
+                events=events,
+            )
+            timestamp_ms += timestamp_step_ms
+
+    scenes_by_result_name = {item["scene"]: item for item in replayed_scenes}
+    assertions = {
+        "all_required_teaching_scenes_present": True,
+        "all_scenes_replayed": replayed_scene_names == [scene.name for scene in scenes],
+        "self_positive_scene_confirmed": bool(
+            scenes_by_result_name.get("pic_teach_me", {})
+            .get("flags", {})
+            .get("taught_self_known_person_present")
+        ),
+        "third_person_positive_scene_confirmed": bool(
+            scenes_by_result_name.get("pic_teach_person", {})
+            .get("flags", {})
+            .get("taught_third_person_known_person_present")
+        ),
+        "scene_positive_scene_confirmed": bool(
+            scenes_by_result_name.get("pic_teach_scene_galbot", {})
+            .get("flags", {})
+            .get("taught_scene_activated")
+        ),
+        "non_self_scenes_no_taught_self_confirmed": all(
+            not item["flags"]["taught_self_known_person_present"]
+            for item in replayed_scenes
+            if item["scene"] != "pic_teach_me"
+        ),
+        "non_third_person_scenes_no_taught_third_person_confirmed": all(
+            not item["flags"]["taught_third_person_known_person_present"]
+            for item in replayed_scenes
+            if item["scene"] != "pic_teach_person"
+        ),
+        "non_scene_scenes_no_taught_scene_confirmed": all(
+            not item["flags"]["taught_scene_activated"]
+            for item in replayed_scenes
+            if item["scene"] != "pic_teach_scene_galbot"
+        ),
+    }
+    passed = all(assertions.values())
+    return {
+        "runner_case": POST_TEACH_SCENE_REPLAY_CASE,
+        "passed": passed,
+        "reason": "" if passed else _first_failed_assertion(assertions),
+        "replayed_scene_names": replayed_scene_names,
+        "replayed_scene_count": len(replayed_scene_names),
+        "self_person_id": self_person_id,
+        "third_person_id": third_person_id,
+        "scene_id": scene_id,
+        "scenes": replayed_scenes,
+        "assertions": assertions,
+    }
+
+
+def _post_teach_scene_replay_missing_result(missing: list[str]) -> dict[str, Any]:
+    assertions = {
+        "all_required_teaching_scenes_present": False,
+        "all_scenes_replayed": False,
+        "self_positive_scene_confirmed": False,
+        "third_person_positive_scene_confirmed": False,
+        "scene_positive_scene_confirmed": False,
+        "non_self_scenes_no_taught_self_confirmed": False,
+        "non_third_person_scenes_no_taught_third_person_confirmed": False,
+        "non_scene_scenes_no_taught_scene_confirmed": False,
+    }
+    return {
+        "runner_case": POST_TEACH_SCENE_REPLAY_CASE,
+        "passed": False,
+        "reason": "required_teaching_scene_missing",
+        "missing": missing,
+        "replayed_scene_names": [],
+        "replayed_scene_count": 0,
+        "self_person_id": None,
+        "third_person_id": None,
+        "scene_id": None,
+        "scenes": [],
+        "assertions": assertions,
+    }
+
+
 def _run_actual_self_introduction(
     *,
     out: Path,
@@ -1868,6 +2107,23 @@ def _known_person_event_for_person(
             event.get("memory_context", {}).get("person", {}).get("person_id")
         )
         if context_person_id == person_id:
+            return event
+    return None
+
+
+def _scene_event_for_scene(
+    events: list[dict[str, Any]],
+    scene_id: Any,
+) -> dict[str, Any] | None:
+    if not scene_id:
+        return None
+    for event in events:
+        if event.get("event") != "scene_activated":
+            continue
+        context_scene_id = (
+            event.get("memory_context", {}).get("scene", {}).get("scene_id")
+        )
+        if context_scene_id == scene_id:
             return event
     return None
 
@@ -2453,6 +2709,7 @@ def _build_actual_checks(
     self_result: dict[str, Any],
     third_person_result: dict[str, Any],
     scene_result: dict[str, Any],
+    post_teach_scene_replay_result: dict[str, Any],
     object_result: dict[str, Any],
 ) -> list[dict[str, Any]]:
     expected_teach_scenes = set(TEACH_SCENE_ORDER)
@@ -2526,6 +2783,11 @@ def _build_actual_checks(
             "name": "teach_scene_scene_activated",
             "passed": bool(scene_result.get("passed")),
             "details": scene_result,
+        },
+        {
+            "name": "post_teach_all_scenes_memory_behavior",
+            "passed": bool(post_teach_scene_replay_result.get("passed")),
+            "details": post_teach_scene_replay_result,
         },
         {
             "name": "object_resolve_unsupported_no_write",
