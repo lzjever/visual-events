@@ -740,3 +740,251 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
     assert result["person_id"] == "person_123"
     assert result["resolve_target"]["evidence"]["introducer_ref"] == "front:track:7"
     assert result["selected_window"]["scene"] == "pic_teach_person"
+
+
+def test_local_third_person_probe_scans_until_late_pose_pointing_window(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    frame_paths: list[Path] = []
+    for index in range(18):
+        frame_path = tmp_path / f"img_{index:03d}.jpeg"
+        frame_path.write_bytes(_valid_jpeg_bytes())
+        frame_paths.append(frame_path)
+    scene = module.SceneDir(
+        name="pic_teach_person",
+        path=tmp_path,
+        jpeg_paths=tuple(frame_paths),
+        des_text="这是彭刚，请你记住",
+    )
+    record = {
+        "scene": "pic_teach_person",
+        "endpoint": "/v1/memory/teach/person",
+        "payload": {
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "third_person_introduction",
+                "referent_text": "这位/彭刚",
+            },
+            "profile": {"display_name": "彭刚"},
+        },
+    }
+    posted_operations: list[str] = []
+    resolve_indices: list[int] = []
+    replay_frames: list[Path] = []
+
+    class FakeRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.session_factory = SimpleNamespace(last_snapshot=None)
+            self.client = object()
+
+        def open_stream(self):
+            return self
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def send(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "frame_id": 1,
+                "tracks": [
+                    {"track_id": 7, "class": "person", "lost_ms": 0},
+                    {"track_id": 8, "class": "person", "lost_ms": 0},
+                ],
+                "attention": {"target_track_id": 7},
+                "scene_context": {"engagement_state": "available"},
+            }
+
+    def fake_post_and_record_api_response(**kwargs: Any) -> dict[str, Any]:
+        operation = kwargs["operation"]
+        posted_operations.append(operation)
+        if operation == "local_resolve_third_person_target":
+            index = int(str(kwargs["payload_index"]).rsplit(":", 1)[-1])
+            resolve_indices.append(index)
+            if index < 16:
+                return {
+                    "status_code": 200,
+                    "body": {
+                        "ok": False,
+                        "status": "target_unclear",
+                        "reason": "target_unclear",
+                    },
+                }
+            return {
+                "status_code": 200,
+                "body": {
+                    "ok": True,
+                    "status": "resolved",
+                    "candidates": [
+                        {"track_id": 8, "reason": "pose_pointing_to_person"}
+                    ],
+                    "evidence": {
+                        "resolution_reason": "pose_pointing_to_person",
+                        "resolver_target_ref": "front:track:8",
+                        "introducer_ref": "front:track:7",
+                    },
+                },
+            }
+        if operation == "local_teach_person_third_person":
+            return {
+                "status_code": 200,
+                "body": {
+                    "ok": True,
+                    "person_id": "person_late",
+                    "evidence": {
+                        "resolution_reason": "pose_pointing_to_person",
+                        "resolver_target_ref": "front:track:8",
+                        "introducer_ref": "front:track:7",
+                    },
+                },
+            }
+        raise AssertionError(f"unexpected operation: {operation}")
+
+    def fake_replay(*args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        source_frame = args[2]
+        replay_frames.append(source_frame.path)
+        return [
+            {
+                "event": "known_person_present",
+                "track_id": 8,
+                "memory_context": {"person": {"person_id": "person_late"}},
+            }
+        ]
+
+    monkeypatch.setattr(module, "LocalMemorySmokeRunner", FakeRunner)
+    monkeypatch.setattr(
+        module,
+        "_post_and_record_api_response",
+        fake_post_and_record_api_response,
+    )
+    monkeypatch.setattr(module, "_send_stable_query_and_drain_local", fake_replay)
+
+    states_path = tmp_path / "visual_states.jsonl"
+    with states_path.open("w", encoding="utf-8") as states_file:
+        result = module._run_local_third_person_probe(
+            out=tmp_path,
+            scene=scene,
+            record=record,
+            camera="front",
+            config=SimpleNamespace(),
+            states_file=states_file,
+            api_response_records=[],
+        )
+
+    assert resolve_indices == list(range(17))
+    assert posted_operations == [
+        *["local_resolve_third_person_target"] * 17,
+        "local_teach_person_third_person",
+    ]
+    assert replay_frames == [frame_paths[16]]
+    assert result["status"] == "passed"
+    assert result["passed"] is True
+    assert result["person_id"] == "person_late"
+    assert result["selected_window"] == {
+        "scene": "pic_teach_person",
+        "frame": str(frame_paths[16]),
+        "frame_index": 16,
+        "mode": "fixed_val_data_frame",
+    }
+
+
+def test_local_third_person_probe_does_not_teach_or_replay_without_resolved_window(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    frame_paths: list[Path] = []
+    for index in range(18):
+        frame_path = tmp_path / f"img_{index:03d}.jpeg"
+        frame_path.write_bytes(_valid_jpeg_bytes())
+        frame_paths.append(frame_path)
+    scene = module.SceneDir(
+        name="pic_teach_person",
+        path=tmp_path,
+        jpeg_paths=tuple(frame_paths),
+        des_text="这是彭刚，请你记住",
+    )
+    record = {
+        "scene": "pic_teach_person",
+        "endpoint": "/v1/memory/teach/person",
+        "payload": {
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "third_person_introduction",
+                "referent_text": "这位/彭刚",
+            },
+            "profile": {"display_name": "彭刚"},
+        },
+    }
+    resolve_indices: list[int] = []
+
+    class FakeRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.session_factory = SimpleNamespace(last_snapshot=None)
+            self.client = object()
+
+        def open_stream(self):
+            return self
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def send(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "frame_id": 1,
+                "tracks": [{"track_id": 7, "class": "person", "lost_ms": 0}],
+                "attention": {"target_track_id": 7},
+                "scene_context": {"engagement_state": "available"},
+            }
+
+    def fake_post_and_record_api_response(**kwargs: Any) -> dict[str, Any]:
+        operation = kwargs["operation"]
+        if operation == "local_teach_person_third_person":
+            raise AssertionError("teach_person should not be called")
+        assert operation == "local_resolve_third_person_target"
+        resolve_indices.append(int(str(kwargs["payload_index"]).rsplit(":", 1)[-1]))
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": False,
+                "status": "target_unclear",
+                "reason": "target_unclear",
+            },
+        }
+
+    def fake_replay(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("replay should not be called")
+
+    monkeypatch.setattr(module, "LocalMemorySmokeRunner", FakeRunner)
+    monkeypatch.setattr(
+        module,
+        "_post_and_record_api_response",
+        fake_post_and_record_api_response,
+    )
+    monkeypatch.setattr(module, "_send_stable_query_and_drain_local", fake_replay)
+
+    states_path = tmp_path / "visual_states.jsonl"
+    with states_path.open("w", encoding="utf-8") as states_file:
+        result = module._run_local_third_person_probe(
+            out=tmp_path,
+            scene=scene,
+            record=record,
+            camera="front",
+            config=SimpleNamespace(),
+            states_file=states_file,
+            api_response_records=[],
+        )
+
+    assert resolve_indices == list(range(18))
+    assert result["status"] == "insufficient_sample"
+    assert result["passed"] is False
+    assert result["reason"] == "target_unclear"
+    assert result["selected_window"] is None
+    assert result["events"] == []

@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi.testclient import TestClient
 
@@ -1137,7 +1137,7 @@ def _run_local_third_person_probe(
     last_reason = "no_active_interaction_target"
     invalid_resolve: dict[str, Any] | None = None
     with runner.open_stream() as websocket:
-        for index, source_frame in enumerate(_local_smoke_source_frames(scene)):
+        for index, source_frame in enumerate(_local_third_person_source_frames(scene)):
             timestamp_ms = 1_000 + (index * 400)
             state = runner.send(
                 websocket,
@@ -1346,6 +1346,13 @@ def _local_smoke_source_frames(
     if len(paths) == 1:
         paths = [paths[0], paths[0], paths[0]]
     return [_load_source_frame(path) for path in paths]
+
+
+def _local_third_person_source_frames(
+    scene: SceneDir,
+) -> Iterator[memory_e2e.SourceFrame]:
+    for path in scene.jpeg_paths:
+        yield _load_source_frame(path)
 
 
 def _load_source_frame(path: Path) -> memory_e2e.SourceFrame:
