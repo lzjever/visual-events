@@ -1160,9 +1160,19 @@ class AppMemoryService:
         if source_track_ref is not None:
             evidence["source_track_ref"] = source_track_ref
         evidence["resolver_target_ref"] = _resolver_target_ref(cached, target)
+        if target.source_target_mode == "pose_pointing_to_person":
+            introducer_ref = self._pose_pointing_introducer_ref(cached)
+            if introducer_ref is not None:
+                evidence["introducer_ref"] = introducer_ref
         if crop_hash is not None:
             evidence["crop_hash"] = crop_hash
         return evidence
+
+    def _pose_pointing_introducer_ref(self, cached: CachedFrame) -> str | None:
+        introducer, _ambiguity_type = self._active_interaction_target(cached)
+        if introducer is None or introducer.track_id is None:
+            return None
+        return _resolver_target_ref(cached, introducer)
 
     def _preview_evidence(
         self,

@@ -4,6 +4,7 @@ import asyncio
 from io import BytesIO
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from visual_events_server.memory.api_contract import (
@@ -490,7 +491,7 @@ def test_local_smoke_requires_explicit_real_local_backends(tmp_path: Path) -> No
     assert "--pose-model-path" in missing
 
 
-def test_local_smoke_report_distinguishes_pass_fail_insufficient_without_models(
+def test_local_smoke_report_fails_insufficient_third_person_without_models(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -569,9 +570,10 @@ def test_local_smoke_report_distinguishes_pass_fail_insufficient_without_models(
         ]
     )
 
-    assert exit_code == 0
+    assert exit_code != 0
     report = json.loads((out / "report.json").read_text(encoding="utf-8"))
-    assert report["ok"] is True
+    assert report["ok"] is False
+    assert report["status"] == "failed"
     assert report["mode"] == "local-smoke"
     assert report["real_model_evidence"] is True
     assert report["self_smoke"]["status"] == "passed"
@@ -588,5 +590,153 @@ def test_local_smoke_report_distinguishes_pass_fail_insufficient_without_models(
     checks = {check["name"]: check for check in report["checks"]}
     assert checks["self_local_smoke"]["passed"] is True
     assert checks["scene_local_smoke"]["passed"] is True
-    assert checks["third_person_local_probe"]["passed"] is True
+    assert checks["third_person_local_probe"]["passed"] is False
     assert checks["third_person_local_probe"]["details"]["status"] == "insufficient_sample"
+
+
+def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    frame_path = tmp_path / "img_000.jpeg"
+    frame_path.write_bytes(_valid_jpeg_bytes())
+    scene = module.SceneDir(
+        name="pic_teach_person",
+        path=tmp_path,
+        jpeg_paths=(frame_path,),
+        des_text="这是彭刚，请你记住",
+    )
+    source_frame = memory_e2e.SourceFrame(
+        path=frame_path,
+        jpeg_bytes=frame_path.read_bytes(),
+        width=1280,
+        height=720,
+    )
+    record = {
+        "scene": "pic_teach_person",
+        "endpoint": "/v1/memory/teach/person",
+        "payload": {
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "third_person_introduction",
+                "referent_text": "这位/彭刚",
+            },
+            "profile": {"display_name": "彭刚"},
+        },
+    }
+    posted_operations: list[str] = []
+    replay_calls: list[dict[str, Any]] = []
+
+    class FakeRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.session_factory = SimpleNamespace(last_snapshot=None)
+            self.client = object()
+
+        def open_stream(self):
+            return self
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def send(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "frame_id": 1,
+                "tracks": [
+                    {"track_id": 7, "class": "person", "lost_ms": 0},
+                    {"track_id": 8, "class": "person", "lost_ms": 0},
+                ],
+                "attention": {"target_track_id": 7},
+                "scene_context": {"engagement_state": "available"},
+            }
+
+    def fake_post_and_record_api_response(**kwargs: Any) -> dict[str, Any]:
+        operation = kwargs["operation"]
+        posted_operations.append(operation)
+        if operation == "local_resolve_third_person_target":
+            return {
+                "status_code": 200,
+                "body": {
+                    "ok": True,
+                    "status": "resolved",
+                    "candidates": [
+                        {"track_id": 8, "reason": "pose_pointing_to_person"}
+                    ],
+                    "evidence": {
+                        "resolution_reason": "pose_pointing_to_person",
+                        "resolver_target_ref": "front:track:8",
+                        "introducer_ref": "front:track:7",
+                    },
+                },
+            }
+        if operation == "local_teach_person_third_person":
+            return {
+                "status_code": 200,
+                "body": {
+                    "ok": True,
+                    "person_id": "person_123",
+                    "evidence": {
+                        "resolution_reason": "pose_pointing_to_person",
+                        "resolver_target_ref": "front:track:8",
+                        "introducer_ref": "front:track:7",
+                    },
+                },
+            }
+        raise AssertionError(f"unexpected operation: {operation}")
+
+    def fake_replay(*_args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        replay_calls.append(kwargs)
+        return [
+            {
+                "event": "known_person_present",
+                "track_id": 8,
+                "memory_context": {"person": {"person_id": "person_123"}},
+            }
+        ]
+
+    monkeypatch.setattr(module, "LocalMemorySmokeRunner", FakeRunner)
+    monkeypatch.setattr(
+        module,
+        "_local_smoke_source_frames",
+        lambda _scene: [source_frame],
+    )
+    monkeypatch.setattr(
+        module,
+        "_post_and_record_api_response",
+        fake_post_and_record_api_response,
+    )
+    monkeypatch.setattr(module, "_send_stable_query_and_drain_local", fake_replay)
+
+    states_path = tmp_path / "visual_states.jsonl"
+    with states_path.open("w", encoding="utf-8") as states_file:
+        result = module._run_local_third_person_probe(
+            out=tmp_path,
+            scene=scene,
+            record=record,
+            camera="front",
+            config=SimpleNamespace(),
+            states_file=states_file,
+            api_response_records=[],
+        )
+
+    assert posted_operations == [
+        "local_resolve_third_person_target",
+        "local_teach_person_third_person",
+    ]
+    assert replay_calls
+    assert result["status"] == "passed"
+    assert result["passed"] is True
+    assert result["assertions"] == {
+        "resolve_target_resolved": True,
+        "resolve_target_pose_pointing": True,
+        "teach_person_ok": True,
+        "known_person_present": True,
+        "known_person_context": True,
+        "target_not_introducer": True,
+    }
+    assert result["person_id"] == "person_123"
+    assert result["resolve_target"]["evidence"]["introducer_ref"] == "front:track:7"
+    assert result["selected_window"]["scene"] == "pic_teach_person"

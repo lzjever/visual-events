@@ -908,6 +908,7 @@ def _execute_local_smoke(
             config=config,
             states_file=states_file,
             api_response_records=api_response_records,
+            botified_frame_records=botified_frame_records,
         )
 
     return {
@@ -1124,6 +1125,7 @@ def _run_local_third_person_probe(
     config: ServerConfig,
     states_file: Any,
     api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     runner = LocalMemorySmokeRunner(
         case="local-third-person-probe",
@@ -1133,12 +1135,14 @@ def _run_local_third_person_probe(
     )
     observations: list[dict[str, Any]] = []
     last_reason = "no_active_interaction_target"
+    invalid_resolve: dict[str, Any] | None = None
     with runner.open_stream() as websocket:
         for index, source_frame in enumerate(_local_smoke_source_frames(scene)):
+            timestamp_ms = 1_000 + (index * 400)
             state = runner.send(
                 websocket,
                 source_frame,
-                timestamp_ms=1_000 + (index * 400),
+                timestamp_ms=timestamp_ms,
                 states_file=states_file,
                 phase="third-person-probe",
             )
@@ -1163,23 +1167,134 @@ def _run_local_third_person_probe(
                 operation="local_resolve_third_person_target",
             )
             body = resolve["body"]
-            if body.get("status") == "resolved":
+            if body.get("status") != "resolved":
+                last_reason = _response_reason(body)
+                continue
+            if not _third_person_resolve_has_pose_pointing_evidence(body):
+                last_reason = "resolved_without_pose_pointing_evidence"
+                invalid_resolve = body
+                continue
+
+            teach = _post_and_record_api_response(
+                runner=runner,
+                api_response_records=api_response_records,
+                payload_index=f"{_payload_index(record)}:local-teach-third-person",
+                scene=record["scene"],
+                endpoint=record["endpoint"],
+                payload=record["payload"],
+                operation="local_teach_person_third_person",
+            )
+            if teach["status_code"] >= 400 or teach["body"].get("ok") is not True:
                 return {
-                    "status": "passed",
-                    "passed": True,
-                    "reason": "",
+                    "status": "failed",
+                    "passed": False,
+                    "reason": _response_reason(teach["body"]),
                     "resolve_target": body,
+                    "person_id": teach["body"].get("person_id"),
                     "selected_window": _selected_window(scene, source_frame),
+                    "events": [],
                     "observations": observations,
                 }
-            last_reason = _response_reason(body)
+            events = _send_stable_query_and_drain_local(
+                runner,
+                websocket,
+                source_frame,
+                base_timestamp_ms=timestamp_ms,
+                states_file=states_file,
+                phase="third-person-replay",
+            )
+            known = memory_e2e.first_event(events, "known_person_present")
+            person_id = teach["body"].get("person_id")
+            known_person_id = (
+                known.get("memory_context", {}).get("person", {}).get("person_id")
+                if known
+                else None
+            )
+            assertions = {
+                "resolve_target_resolved": body.get("status") == "resolved",
+                "resolve_target_pose_pointing": (
+                    _third_person_resolve_has_pose_pointing_evidence(body)
+                ),
+                "teach_person_ok": teach["body"].get("ok") is True,
+                "known_person_present": known is not None,
+                "known_person_context": known_person_id == person_id,
+                "target_not_introducer": _third_person_target_not_introducer(
+                    body,
+                    teach["body"],
+                ),
+            }
+            if botified_frame_records is not None:
+                _append_botified_frame_records(
+                    botified_frame_records,
+                    case="local-third-person-probe",
+                    scene=scene.name,
+                    phase="third-person-replay",
+                    events=events,
+                )
+            passed = all(assertions.values())
+            return {
+                "status": "passed" if passed else "failed",
+                "passed": passed,
+                "reason": "" if passed else _first_failed_assertion(assertions),
+                "assertions": assertions,
+                "resolve_target": body,
+                "person_id": person_id,
+                "selected_window": _selected_window(scene, source_frame),
+                "events": memory_e2e.compact_events(events),
+                "observations": observations,
+            }
 
     return {
-        "status": "insufficient_sample",
+        "status": "failed" if invalid_resolve is not None else "insufficient_sample",
         "passed": False,
         "reason": last_reason,
+        "resolve_target": invalid_resolve,
+        "person_id": None,
+        "selected_window": None,
+        "events": [],
         "observations": observations,
     }
+
+
+def _third_person_resolve_has_pose_pointing_evidence(body: dict[str, Any]) -> bool:
+    evidence = body.get("evidence") if isinstance(body.get("evidence"), dict) else {}
+    candidates = (
+        body.get("candidates") if isinstance(body.get("candidates"), list) else []
+    )
+    candidate_reason = ""
+    if candidates and isinstance(candidates[0], dict):
+        candidate_reason = str(candidates[0].get("reason") or "")
+    return (
+        body.get("status") == "resolved"
+        and (
+            candidate_reason == "pose_pointing_to_person"
+            or evidence.get("resolution_reason") == "pose_pointing_to_person"
+        )
+    )
+
+
+def _third_person_target_not_introducer(
+    resolve_body: dict[str, Any],
+    teach_body: dict[str, Any],
+) -> bool:
+    for body in (resolve_body, teach_body):
+        evidence = (
+            body.get("evidence") if isinstance(body.get("evidence"), dict) else {}
+        )
+        target_ref = evidence.get("resolver_target_ref")
+        introducer_ref = evidence.get("introducer_ref")
+        if introducer_ref is None or target_ref is None:
+            return False
+        if target_ref == introducer_ref:
+            return False
+    return True
+
+
+def _first_failed_assertion(assertions: dict[str, bool]) -> str:
+    for name, passed in assertions.items():
+        if not passed:
+            return name
+    return "assertion_failed"
 
 
 def _send_stable_query_and_drain_local(
@@ -2344,7 +2459,6 @@ def _build_local_smoke_checks(
     evidence_exists = {
         item["path"]: (out / item["path"]).is_file() for item in visual_evidence_index
     }
-    third_status = third_person_result.get("status")
     return [
         preflight,
         {
@@ -2378,7 +2492,10 @@ def _build_local_smoke_checks(
         },
         {
             "name": "third_person_local_probe",
-            "passed": third_status in {"passed", "insufficient_sample"},
+            "passed": (
+                third_person_result.get("status") == "passed"
+                and bool(third_person_result.get("passed"))
+            ),
             "details": third_person_result,
         },
         {

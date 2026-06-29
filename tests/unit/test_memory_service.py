@@ -1045,6 +1045,8 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     assert preview["status"] == "resolved"
     assert preview["candidates"][0]["track_id"] == 8
     assert preview["candidates"][0]["reason"] == "pose_pointing_to_person"
+    assert preview["evidence"]["resolver_target_ref"] == "front:track:8"
+    assert preview["evidence"]["introducer_ref"] == "front:track:7"
 
     person = await subject.teach_person(
         {
@@ -1064,6 +1066,8 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     assert provenance["source_track_ref"] == "front:track:8"
     assert provenance["resolver_target_ref"] == "front:track:8"
     assert provenance["resolution_reason"] == "pose_pointing_to_person"
+    assert person["evidence"]["resolver_target_ref"] == "front:track:8"
+    assert person["evidence"]["introducer_ref"] == "front:track:7"
     row = subject.store.connection.execute(
         "SELECT source_target_type FROM person_embeddings WHERE embedding_id = ?",
         (matches[0].embedding_id,),
