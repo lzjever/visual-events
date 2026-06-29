@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -31,6 +32,26 @@ class CachedFrame:
     memory_snapshot: MemoryFrameSnapshot | None = None
 
 
+@dataclass(frozen=True)
+class MemoryFrameSnapshotWindow:
+    camera: str
+    frames: tuple[CachedFrame, ...]
+    observed_at_ms: int
+    frame_cache_ttl_ms: int
+
+
+@dataclass(frozen=True)
+class RequestInteractionSnapshot:
+    selected: CachedFrame
+    request_snapshot_ref: str
+    source_frame_ref: str
+    frame_timestamp_ms: int
+    observed_at_ms: int
+    frame_cache_ttl_ms: int
+    stability_window: dict[str, Any]
+    active_target_track_id: int
+
+
 class FrameCacheError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -50,6 +71,8 @@ class FrameCache:
         self.max_age_ms = max_age_ms
         self._clock_ms = clock_ms
         self._frames_by_camera: dict[str, CachedFrame] = {}
+        self._snapshot_windows_by_camera: dict[str, deque[CachedFrame]] = {}
+        self._snapshot_window_size = 3
 
     def update(
         self,
@@ -67,13 +90,19 @@ class FrameCache:
                 frame=frame,
                 observed_at_ms=observed_at_ms,
             )
-        self._frames_by_camera[frame.camera] = CachedFrame(
+        cached = CachedFrame(
             connection_id=connection_id,
             frame=frame,
             visual_state=_compact_visual_state(visual_state),
             observed_at_ms=observed_at_ms,
             memory_snapshot=memory_snapshot,
         )
+        self._frames_by_camera[frame.camera] = cached
+        window = self._snapshot_windows_by_camera.setdefault(
+            frame.camera,
+            deque(maxlen=self._snapshot_window_size),
+        )
+        window.append(cached)
 
     def get_fresh(self, camera: str) -> CachedFrame:
         cached = self._frames_by_camera.get(camera)
@@ -89,6 +118,20 @@ class FrameCache:
                 f"cached frame for camera {camera} is expired",
             )
         return cached
+
+    def get_snapshot_window(self, camera: str) -> MemoryFrameSnapshotWindow:
+        frames = tuple(self._snapshot_windows_by_camera.get(camera) or ())
+        if not frames:
+            raise FrameCacheError(
+                "no_active_frame",
+                f"no fresh frame is cached for camera {camera}",
+            )
+        return MemoryFrameSnapshotWindow(
+            camera=camera,
+            frames=frames,
+            observed_at_ms=self._clock_ms(),
+            frame_cache_ttl_ms=self.max_age_ms,
+        )
 
 
 def _compact_visual_state(visual_state: dict[str, Any]) -> dict[str, Any]:

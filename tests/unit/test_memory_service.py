@@ -864,10 +864,12 @@ async def test_self_introduction_requires_active_interaction_target_and_does_not
 ):
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     subject = service(tmp_path, embedding_backend=backend)
+    source_frame = frame()
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(),
+        frame=source_frame,
         visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(frame_message=source_frame),
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     backend.person_inputs.clear()
@@ -916,15 +918,141 @@ async def test_self_introduction_requires_active_interaction_target_and_does_not
 
 
 @pytest.mark.asyncio
+async def test_self_introduction_inconsistent_active_targets_does_not_write(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [person_track(7, frame_message=first_frame)],
+            frame_message=first_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    second_frame = frame(frame_id=2, timestamp_ms=1_100)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_100),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [person_track(8, frame_message=second_frame)],
+            frame_message=second_frame,
+            attention_track_id=8,
+            scene_target_track_id=8,
+        ),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+
+    request = {
+        "camera": "front",
+        "target": {
+            "kind": "person",
+            "intent": "self_introduction",
+            "referent_text": "我",
+        },
+    }
+    preview = await subject.resolve_target(request)
+
+    assert preview["status"] == "ambiguous"
+    assert preview["ambiguity_type"] == "no_active_interaction_target"
+    assert preview["evidence"]["stability_window"]["active_track_ids"] == [7, 8]
+    _assert_zero_store_delta(preview["store_delta"])
+    _assert_allowed_ambiguity(preview)
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                **request,
+                "profile": {"display_name": "张三"},
+            }
+        )
+
+    assert exc.value.code == "target_ambiguous"
+    assert exc.value.details["ambiguity_type"] == "no_active_interaction_target"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
+    _assert_allowed_ambiguity(exc.value.details)
+    assert backend.person_inputs == []
+    assert _count_rows(subject.store, "person_profiles") == 0
+
+
+@pytest.mark.asyncio
+async def test_self_introduction_latest_active_target_must_match_stable_track(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    for frame_id, timestamp_ms, track_id in (
+        (1, 1_000, 7),
+        (2, 1_100, 7),
+        (3, 1_200, 8),
+    ):
+        source_frame = frame(frame_id=frame_id, timestamp_ms=timestamp_ms)
+        await subject.observe_visual_state(
+            connection_id="ws_1",
+            frame=source_frame,
+            visual_state=visual_state(frame_id=frame_id, timestamp_ms=timestamp_ms),
+            memory_snapshot=memory_snapshot_with_tracks(
+                [person_track(track_id, frame_message=source_frame)],
+                frame_message=source_frame,
+                attention_track_id=track_id,
+                scene_target_track_id=track_id,
+            ),
+        )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+
+    request = {
+        "camera": "front",
+        "target": {
+            "kind": "person",
+            "intent": "self_introduction",
+            "referent_text": "我",
+        },
+    }
+    preview = await subject.resolve_target(request)
+
+    assert preview["status"] == "ambiguous"
+    assert preview["ambiguity_type"] == "no_active_interaction_target"
+    assert preview["evidence"]["stability_window"]["active_track_ids"] == [7, 7, 8]
+    _assert_zero_store_delta(preview["store_delta"])
+    _assert_allowed_ambiguity(preview)
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                **request,
+                "profile": {"display_name": "张三"},
+            }
+        )
+
+    assert exc.value.code == "target_ambiguous"
+    assert exc.value.details["ambiguity_type"] == "no_active_interaction_target"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
+    _assert_allowed_ambiguity(exc.value.details)
+    assert backend.person_inputs == []
+    assert _count_rows(subject.store, "person_profiles") == 0
+
+
+@pytest.mark.asyncio
 async def test_self_introduction_uses_active_interaction_target_for_write(tmp_path):
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     subject = service(tmp_path, embedding_backend=backend)
-    source_frame = frame()
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=source_frame,
-        visual_state=visual_state(),
-        memory_snapshot=memory_snapshot(frame_message=source_frame),
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=first_frame),
+    )
+    second_frame = frame(frame_id=2, timestamp_ms=1_100)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_100),
+        memory_snapshot=memory_snapshot(frame_message=second_frame),
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     backend.person_inputs.clear()
@@ -950,13 +1078,17 @@ async def test_self_introduction_uses_active_interaction_target_for_write(tmp_pa
     assert matches[0].matched_id == person["person_id"]
     provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
     assert person["evidence"]["source_frame_ref"] == provenance["source_frame_ref"]
-    assert person["evidence"]["request_snapshot_ref"] == "snapshot:front:1"
+    assert person["evidence"]["request_snapshot_ref"] == "snapshot:front:2"
+    assert person["evidence"]["stability_window"]["active_target_track_id"] == 7
+    assert person["evidence"]["stability_window"]["active_snapshot_count"] == 2
+    assert person["evidence"]["stability_window"]["selected_snapshot_ref"] == "snapshot:front:2"
     assert person["evidence"]["source_track_ref"] == provenance["source_track_ref"]
     assert person["evidence"]["resolver_target_ref"] == provenance["resolver_target_ref"]
     assert person["evidence"]["resolution_reason"] == provenance["resolution_reason"]
     assert person["evidence"]["crop_hash"] == provenance["crop_hash"]
     assert provenance["source_track_ref"] == "front:track:7"
     assert provenance["resolver_target_ref"] == "front:track:7"
+    assert provenance["source_frame_ref"] == "front:2:1100"
     assert provenance["resolution_reason"] == "active_interaction_target"
     row = subject.store.connection.execute(
         "SELECT source_target_type FROM person_embeddings WHERE embedding_id = ?",
@@ -971,12 +1103,19 @@ async def test_resolve_self_introduction_returns_snapshot_evidence_and_zero_stor
 ):
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     subject = service(tmp_path, embedding_backend=backend)
-    source_frame = frame()
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=source_frame,
-        visual_state=visual_state(),
-        memory_snapshot=memory_snapshot(frame_message=source_frame),
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=first_frame),
+    )
+    second_frame = frame(frame_id=2, timestamp_ms=1_100)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_100),
+        memory_snapshot=memory_snapshot(frame_message=second_frame),
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     before_counts = _store_counts(subject.store)
@@ -997,12 +1136,23 @@ async def test_resolve_self_introduction_returns_snapshot_evidence_and_zero_stor
     assert preview["status"] == "resolved"
     assert preview["candidates"][0]["track_id"] == 7
     assert preview["evidence"] == {
-        "request_snapshot_ref": "snapshot:front:1",
-        "source_frame_ref": "front:1:1000",
-        "frame_id": 1,
-        "frame_timestamp_ms": 1000,
+        "request_snapshot_ref": "snapshot:front:2",
+        "source_frame_ref": "front:2:1100",
+        "frame_id": 2,
+        "frame_timestamp_ms": 1100,
         "observed_at_ms": 10000,
         "frame_cache_ttl_ms": 1000,
+        "stability_window": {
+            "size": 2,
+            "snapshot_count": 2,
+            "fresh_snapshot_count": 2,
+            "active_snapshot_count": 2,
+            "required_active_snapshot_count": 2,
+            "active_track_ids": [7, 7],
+            "active_target_track_id": 7,
+            "selected_snapshot_ref": "snapshot:front:2",
+            "selected_frame_ref": "front:2:1100",
+        },
         "resolution_reason": "active_interaction_target",
         "source_track_ref": "front:track:7",
         "resolver_target_ref": "front:track:7",
@@ -1111,12 +1261,19 @@ async def test_self_introduction_stale_snapshot_uses_allowed_ambiguity_type(tmp_
             clock_ms=clock,
         )
     )
-    source_frame = frame()
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=source_frame,
-        visual_state=visual_state(),
-        memory_snapshot=memory_snapshot(frame_message=source_frame),
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=first_frame),
+    )
+    second_frame = frame(frame_id=2, timestamp_ms=1_100)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_100),
+        memory_snapshot=memory_snapshot(frame_message=second_frame),
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     backend.person_inputs.clear()
@@ -1157,25 +1314,48 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
 ):
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     subject = service(tmp_path, embedding_backend=backend)
-    source_frame = frame()
-    introducer = person_track(
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    first_introducer = person_track(
         7,
         bbox_xyxy=(300.0, 100.0, 500.0, 650.0),
         keypoints=pointing_right_keypoints(),
-        frame_message=source_frame,
+        frame_message=first_frame,
     )
-    introduced = person_track(
+    first_introduced = person_track(
         8,
         bbox_xyxy=(720.0, 190.0, 920.0, 390.0),
-        frame_message=source_frame,
+        frame_message=first_frame,
     )
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=source_frame,
-        visual_state=visual_state(),
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
         memory_snapshot=memory_snapshot_with_tracks(
-            [introducer, introduced],
-            frame_message=source_frame,
+            [first_introducer, first_introduced],
+            frame_message=first_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    second_frame = frame(frame_id=2, timestamp_ms=1_100)
+    second_introducer = person_track(
+        7,
+        bbox_xyxy=(300.0, 100.0, 500.0, 650.0),
+        keypoints=pointing_right_keypoints(),
+        frame_message=second_frame,
+    )
+    second_introduced = person_track(
+        8,
+        bbox_xyxy=(720.0, 190.0, 920.0, 390.0),
+        frame_message=second_frame,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_100),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [second_introducer, second_introduced],
+            frame_message=second_frame,
             attention_track_id=7,
             scene_target_track_id=7,
         ),
@@ -1196,6 +1376,9 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     assert preview["status"] == "resolved"
     assert preview["candidates"][0]["track_id"] == 8
     assert preview["candidates"][0]["reason"] == "pose_pointing_to_person"
+    assert preview["evidence"]["request_snapshot_ref"] == "snapshot:front:2"
+    assert preview["evidence"]["source_frame_ref"] == "front:2:1100"
+    assert preview["evidence"]["stability_window"]["active_snapshot_count"] == 2
     assert preview["evidence"]["resolver_target_ref"] == "front:track:8"
     assert preview["evidence"]["introducer_ref"] == "front:track:7"
 
@@ -1216,7 +1399,9 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
     assert provenance["source_track_ref"] == "front:track:8"
     assert provenance["resolver_target_ref"] == "front:track:8"
+    assert provenance["source_frame_ref"] == "front:2:1100"
     assert provenance["resolution_reason"] == "pose_pointing_to_person"
+    assert person["evidence"]["request_snapshot_ref"] == "snapshot:front:2"
     assert person["evidence"]["resolver_target_ref"] == "front:track:8"
     assert person["evidence"]["introducer_ref"] == "front:track:7"
     row = subject.store.connection.execute(
@@ -1233,8 +1418,8 @@ async def test_third_person_fallback_keeps_introduced_person_evidence(tmp_path):
         person_outcomes=[_no_usable_face(), success_vector],
     )
     subject = service(tmp_path, embedding_backend=backend)
-    source_frame = frame()
-    introducer = person_track(
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    first_introducer = person_track(
         7,
         bbox_xyxy=(620.0, 100.0, 780.0, 650.0),
         keypoints=(
@@ -1242,20 +1427,47 @@ async def test_third_person_fallback_keeps_introduced_person_evidence(tmp_path):
             kp("left_elbow", 720.0, 260.0),
             kp("left_wrist", 790.0, 275.0),
         ),
-        frame_message=source_frame,
+        frame_message=first_frame,
     )
-    introduced = person_track(
+    first_introduced = person_track(
         8,
         bbox_xyxy=(820.0, 190.0, 1020.0, 390.0),
-        frame_message=source_frame,
+        frame_message=first_frame,
     )
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=source_frame,
-        visual_state=visual_state(),
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
         memory_snapshot=memory_snapshot_with_tracks(
-            [introducer, introduced],
-            frame_message=source_frame,
+            [first_introducer, first_introduced],
+            frame_message=first_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    second_frame = frame(frame_id=2, timestamp_ms=1_100)
+    second_introducer = person_track(
+        7,
+        bbox_xyxy=(620.0, 100.0, 780.0, 650.0),
+        keypoints=(
+            kp("left_shoulder", 650.0, 240.0),
+            kp("left_elbow", 720.0, 260.0),
+            kp("left_wrist", 790.0, 275.0),
+        ),
+        frame_message=second_frame,
+    )
+    second_introduced = person_track(
+        8,
+        bbox_xyxy=(820.0, 190.0, 1020.0, 390.0),
+        frame_message=second_frame,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_100),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [second_introducer, second_introduced],
+            frame_message=second_frame,
             attention_track_id=7,
             scene_target_track_id=7,
         ),
@@ -1294,6 +1506,7 @@ async def test_third_person_fallback_keeps_introduced_person_evidence(tmp_path):
     provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
     assert provenance["source_track_ref"] == "front:track:8"
     assert provenance["resolver_target_ref"] == "front:track:8"
+    assert provenance["source_frame_ref"] == "front:2:1100"
     assert person["evidence"]["resolver_target_ref"] == "front:track:8"
     assert person["evidence"]["introducer_ref"] == "front:track:7"
 
@@ -1302,24 +1515,46 @@ async def test_third_person_fallback_keeps_introduced_person_evidence(tmp_path):
 async def test_third_person_introduction_pose_unclear_does_not_write(tmp_path):
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     subject = service(tmp_path, embedding_backend=backend)
-    source_frame = frame()
-    introducer = person_track(
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    first_introducer = person_track(
         7,
         bbox_xyxy=(300.0, 100.0, 500.0, 650.0),
-        frame_message=source_frame,
+        frame_message=first_frame,
     )
-    introduced = person_track(
+    first_introduced = person_track(
         8,
         bbox_xyxy=(720.0, 190.0, 920.0, 390.0),
-        frame_message=source_frame,
+        frame_message=first_frame,
     )
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=source_frame,
-        visual_state=visual_state(),
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
         memory_snapshot=memory_snapshot_with_tracks(
-            [introducer, introduced],
-            frame_message=source_frame,
+            [first_introducer, first_introduced],
+            frame_message=first_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    second_frame = frame(frame_id=2, timestamp_ms=1_100)
+    second_introducer = person_track(
+        7,
+        bbox_xyxy=(300.0, 100.0, 500.0, 650.0),
+        frame_message=second_frame,
+    )
+    second_introduced = person_track(
+        8,
+        bbox_xyxy=(720.0, 190.0, 920.0, 390.0),
+        frame_message=second_frame,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_100),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [second_introducer, second_introduced],
+            frame_message=second_frame,
             attention_track_id=7,
             scene_target_track_id=7,
         ),
@@ -1365,30 +1600,58 @@ async def test_third_person_introduction_multiple_pointing_candidates_does_not_w
 ):
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     subject = service(tmp_path, embedding_backend=backend)
-    source_frame = frame()
-    introducer = person_track(
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    first_introducer = person_track(
         7,
         bbox_xyxy=(300.0, 100.0, 500.0, 650.0),
         keypoints=pointing_right_keypoints(),
-        frame_message=source_frame,
+        frame_message=first_frame,
     )
-    near_candidate = person_track(
+    first_near_candidate = person_track(
         8,
         bbox_xyxy=(650.0, 230.0, 750.0, 430.0),
-        frame_message=source_frame,
+        frame_message=first_frame,
     )
-    far_candidate = person_track(
+    first_far_candidate = person_track(
         9,
         bbox_xyxy=(1060.0, 280.0, 1200.0, 560.0),
-        frame_message=source_frame,
+        frame_message=first_frame,
     )
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=source_frame,
-        visual_state=visual_state(),
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
         memory_snapshot=memory_snapshot_with_tracks(
-            [introducer, near_candidate, far_candidate],
-            frame_message=source_frame,
+            [first_introducer, first_near_candidate, first_far_candidate],
+            frame_message=first_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    second_frame = frame(frame_id=2, timestamp_ms=1_100)
+    second_introducer = person_track(
+        7,
+        bbox_xyxy=(300.0, 100.0, 500.0, 650.0),
+        keypoints=pointing_right_keypoints(),
+        frame_message=second_frame,
+    )
+    second_near_candidate = person_track(
+        8,
+        bbox_xyxy=(650.0, 230.0, 750.0, 430.0),
+        frame_message=second_frame,
+    )
+    second_far_candidate = person_track(
+        9,
+        bbox_xyxy=(1060.0, 280.0, 1200.0, 560.0),
+        frame_message=second_frame,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_100),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [second_introducer, second_near_candidate, second_far_candidate],
+            frame_message=second_frame,
             attention_track_id=7,
             scene_target_track_id=7,
         ),

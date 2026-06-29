@@ -7,7 +7,7 @@ import math
 import threading
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -27,7 +27,13 @@ from .events import (
     build_known_person_event,
     build_scene_event,
 )
-from .frame_cache import CachedFrame, FrameCache, FrameCacheError, MemoryFrameSnapshot
+from .frame_cache import (
+    CachedFrame,
+    FrameCache,
+    FrameCacheError,
+    MemoryFrameSnapshot,
+    RequestInteractionSnapshot,
+)
 from .retriever import MemoryRetriever
 from .store import MemoryStore
 from .target_resolver import (
@@ -217,12 +223,18 @@ class AppMemoryService:
                     _public_person_target(request) is not None
                     and exc.code == "frame_cache_expired"
                 ):
-                    error = _target_ambiguous_error("stale_interaction")
+                    error = _target_ambiguous_error(
+                        "stale_interaction",
+                        evidence=self._interaction_window_evidence_for_request(request),
+                    )
                     _attach_store_delta_to_error(error, self._store_delta(store_before))
                     raise error from exc
                 raise
             try:
-                target = self._resolve_person_teach_target(cached, request)
+                cached, target, interaction_snapshot = self._resolve_person_teach_target(
+                    cached,
+                    request,
+                )
             except MemoryServiceError as exc:
                 if exc.code == "target_ambiguous":
                     _attach_store_delta_to_error(exc, self._store_delta(store_before))
@@ -298,6 +310,7 @@ class AppMemoryService:
                     cached,
                     target,
                     crop_hash=crop_hash,
+                    interaction_snapshot=interaction_snapshot,
                 ),
             }
         finally:
@@ -370,6 +383,7 @@ class AppMemoryService:
             if public_person_target is not None and exc.code == "frame_cache_expired":
                 return {
                     **_ambiguous_target_response("stale_interaction"),
+                    "evidence": self._interaction_window_evidence_for_request(request),
                     "store_delta": self._store_delta(store_before),
                 }
             raise
@@ -703,27 +717,40 @@ class AppMemoryService:
         self,
         cached: CachedFrame,
         request: dict[str, Any],
-    ) -> ResolvedTarget:
+    ) -> tuple[CachedFrame, ResolvedTarget, RequestInteractionSnapshot | None]:
         public_target = _public_person_target(request)
         if public_target is None:
-            return self._resolve_cached_target(cached, _target_request(request))
+            target = self._resolve_cached_target(cached, _target_request(request))
+            return cached, target, None
 
         intent = _required_text(public_target, "intent")
         if intent == "self_introduction":
-            target, ambiguity_type = self._active_interaction_target(cached)
+            interaction_snapshot, ambiguity_type, evidence = (
+                self._request_interaction_snapshot(cached.frame.camera)
+            )
+            target = (
+                self._active_interaction_target_from_frame(
+                    interaction_snapshot.selected,
+                    check_stale=False,
+                )[0]
+                if interaction_snapshot is not None
+                else None
+            )
             if target is not None:
-                return target
+                return interaction_snapshot.selected, target, interaction_snapshot
             raise _target_ambiguous_error(
                 ambiguity_type,
-                evidence=self._request_evidence(cached),
+                evidence=evidence,
             )
         if intent == "third_person_introduction":
-            target, ambiguity_type = self._third_person_introduction_target(cached)
-            if target is not None:
-                return target
+            target, ambiguity_type, interaction_snapshot, evidence = (
+                self._third_person_introduction_target(cached.frame.camera)
+            )
+            if target is not None and interaction_snapshot is not None:
+                return interaction_snapshot.selected, target, interaction_snapshot
             raise _target_ambiguous_error(
                 ambiguity_type,
-                evidence=self._request_evidence(cached),
+                evidence=evidence,
             )
         raise MemoryServiceError(
             "unsupported_person_intent",
@@ -737,11 +764,21 @@ class AppMemoryService:
     ) -> dict[str, Any]:
         intent = _required_text(target, "intent")
         if intent == "self_introduction":
-            resolved, ambiguity_type = self._active_interaction_target(cached)
+            interaction_snapshot, ambiguity_type, evidence = (
+                self._request_interaction_snapshot(cached.frame.camera)
+            )
+            resolved = (
+                self._active_interaction_target_from_frame(
+                    interaction_snapshot.selected,
+                    check_stale=False,
+                )[0]
+                if interaction_snapshot is not None
+                else None
+            )
             if resolved is None:
                 return _ambiguous_target_response(
                     ambiguity_type,
-                    evidence=self._request_evidence(cached),
+                    evidence=evidence,
                 )
             return {
                 "ok": True,
@@ -752,14 +789,20 @@ class AppMemoryService:
                         reason="active_interaction_target",
                     )
                 ],
-                "evidence": self._target_evidence(cached, resolved),
+                "evidence": self._target_evidence(
+                    interaction_snapshot.selected,
+                    resolved,
+                    interaction_snapshot=interaction_snapshot,
+                ),
             }
         if intent == "third_person_introduction":
-            resolved, ambiguity_type = self._third_person_introduction_target(cached)
-            if resolved is None:
+            resolved, ambiguity_type, interaction_snapshot, evidence = (
+                self._third_person_introduction_target(cached.frame.camera)
+            )
+            if resolved is None or interaction_snapshot is None:
                 return _ambiguous_target_response(
                     ambiguity_type,
-                    evidence=self._request_evidence(cached),
+                    evidence=evidence,
                 )
             return {
                 "ok": True,
@@ -770,7 +813,11 @@ class AppMemoryService:
                         reason="pose_pointing_to_person",
                     )
                 ],
-                "evidence": self._target_evidence(cached, resolved),
+                "evidence": self._target_evidence(
+                    interaction_snapshot.selected,
+                    resolved,
+                    interaction_snapshot=interaction_snapshot,
+                ),
             }
         return {
             **_ambiguous_target_response(
@@ -780,14 +827,120 @@ class AppMemoryService:
             "error_code": "unsupported_person_intent",
         }
 
-    def _active_interaction_target(
+    def _request_interaction_snapshot(
+        self,
+        camera: str,
+    ) -> tuple[RequestInteractionSnapshot | None, str, dict[str, Any]]:
+        try:
+            window = self._cache.get_snapshot_window(camera)
+        except FrameCacheError as exc:
+            raise MemoryServiceError(exc.code, exc.message, status_code=409) from exc
+
+        now_ms = self._clock_ms()
+        snapshot_count = 0
+        fresh_snapshot_count = 0
+        active_entries: list[tuple[CachedFrame, ResolvedTarget]] = []
+        active_track_ids: list[int] = []
+        latest_fresh_cached: CachedFrame | None = None
+        latest_fresh_target: ResolvedTarget | None = None
+
+        for cached in window.frames:
+            snapshot = cached.memory_snapshot
+            if snapshot is None:
+                continue
+            snapshot_count += 1
+            if now_ms - snapshot.observed_at_ms > self._cache.max_age_ms:
+                continue
+            fresh_snapshot_count += 1
+            latest_fresh_cached = cached
+            latest_fresh_target = None
+            target, _ambiguity_type = self._active_interaction_target_from_frame(
+                cached,
+                check_stale=False,
+            )
+            if target is None or target.track_id is None:
+                continue
+            active_entries.append((cached, target))
+            active_track_ids.append(target.track_id)
+            latest_fresh_target = target
+
+        track_counts = Counter(active_track_ids)
+        stable_track_id: int | None = None
+        for track_id, count in track_counts.most_common():
+            if count >= 2:
+                stable_track_id = track_id
+                break
+
+        selected_cached: CachedFrame | None = None
+        if (
+            stable_track_id is not None
+            and latest_fresh_cached is not None
+            and latest_fresh_target is not None
+            and latest_fresh_target.track_id == stable_track_id
+        ):
+            selected_cached = latest_fresh_cached
+
+        summary = {
+            "size": len(window.frames),
+            "snapshot_count": snapshot_count,
+            "fresh_snapshot_count": fresh_snapshot_count,
+            "active_snapshot_count": len(active_entries),
+            "required_active_snapshot_count": 2,
+            "active_track_ids": active_track_ids,
+        }
+        if stable_track_id is not None and selected_cached is not None:
+            selected_snapshot = selected_cached.memory_snapshot
+            if selected_snapshot is not None:
+                summary.update(
+                    {
+                        "active_target_track_id": stable_track_id,
+                        "selected_snapshot_ref": selected_snapshot.snapshot_ref,
+                        "selected_frame_ref": _source_frame_ref(selected_cached),
+                    }
+                )
+                interaction_snapshot = RequestInteractionSnapshot(
+                    selected=selected_cached,
+                    request_snapshot_ref=selected_snapshot.snapshot_ref,
+                    source_frame_ref=selected_snapshot.source_frame_ref,
+                    frame_timestamp_ms=selected_cached.frame.timestamp_ms,
+                    observed_at_ms=selected_cached.observed_at_ms,
+                    frame_cache_ttl_ms=self._cache.max_age_ms,
+                    stability_window=summary,
+                    active_target_track_id=stable_track_id,
+                )
+                return interaction_snapshot, "", self._request_evidence(
+                    selected_cached,
+                    interaction_snapshot=interaction_snapshot,
+                )
+
+        evidence_cached = self._newest_snapshot_frame(window.frames) or window.frames[-1]
+        ambiguity_type = (
+            "stale_interaction"
+            if snapshot_count > 0 and fresh_snapshot_count == 0
+            else "no_active_interaction_target"
+        )
+        return (
+            None,
+            ambiguity_type,
+            self._request_evidence(
+                evidence_cached,
+                stability_window=summary,
+            ),
+        )
+
+    def _active_interaction_target_from_frame(
         self,
         cached: CachedFrame,
+        *,
+        check_stale: bool = True,
     ) -> tuple[ResolvedTarget | None, str]:
         snapshot = cached.memory_snapshot
         if snapshot is None:
             return None, "no_active_interaction_target"
-        if self._clock_ms() - snapshot.observed_at_ms > self._cache.max_age_ms:
+        if (
+            check_stale
+            and self._clock_ms() - snapshot.observed_at_ms > self._cache.max_age_ms
+        ):
             return None, "stale_interaction"
 
         scene_context = snapshot.scene_context or {}
@@ -833,15 +986,30 @@ class AppMemoryService:
 
     def _third_person_introduction_target(
         self,
-        cached: CachedFrame,
-    ) -> tuple[ResolvedTarget | None, str]:
-        introducer, ambiguity_type = self._active_interaction_target(cached)
+        camera: str,
+    ) -> tuple[
+        ResolvedTarget | None,
+        str,
+        RequestInteractionSnapshot | None,
+        dict[str, Any],
+    ]:
+        interaction_snapshot, ambiguity_type, evidence = (
+            self._request_interaction_snapshot(camera)
+        )
+        if interaction_snapshot is None:
+            return None, ambiguity_type, None, evidence
+
+        cached = interaction_snapshot.selected
+        introducer, ambiguity_type = self._active_interaction_target_from_frame(
+            cached,
+            check_stale=False,
+        )
         if introducer is None or introducer.track_id is None:
-            return None, ambiguity_type
+            return None, ambiguity_type, interaction_snapshot, evidence
 
         snapshot = cached.memory_snapshot
         if snapshot is None:
-            return None, "no_active_interaction_target"
+            return None, "no_active_interaction_target", interaction_snapshot, evidence
         try:
             preview = self._resolver.preview_pose_pointing_person(
                 introducer_track_id=introducer.track_id,
@@ -850,14 +1018,19 @@ class AppMemoryService:
                 tracks=snapshot.tracks,
             )
         except TargetResolveError:
-            return None, "target_unclear"
+            return None, "target_unclear", interaction_snapshot, evidence
 
         if preview.status != "resolved" or not preview.candidates:
-            return None, preview.ambiguity_type or "target_unclear"
+            return (
+                None,
+                preview.ambiguity_type or "target_unclear",
+                interaction_snapshot,
+                evidence,
+            )
 
         candidate = preview.candidates[0]
         if candidate.track_id is None:
-            return None, "target_unclear"
+            return None, "target_unclear", interaction_snapshot, evidence
         return (
             ResolvedTarget(
                 source_target_mode="pose_pointing_to_person",
@@ -867,6 +1040,8 @@ class AppMemoryService:
                 quality="usable",
             ),
             "",
+            interaction_snapshot,
+            evidence,
         )
 
     def _query_due(self, frame: FrameMessage) -> bool:
@@ -1174,19 +1349,62 @@ class AppMemoryService:
             },
         }
 
-    def _request_evidence(self, cached: CachedFrame) -> dict[str, Any]:
+    def _interaction_window_evidence_for_request(
+        self,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            _snapshot, _ambiguity_type, evidence = self._request_interaction_snapshot(
+                _required_text(request, "camera")
+            )
+        except MemoryServiceError:
+            return {}
+        return evidence
+
+    def _newest_snapshot_frame(
+        self,
+        frames: tuple[CachedFrame, ...],
+    ) -> CachedFrame | None:
+        for cached in reversed(frames):
+            if cached.memory_snapshot is not None:
+                return cached
+        return None
+
+    def _request_evidence(
+        self,
+        cached: CachedFrame,
+        *,
+        interaction_snapshot: RequestInteractionSnapshot | None = None,
+        stability_window: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if interaction_snapshot is not None:
+            return {
+                "request_snapshot_ref": interaction_snapshot.request_snapshot_ref,
+                "source_frame_ref": interaction_snapshot.source_frame_ref,
+                "frame_id": interaction_snapshot.selected.frame.frame_id,
+                "frame_timestamp_ms": interaction_snapshot.frame_timestamp_ms,
+                "observed_at_ms": interaction_snapshot.observed_at_ms,
+                "frame_cache_ttl_ms": interaction_snapshot.frame_cache_ttl_ms,
+                "stability_window": interaction_snapshot.stability_window,
+            }
+
         evidence: dict[str, Any] = {}
         if cached.memory_snapshot is not None:
             evidence["request_snapshot_ref"] = cached.memory_snapshot.snapshot_ref
+            source_frame_ref = cached.memory_snapshot.source_frame_ref
+        else:
+            source_frame_ref = _source_frame_ref(cached)
         evidence.update(
             {
-                "source_frame_ref": _source_frame_ref(cached),
+                "source_frame_ref": source_frame_ref,
                 "frame_id": cached.frame.frame_id,
                 "frame_timestamp_ms": cached.frame.timestamp_ms,
                 "observed_at_ms": cached.observed_at_ms,
                 "frame_cache_ttl_ms": self._cache.max_age_ms,
             }
         )
+        if stability_window is not None:
+            evidence["stability_window"] = stability_window
         return evidence
 
     def _target_evidence(
@@ -1195,15 +1413,24 @@ class AppMemoryService:
         target: ResolvedTarget,
         *,
         crop_hash: str | None = None,
+        interaction_snapshot: RequestInteractionSnapshot | None = None,
     ) -> dict[str, Any]:
-        evidence = self._request_evidence(cached)
+        evidence = self._request_evidence(
+            cached,
+            interaction_snapshot=interaction_snapshot,
+        )
         evidence["resolution_reason"] = target.source_target_mode
         source_track_ref = _source_track_ref(cached, target)
         if source_track_ref is not None:
             evidence["source_track_ref"] = source_track_ref
         evidence["resolver_target_ref"] = _resolver_target_ref(cached, target)
         if target.source_target_mode == "pose_pointing_to_person":
-            introducer_ref = self._pose_pointing_introducer_ref(cached)
+            introducer_ref = (
+                f"{cached.frame.camera}:track:"
+                f"{interaction_snapshot.active_target_track_id}"
+                if interaction_snapshot is not None
+                else self._pose_pointing_introducer_ref(cached)
+            )
             if introducer_ref is not None:
                 evidence["introducer_ref"] = introducer_ref
         if crop_hash is not None:
@@ -1211,7 +1438,7 @@ class AppMemoryService:
         return evidence
 
     def _pose_pointing_introducer_ref(self, cached: CachedFrame) -> str | None:
-        introducer, _ambiguity_type = self._active_interaction_target(cached)
+        introducer, _ambiguity_type = self._active_interaction_target_from_frame(cached)
         if introducer is None or introducer.track_id is None:
             return None
         return _resolver_target_ref(cached, introducer)

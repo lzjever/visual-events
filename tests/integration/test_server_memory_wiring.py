@@ -711,6 +711,27 @@ def _memory_snapshot_for_frame(frame: FrameMessage) -> MemoryFrameSnapshot:
     )
 
 
+def _send_stable_memory_window(
+    websocket: Any,
+    *,
+    start_frame_id: int = 1,
+    start_timestamp_ms: int = 1710000000000,
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    for offset in range(2):
+        websocket.send_bytes(
+            encode_frame_message(
+                frame_header(
+                    frame_id=start_frame_id + offset,
+                    timestamp_ms=start_timestamp_ms + offset,
+                ),
+                JPEG_BYTES,
+            )
+        )
+        messages.append(json.loads(websocket.receive_text()))
+    return messages
+
+
 def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
     config = ServerConfig(
         memory=MemoryConfig(
@@ -736,13 +757,8 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
         create_app(processor=MemoryVisualProcessor(), config=config)
     ) as client:
         with client.websocket_connect("/v1/stream") as websocket:
-            websocket.send_bytes(
-                encode_frame_message(
-                    frame_header(frame_id=1, timestamp_ms=1710000000000),
-                    JPEG_BYTES,
-                )
-            )
-            assert json.loads(websocket.receive_text())["semantic_events"] == []
+            messages = _send_stable_memory_window(websocket)
+            assert [message["semantic_events"] for message in messages] == [[], []]
 
             person = client.post(
                 "/v1/memory/teach/person",
@@ -943,8 +959,7 @@ def test_configured_memory_resolve_target_endpoint_previews_without_writing(tmp_
         create_app(processor=MemoryVisualProcessor(), config=config)
     ) as client:
         with client.websocket_connect("/v1/stream") as websocket:
-            websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
-            json.loads(websocket.receive_text())
+            _send_stable_memory_window(websocket)
 
             response = client.post(
                 "/v1/memory/resolve-target",

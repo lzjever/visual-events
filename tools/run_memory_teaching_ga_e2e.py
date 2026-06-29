@@ -1724,9 +1724,12 @@ def _run_actual_post_teach_scene_replay(
         runner.source_frame = _load_source_frame_from_scene(
             scenes_by_name["pic_teach_person"]
         )
-        runner.send(
+        _seed_stable_interaction_window(
+            runner,
             websocket,
-            timestamp_ms=last_query_timestamp_ms + memory_e2e.QUERY_INTERVAL_MS - 1,
+            start_timestamp_ms=(
+                last_query_timestamp_ms + memory_e2e.QUERY_INTERVAL_MS - 2
+            ),
             states_file=states_file,
             phase="post-teach-third-person-seed",
         )
@@ -1884,6 +1887,35 @@ def _post_teach_scene_replay_missing_result(missing: list[str]) -> dict[str, Any
     }
 
 
+def _seed_stable_interaction_window(
+    runner: memory_e2e.MemoryE2ERunner,
+    websocket: Any,
+    *,
+    start_timestamp_ms: int,
+    states_file: Any,
+    phase: str,
+) -> dict[str, Any]:
+    client = getattr(runner, "client", None)
+    app = getattr(client, "app", None)
+    state_obj = getattr(app, "state", None)
+    memory_service = getattr(state_obj, "memory_service", None)
+    if memory_service is not None:
+        # Seed frames establish the request interaction window only; avoid
+        # kicking off recognition queries before the teach/resolve request.
+        memory_service._last_query_frame_timestamp_ms[runner.camera] = (  # noqa: SLF001
+            start_timestamp_ms
+        )
+    state: dict[str, Any] = {}
+    for index in range(2):
+        state = runner.send(
+            websocket,
+            timestamp_ms=start_timestamp_ms + index,
+            states_file=states_file,
+            phase=f"{phase}:stable-{index + 1}",
+        )
+    return state
+
+
 def _run_actual_self_introduction(
     *,
     out: Path,
@@ -1969,9 +2001,10 @@ def _run_actual_third_person_introduction(
         "target": record["payload"]["target"],
     }
     with runner.open_stream() as websocket:
-        runner.send(
+        _seed_stable_interaction_window(
+            runner,
             websocket,
-            timestamp_ms=1_000,
+            start_timestamp_ms=1_000,
             states_file=states_file,
             phase="third-person-seed",
         )

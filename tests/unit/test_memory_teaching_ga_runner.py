@@ -454,6 +454,9 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert third_person["introducer_ref"] == "front:track:7"
     assert third_person["stored_person_id"] == third_person["person_id"]
     assert third_person["stored_embedding_source_track_ref"] == "front:track:8"
+    stability_window = third_person["resolve_target"]["evidence"]["stability_window"]
+    assert stability_window["active_snapshot_count"] >= 2
+    assert stability_window["active_target_track_id"] == 7
     assert third_person["assertions"][
         "stored_embedding_source_is_target"
     ] is True
@@ -752,6 +755,12 @@ def test_post_teach_scene_replay_uses_one_runner_case(
     assert result["runner_case"] == "ga-post-teach-scene-replay"
     assert result["passed"] is True
     assert result["replayed_scene_names"] == sorted(scene_jpegs)
+    phases = [
+        json.loads(line)["phase"]
+        for line in states_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert "post-teach-third-person-seed:stable-1" in phases
+    assert "post-teach-third-person-seed:stable-2" in phases
 
 
 def test_local_smoke_requires_explicit_real_local_backends(tmp_path: Path) -> None:
