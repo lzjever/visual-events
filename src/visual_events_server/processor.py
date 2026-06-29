@@ -9,6 +9,7 @@ from .attention import AttentionConfig, AttentionResult, AttentionSelector
 from .events import EventConfig, EventEngine
 from .inference.base import InferBackend
 from .metrics import MetricsSink
+from .memory.frame_cache import MemoryFrameSnapshot
 from .protocol import FrameMessage, SCHEMA_VERSION
 from .protocol import ProtocolError
 from .tracking import ByteTrackStyleTracker, TrackSnapshot, TrackingConfig
@@ -86,8 +87,10 @@ class BackendVisualStreamSession:
         self._clock = clock or time.perf_counter
         self._last_frame_id: int | None = None
         self._last_timestamp_ms: int | None = None
+        self._last_memory_snapshot: MemoryFrameSnapshot | None = None
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
+        self._last_memory_snapshot = None
         total_start = self._clock()
         phase_latencies_ms: dict[str, float] = {}
         if self._should_reset_for_regression(frame):
@@ -122,6 +125,22 @@ class BackendVisualStreamSession:
         events_start = self._clock()
         event_result = self.event_engine.update(frame, tracks, attention)
         phase_latencies_ms["events"] = _elapsed_ms(events_start, self._clock)
+        self._last_memory_snapshot = MemoryFrameSnapshot(
+            connection_id="",
+            frame=frame,
+            source_frame_ref=f"{frame.camera}:{frame.frame_id}:{frame.timestamp_ms}",
+            snapshot_ref=(
+                f"memory_frame:{frame.camera}:{frame.frame_id}:{frame.timestamp_ms}"
+            ),
+            observed_at_ms=int(time.time() * 1000),
+            image_size=(frame.width, frame.height),
+            tracks=list(tracks),
+            attention=attention,
+            scene_context=dict(event_result.scene_context),
+            semantic_events=[
+                dict(event) for event in event_result.semantic_events
+            ],
+        )
 
         response_start = self._clock()
         response = build_visual_state(
@@ -138,12 +157,18 @@ class BackendVisualStreamSession:
         self._last_timestamp_ms = frame.timestamp_ms
         return response
 
+    def take_memory_frame_snapshot(self) -> MemoryFrameSnapshot | None:
+        snapshot = self._last_memory_snapshot
+        self._last_memory_snapshot = None
+        return snapshot
+
     def reset(self) -> None:
         self.tracker.reset()
         self.attention_selector.reset()
         self.event_engine.reset()
         self._last_frame_id = None
         self._last_timestamp_ms = None
+        self._last_memory_snapshot = None
 
     def _should_reset_for_regression(self, frame: FrameMessage) -> bool:
         if self._last_frame_id is not None and frame.frame_id < self._last_frame_id:

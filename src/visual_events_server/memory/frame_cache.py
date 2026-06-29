@@ -1,9 +1,25 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
+from visual_events_server.attention import AttentionResult
 from visual_events_server.protocol import FrameMessage
+from visual_events_server.tracking import TrackSnapshot
+
+
+@dataclass(frozen=True)
+class MemoryFrameSnapshot:
+    connection_id: str
+    frame: FrameMessage
+    source_frame_ref: str
+    snapshot_ref: str
+    observed_at_ms: int
+    image_size: tuple[int, int]
+    tracks: list[TrackSnapshot]
+    attention: AttentionResult | None
+    scene_context: dict[str, Any]
+    semantic_events: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -12,6 +28,7 @@ class CachedFrame:
     frame: FrameMessage
     visual_state: dict[str, Any]
     observed_at_ms: int
+    memory_snapshot: MemoryFrameSnapshot | None = None
 
 
 class FrameCacheError(RuntimeError):
@@ -40,12 +57,22 @@ class FrameCache:
         connection_id: str,
         frame: FrameMessage,
         visual_state: dict[str, Any],
+        memory_snapshot: MemoryFrameSnapshot | None = None,
     ) -> None:
+        observed_at_ms = self._clock_ms()
+        if memory_snapshot is not None:
+            memory_snapshot = replace(
+                memory_snapshot,
+                connection_id=connection_id,
+                frame=frame,
+                observed_at_ms=observed_at_ms,
+            )
         self._frames_by_camera[frame.camera] = CachedFrame(
             connection_id=connection_id,
             frame=frame,
             visual_state=_compact_visual_state(visual_state),
-            observed_at_ms=self._clock_ms(),
+            observed_at_ms=observed_at_ms,
+            memory_snapshot=memory_snapshot,
         )
 
     def get_fresh(self, camera: str) -> CachedFrame:

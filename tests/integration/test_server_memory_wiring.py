@@ -16,8 +16,12 @@ from visual_events_server.config import (
     MemoryMatchingConfig,
     ServerConfig,
 )
+from visual_events_server.attention import AttentionResult
+from visual_events_server.inference.base import PoseKeypoint
 from visual_events_server.memory.embedding import LocalEmbeddingBackend
+from visual_events_server.memory.frame_cache import MemoryFrameSnapshot
 from visual_events_server.protocol import FrameMessage, encode_frame_message
+from visual_events_server.tracking import TrackSnapshot
 
 
 def jpeg_1280x720() -> bytes:
@@ -100,6 +104,7 @@ class FakeMemoryService:
         connection_id: str,
         frame: FrameMessage,
         visual_state: dict[str, Any],
+        memory_snapshot: Any | None = None,
     ) -> None:
         self.observed.append(
             {
@@ -109,6 +114,7 @@ class FakeMemoryService:
                 "frame_timestamp_ms": frame.timestamp_ms,
                 "jpeg_bytes": frame.jpeg_bytes,
                 "visual_state_frame_id": visual_state["frame_id"],
+                "memory_snapshot": memory_snapshot,
             }
         )
 
@@ -325,7 +331,11 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
             "teach_person",
             {
                 "camera": "front",
-                "target": {"mode": "attention_target"},
+                "target": {
+                    "kind": "person",
+                    "intent": "self_introduction",
+                    "referent_text": "我",
+                },
                 "profile": {"display_name": "张三"},
             },
         ),
@@ -502,6 +512,38 @@ def test_stream_observes_visual_state_and_drains_completed_memory_events():
     ]
 
 
+def test_stream_passes_memory_snapshot_side_channel_to_memory_service():
+    service = FakeMemoryService()
+    client = TestClient(create_app(processor=MemoryVisualProcessor(), memory_service=service))
+
+    with client.websocket_connect("/v1/stream") as websocket:
+        websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
+        message = json.loads(websocket.receive_text())
+
+    assert message["tracks"][0].get("keypoints") is None
+    snapshot = service.observed[0]["memory_snapshot"]
+    assert snapshot is not None
+    assert snapshot.tracks[0].track_id == 7
+    assert snapshot.tracks[0].keypoints[0].name == "nose"
+    assert snapshot.scene_context["engagement_state"] == "available"
+
+
+def test_stream_snapshot_side_channel_exception_does_not_fallback_to_memory_service():
+    service = FakeMemoryService()
+    client = TestClient(
+        create_app(processor=BrokenSnapshotProcessor(), memory_service=service)
+    )
+
+    with client.websocket_connect("/v1/stream") as websocket:
+        websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
+        message = json.loads(websocket.receive_text())
+
+    assert message["type"] == "error"
+    assert message["code"] == "internal_error"
+    assert service.observed == []
+    assert service.drain_calls == []
+
+
 def test_memory_side_chain_failure_does_not_break_visual_stream():
     client = TestClient(create_app(memory_service=FailingMemoryService()))
 
@@ -515,7 +557,11 @@ def test_memory_side_chain_failure_does_not_break_visual_stream():
 
 
 class MemoryVisualProcessor:
+    def __init__(self) -> None:
+        self._memory_snapshot: MemoryFrameSnapshot | None = None
+
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
+        self._memory_snapshot = _memory_snapshot_for_frame(frame)
         return {
             "type": "visual_state",
             "schema_version": 1,
@@ -545,10 +591,66 @@ class MemoryVisualProcessor:
                 "reason": "largest_stable_person",
                 "confidence": 0.9,
             },
-            "scene_context": {"attention_available": True, "target_track_id": 7},
+            "scene_context": {
+                "engagement_state": "available",
+                "attention_available": True,
+                "target_track_id": 7,
+            },
             "scene_flags": {"has_person": True, "person_count": 1},
             "semantic_events": [],
         }
+
+    def take_memory_frame_snapshot(self) -> MemoryFrameSnapshot | None:
+        snapshot = self._memory_snapshot
+        self._memory_snapshot = None
+        return snapshot
+
+
+class BrokenSnapshotProcessor(MemoryVisualProcessor):
+    def take_memory_frame_snapshot(self) -> MemoryFrameSnapshot | None:
+        raise RuntimeError("snapshot provider failed")
+
+
+def _memory_snapshot_for_frame(frame: FrameMessage) -> MemoryFrameSnapshot:
+    track = TrackSnapshot(
+        track_id=7,
+        first_seen_ms=frame.timestamp_ms - 800,
+        last_seen_ms=frame.timestamp_ms,
+        frame_timestamp_ms=frame.timestamp_ms,
+        bbox_xyxy=(300.0, 100.0, 700.0, 650.0),
+        confidence=0.92,
+        pose_confidence=0.81,
+        head_uv=(500.0, 150.0),
+        velocity_uv_s=(0.0, 0.0),
+        lost_ms=0,
+        hits=2,
+        misses=0,
+        keypoints=(
+            PoseKeypoint("nose", 500.0, 150.0, 0.9),
+        ),
+    )
+    return MemoryFrameSnapshot(
+        connection_id="ws_1",
+        frame=frame,
+        source_frame_ref=f"{frame.camera}:{frame.frame_id}:{frame.timestamp_ms}",
+        snapshot_ref=f"snapshot:{frame.camera}:{frame.frame_id}",
+        observed_at_ms=frame.timestamp_ms,
+        image_size=(frame.width, frame.height),
+        tracks=[track],
+        attention=AttentionResult(
+            target_track_id=7,
+            target_uv=(500.0, 160.0),
+            reason="largest_stable_person",
+            confidence=0.9,
+            largest_person_stable=True,
+        ),
+        scene_context={
+            "engagement_state": "available",
+            "attention_available": True,
+            "target_track_id": 7,
+        },
+        semantic_events=[],
+    )
 
 
 def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):

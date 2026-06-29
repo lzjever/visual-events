@@ -12,9 +12,12 @@ from PIL import Image, ImageDraw
 from visual_events_server.memory import AppMemoryService, MemoryServiceError
 from visual_events_server.memory.embedding import EmbeddingResult
 from visual_events_server.memory.embedding import FakeEmbeddingBackend
+from visual_events_server.memory.frame_cache import MemoryFrameSnapshot
 from visual_events_server.memory.service import _target_bytes
 from visual_events_server.memory.store import MemoryStore
 from visual_events_server.memory.target_resolver import ResolvedTarget
+from visual_events_server.attention import AttentionResult
+from visual_events_server.tracking import TrackSnapshot
 from visual_events_server.protocol import FrameMessage
 
 
@@ -84,6 +87,16 @@ def _jpeg_1280x720() -> bytes:
 
 
 JPEG_1280X720 = _jpeg_1280x720()
+ALLOWED_AMBIGUITY_TYPES = {
+    "introducer_unclear",
+    "target_unclear",
+    "pose_unclear",
+    "multiple_candidates",
+    "stale_interaction",
+    "no_active_interaction_target",
+    "unsupported_target_kind",
+    "quality_too_low",
+}
 
 
 def frame(*, frame_id: int = 1, timestamp_ms: int = 1_000) -> FrameMessage:
@@ -126,6 +139,60 @@ def visual_state(*, frame_id: int = 1, timestamp_ms: int = 1_000) -> dict:
         },
         "semantic_events": [],
     }
+
+
+def memory_snapshot(
+    *,
+    frame_message: FrameMessage | None = None,
+    engagement_state: str = "available",
+    attention_available: bool = True,
+    scene_target_track_id: int | None = 7,
+    attention_track_id: int | None = 7,
+    lost_ms: int = 0,
+) -> MemoryFrameSnapshot:
+    source_frame = frame_message or frame()
+    track = TrackSnapshot(
+        track_id=7,
+        first_seen_ms=source_frame.timestamp_ms - 800,
+        last_seen_ms=source_frame.timestamp_ms - lost_ms,
+        frame_timestamp_ms=source_frame.timestamp_ms,
+        bbox_xyxy=(300.0, 100.0, 700.0, 650.0),
+        confidence=0.92,
+        pose_confidence=0.81,
+        head_uv=(500.0, 150.0),
+        velocity_uv_s=(0.0, 0.0),
+        lost_ms=lost_ms,
+        hits=2,
+        misses=0,
+        keypoints=(),
+    )
+    attention = (
+        AttentionResult(
+            target_track_id=attention_track_id,
+            target_uv=(500.0, 160.0),
+            reason="largest_stable_person",
+            confidence=0.9,
+            largest_person_stable=True,
+        )
+        if attention_track_id is not None
+        else None
+    )
+    return MemoryFrameSnapshot(
+        connection_id="ws_1",
+        frame=source_frame,
+        source_frame_ref=f"{source_frame.camera}:{source_frame.frame_id}:{source_frame.timestamp_ms}",
+        snapshot_ref=f"snapshot:{source_frame.camera}:{source_frame.frame_id}",
+        observed_at_ms=10_000,
+        image_size=(source_frame.width, source_frame.height),
+        tracks=[track],
+        attention=attention,
+        scene_context={
+            "engagement_state": engagement_state,
+            "attention_available": attention_available,
+            "target_track_id": scene_target_track_id,
+        },
+        semantic_events=[],
+    )
 
 
 def service(
@@ -250,6 +317,309 @@ async def test_teach_person_persists_embedding_provenance_for_resolved_target(tm
         "embedding_dim": 8,
         "created_at_ms": 10000,
     }
+
+
+@pytest.mark.asyncio
+async def test_self_introduction_requires_active_interaction_target_and_does_not_fallback(
+    tmp_path,
+):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+
+    preview = await subject.resolve_target(
+        {
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "self_introduction",
+                "referent_text": "我",
+            },
+        }
+    )
+    assert preview == {
+        "ok": True,
+        "status": "ambiguous",
+        "retryable": True,
+        "ask_user_hint": True,
+        "ambiguity_type": "no_active_interaction_target",
+        "candidates": [],
+    }
+    _assert_allowed_ambiguity(preview)
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "target": {
+                    "kind": "person",
+                    "intent": "self_introduction",
+                    "referent_text": "我",
+                },
+                "profile": {"display_name": "张三"},
+            }
+        )
+
+    assert exc.value.code == "target_ambiguous"
+    assert exc.value.status_code == 409
+    assert exc.value.details["ambiguity_type"] == "no_active_interaction_target"
+    _assert_allowed_ambiguity(exc.value.details)
+    assert backend.person_inputs == []
+    assert subject.store.search_person_embeddings(
+        FakeEmbeddingBackend(person_dim=8, scene_dim=8).embed_person(b"unused"),
+        limit=1,
+    ) == []
+    assert _count_rows(subject.store, "person_profiles") == 0
+
+
+@pytest.mark.asyncio
+async def test_self_introduction_uses_active_interaction_target_for_write(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    source_frame = frame()
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(frame_message=source_frame),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+
+    person = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "self_introduction",
+                "referent_text": "我",
+            },
+            "profile": {"display_name": "张三"},
+        }
+    )
+
+    assert len(backend.person_inputs) == 1
+    expected_embedding = FakeEmbeddingBackend(
+        person_dim=8,
+        scene_dim=8,
+    ).embed_person(backend.person_inputs[0])
+    matches = subject.store.search_person_embeddings(expected_embedding, limit=1)
+    assert matches[0].matched_id == person["person_id"]
+    provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
+    assert provenance["source_track_ref"] == "front:track:7"
+    assert provenance["resolver_target_ref"] == "front:track:7"
+    assert provenance["resolution_reason"] == "active_interaction_target"
+    row = subject.store.connection.execute(
+        "SELECT source_target_type FROM person_embeddings WHERE embedding_id = ?",
+        (matches[0].embedding_id,),
+    ).fetchone()
+    assert row["source_target_type"] == "active_interaction_target"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_kwargs", "expected_ambiguity_type"),
+    [
+        (
+            {"engagement_state": "no_target"},
+            "no_active_interaction_target",
+        ),
+        (
+            {"attention_available": False},
+            "no_active_interaction_target",
+        ),
+        (
+            {"scene_target_track_id": 7, "attention_track_id": 8},
+            "no_active_interaction_target",
+        ),
+        (
+            {"lost_ms": 100},
+            "no_active_interaction_target",
+        ),
+    ],
+)
+async def test_self_introduction_inactive_snapshot_uses_allowed_ambiguity_type(
+    tmp_path,
+    snapshot_kwargs,
+    expected_ambiguity_type,
+):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    source_frame = frame()
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(
+            frame_message=source_frame,
+            **snapshot_kwargs,
+        ),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+
+    request = {
+        "camera": "front",
+        "target": {
+            "kind": "person",
+            "intent": "self_introduction",
+            "referent_text": "我",
+        },
+    }
+    preview = await subject.resolve_target(request)
+
+    assert preview["status"] == "ambiguous"
+    assert preview["ambiguity_type"] == expected_ambiguity_type
+    _assert_allowed_ambiguity(preview)
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                **request,
+                "profile": {"display_name": "张三"},
+            }
+        )
+
+    assert exc.value.code == "target_ambiguous"
+    assert exc.value.details["ambiguity_type"] == expected_ambiguity_type
+    _assert_allowed_ambiguity(exc.value.details)
+    assert backend.person_inputs == []
+    assert _count_rows(subject.store, "person_profiles") == 0
+
+
+@pytest.mark.asyncio
+async def test_self_introduction_stale_snapshot_uses_allowed_ambiguity_type(tmp_path):
+    now = 10_000
+
+    def clock() -> int:
+        return now
+
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
+    subject = AppMemoryService(
+        store=store,
+        embedding_backend=backend,
+        frame_cache_seconds=1,
+        query_interval_ms=500,
+        queue_size=4,
+        known_person_threshold=0.95,
+        known_person_margin=0.05,
+        anonymous_threshold=0.95,
+        anonymous_margin=0.05,
+        familiar_seen_count=3,
+        familiar_threshold=0.95,
+        scene_threshold=0.95,
+        event_cooldown_ms=5_000,
+        clock_ms=clock,
+    )
+    source_frame = frame()
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(frame_message=source_frame),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    now = 11_001
+
+    request = {
+        "camera": "front",
+        "target": {
+            "kind": "person",
+            "intent": "self_introduction",
+            "referent_text": "我",
+        },
+    }
+    preview = await subject.resolve_target(request)
+
+    assert preview["status"] == "ambiguous"
+    assert preview["ambiguity_type"] == "stale_interaction"
+    _assert_allowed_ambiguity(preview)
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                **request,
+                "profile": {"display_name": "张三"},
+            }
+        )
+
+    assert exc.value.code == "target_ambiguous"
+    assert exc.value.details["ambiguity_type"] == "stale_interaction"
+    _assert_allowed_ambiguity(exc.value.details)
+    assert backend.person_inputs == []
+    assert _count_rows(subject.store, "person_profiles") == 0
+
+
+@pytest.mark.asyncio
+async def test_non_self_public_person_intents_do_not_invent_ambiguity_types(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+
+    third_person = {
+        "camera": "front",
+        "target": {
+            "kind": "person",
+            "intent": "third_person_introduction",
+            "referent_text": "他",
+        },
+    }
+    third_preview = await subject.resolve_target(third_person)
+
+    assert third_preview["status"] == "ambiguous"
+    assert third_preview["ambiguity_type"] == "introducer_unclear"
+    _assert_allowed_ambiguity(third_preview)
+
+    with pytest.raises(MemoryServiceError) as third_error:
+        await subject.teach_person(
+            {
+                **third_person,
+                "profile": {"display_name": "李四"},
+            }
+        )
+    assert third_error.value.code == "target_ambiguous"
+    assert third_error.value.details["ambiguity_type"] == "introducer_unclear"
+    _assert_allowed_ambiguity(third_error.value.details)
+
+    unsupported = {
+        "camera": "front",
+        "target": {
+            "kind": "person",
+            "intent": "identify_person",
+            "referent_text": "这个人",
+        },
+    }
+    unsupported_preview = await subject.resolve_target(unsupported)
+
+    assert unsupported_preview["status"] == "ambiguous"
+    assert unsupported_preview["error_code"] == "unsupported_person_intent"
+    assert unsupported_preview["ambiguity_type"] == "target_unclear"
+    _assert_allowed_ambiguity(unsupported_preview)
+
+    with pytest.raises(MemoryServiceError) as unsupported_error:
+        await subject.teach_person(
+            {
+                **unsupported,
+                "profile": {"display_name": "王五"},
+            }
+        )
+    assert unsupported_error.value.code == "unsupported_person_intent"
+    assert "ambiguity_type" not in unsupported_error.value.details
+    assert backend.person_inputs == []
 
 
 @pytest.mark.asyncio
@@ -547,6 +917,17 @@ async def _drain_memory_events(
             return events
         await asyncio.sleep(0.05)
     return []
+
+
+def _count_rows(store: MemoryStore, table: str) -> int:
+    row = store.connection.execute(
+        f"SELECT COUNT(*) AS count FROM {table}",
+    ).fetchone()
+    return int(row["count"])
+
+
+def _assert_allowed_ambiguity(payload: dict) -> None:
+    assert payload["ambiguity_type"] in ALLOWED_AMBIGUITY_TYPES
 
 
 @pytest.mark.asyncio

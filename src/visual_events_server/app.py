@@ -52,6 +52,7 @@ class MemoryService(Protocol):
         connection_id: str,
         frame: FrameMessage,
         visual_state: dict[str, Any],
+        memory_snapshot: Any | None = None,
     ) -> None:
         ...
 
@@ -104,6 +105,7 @@ class DisabledMemoryService:
         connection_id: str,
         frame: FrameMessage,
         visual_state: dict[str, Any],
+        memory_snapshot: Any | None = None,
     ) -> None:
         return None
 
@@ -284,11 +286,13 @@ def create_app(
                     await websocket.close(code=1008)
                     return
                 response = await processor_session.process_frame(frame)
+                memory_snapshot = _take_memory_frame_snapshot(processor_session)
                 response = await _attach_memory_events(
                     app.state.memory_service,
                     connection_id=connection_id,
                     frame=frame,
                     visual_state=response,
+                    memory_snapshot=memory_snapshot,
                 )
             except ProtocolError as exc:
                 await websocket.send_text(serialize_protocol_error(exc))
@@ -341,13 +345,22 @@ async def _attach_memory_events(
     connection_id: str,
     frame: FrameMessage,
     visual_state: dict[str, Any],
+    memory_snapshot: Any | None = None,
 ) -> dict[str, Any]:
     try:
-        await memory_service.observe_visual_state(
-            connection_id=connection_id,
-            frame=frame,
-            visual_state=visual_state,
-        )
+        if memory_snapshot is None:
+            await memory_service.observe_visual_state(
+                connection_id=connection_id,
+                frame=frame,
+                visual_state=visual_state,
+            )
+        else:
+            await memory_service.observe_visual_state(
+                connection_id=connection_id,
+                frame=frame,
+                visual_state=visual_state,
+                memory_snapshot=memory_snapshot,
+            )
         completed_events = await memory_service.drain_completed_events(
             camera=frame.camera,
             connection_id=connection_id,
@@ -366,6 +379,13 @@ async def _attach_memory_events(
         return visual_state
     semantic_events.extend(completed_events)
     return visual_state
+
+
+def _take_memory_frame_snapshot(processor_session: Any) -> Any | None:
+    take_snapshot = getattr(processor_session, "take_memory_frame_snapshot", None)
+    if not callable(take_snapshot):
+        return None
+    return take_snapshot()
 
 
 def create_processor_from_config(config: ServerConfig) -> VisualFrameProcessor:

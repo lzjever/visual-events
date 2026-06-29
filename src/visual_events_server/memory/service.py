@@ -26,7 +26,7 @@ from .events import (
     build_known_person_event,
     build_scene_event,
 )
-from .frame_cache import CachedFrame, FrameCache, FrameCacheError
+from .frame_cache import CachedFrame, FrameCache, FrameCacheError, MemoryFrameSnapshot
 from .retriever import MemoryRetriever
 from .store import MemoryStore
 from .target_resolver import (
@@ -123,11 +123,13 @@ class AppMemoryService:
         connection_id: str,
         frame: FrameMessage,
         visual_state: dict[str, Any],
+        memory_snapshot: MemoryFrameSnapshot | None = None,
     ) -> None:
         self._cache.update(
             connection_id=connection_id,
             frame=frame,
             visual_state=visual_state,
+            memory_snapshot=memory_snapshot,
         )
         if not self._query_due(frame):
             return
@@ -169,8 +171,13 @@ class AppMemoryService:
         return events
 
     async def teach_person(self, request: dict[str, Any]) -> dict[str, Any]:
-        cached = self._fresh_cached_frame(request)
-        target = self._resolve_cached_target(cached, _target_request(request))
+        try:
+            cached = self._fresh_cached_frame(request)
+        except MemoryServiceError as exc:
+            if _public_person_target(request) is not None and exc.code == "frame_cache_expired":
+                raise _target_ambiguous_error("stale_interaction") from exc
+            raise
+        target = self._resolve_person_teach_target(cached, request)
         if target.target_type not in {"person", "region"}:
             raise MemoryServiceError(
                 "invalid_target_type",
@@ -260,7 +267,15 @@ class AppMemoryService:
         }
 
     async def resolve_target(self, request: dict[str, Any]) -> dict[str, Any]:
-        cached = self._fresh_cached_frame(request)
+        public_person_target = _public_person_target(request)
+        try:
+            cached = self._fresh_cached_frame(request)
+        except MemoryServiceError as exc:
+            if public_person_target is not None and exc.code == "frame_cache_expired":
+                return _ambiguous_target_response("stale_interaction")
+            raise
+        if public_person_target is not None:
+            return self._preview_public_person_target(cached, public_person_target)
         preview = self._preview_cached_target(cached, _target_request(request))
         return {
             "ok": True,
@@ -484,6 +499,106 @@ class AppMemoryService:
             )
         except TargetResolveError as exc:
             raise MemoryServiceError(exc.code, exc.message) from exc
+
+    def _resolve_person_teach_target(
+        self,
+        cached: CachedFrame,
+        request: dict[str, Any],
+    ) -> ResolvedTarget:
+        public_target = _public_person_target(request)
+        if public_target is None:
+            return self._resolve_cached_target(cached, _target_request(request))
+
+        intent = _required_text(public_target, "intent")
+        if intent == "self_introduction":
+            target, ambiguity_type = self._active_interaction_target(cached)
+            if target is not None:
+                return target
+            raise _target_ambiguous_error(ambiguity_type)
+        if intent == "third_person_introduction":
+            raise _target_ambiguous_error("introducer_unclear")
+        raise MemoryServiceError(
+            "unsupported_person_intent",
+            f"unsupported person target intent {intent}",
+        )
+
+    def _preview_public_person_target(
+        self,
+        cached: CachedFrame,
+        target: dict[str, Any],
+    ) -> dict[str, Any]:
+        intent = _required_text(target, "intent")
+        if intent == "self_introduction":
+            resolved, ambiguity_type = self._active_interaction_target(cached)
+            if resolved is None:
+                return _ambiguous_target_response(ambiguity_type)
+            return {
+                "ok": True,
+                "status": "resolved",
+                "candidates": [
+                    _resolved_target_to_candidate_dict(
+                        resolved,
+                        reason="active_interaction_target",
+                    )
+                ],
+            }
+        if intent == "third_person_introduction":
+            return _ambiguous_target_response("introducer_unclear")
+        return {
+            **_ambiguous_target_response("target_unclear"),
+            "error_code": "unsupported_person_intent",
+        }
+
+    def _active_interaction_target(
+        self,
+        cached: CachedFrame,
+    ) -> tuple[ResolvedTarget | None, str]:
+        snapshot = cached.memory_snapshot
+        if snapshot is None:
+            return None, "no_active_interaction_target"
+        if self._clock_ms() - snapshot.observed_at_ms > self._cache.max_age_ms:
+            return None, "stale_interaction"
+
+        scene_context = snapshot.scene_context or {}
+        if scene_context.get("engagement_state") != "available":
+            return None, "no_active_interaction_target"
+        if scene_context.get("attention_available") is not True:
+            return None, "no_active_interaction_target"
+
+        scene_track_id = scene_context.get("target_track_id")
+        if not isinstance(scene_track_id, int):
+            return None, "no_active_interaction_target"
+
+        attention = snapshot.attention
+        if attention is None or attention.target_track_id != scene_track_id:
+            return None, "no_active_interaction_target"
+        if attention.largest_person_stable is not True:
+            return None, "no_active_interaction_target"
+
+        track = _visible_person_track(snapshot.tracks, scene_track_id)
+        if track is None:
+            return None, "no_active_interaction_target"
+
+        try:
+            resolved = self._resolver.resolve(
+                TargetRequest(mode="track_id", track_id=scene_track_id),
+                image_width=snapshot.image_size[0],
+                image_height=snapshot.image_size[1],
+                tracks=snapshot.tracks,
+                attention=attention,
+            )
+        except TargetResolveError:
+            return None, "no_active_interaction_target"
+        return (
+            ResolvedTarget(
+                source_target_mode="active_interaction_target",
+                target_type=resolved.target_type,
+                bbox_xyxy=resolved.bbox_xyxy,
+                track_id=resolved.track_id,
+                quality=resolved.quality,
+            ),
+            "",
+        )
 
     def _query_due(self, frame: FrameMessage) -> bool:
         last = self._last_query_frame_timestamp_ms.get(frame.camera)
@@ -773,6 +888,48 @@ def _target_request(request: dict[str, Any]) -> TargetRequest:
     return TargetRequest(mode=mode)
 
 
+def _public_person_target(request: dict[str, Any]) -> dict[str, Any] | None:
+    target = _required_mapping(request, "target")
+    if target.get("kind") != "person":
+        return None
+    return target
+
+
+def _ambiguous_target_response(ambiguity_type: str) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "status": "ambiguous",
+        "retryable": True,
+        "ask_user_hint": True,
+        "ambiguity_type": ambiguity_type,
+        "candidates": [],
+    }
+
+
+def _target_ambiguous_error(ambiguity_type: str) -> MemoryServiceError:
+    return MemoryServiceError(
+        "target_ambiguous",
+        "target requires an active interaction target",
+        status_code=409,
+        details=_ambiguous_target_response(ambiguity_type),
+    )
+
+
+def _visible_person_track(
+    tracks: list[TrackSnapshot],
+    track_id: int,
+) -> TrackSnapshot | None:
+    for track in tracks:
+        if (
+            track.track_id == track_id
+            and track.lost_ms == 0
+            and track.class_name == "person"
+            and track.hits > 0
+        ):
+            return track
+    return None
+
+
 def _source_frame_ref(cached: CachedFrame) -> str:
     frame = cached.frame
     return f"{frame.camera}:{frame.frame_id}:{frame.timestamp_ms}"
@@ -980,6 +1137,20 @@ def _candidate_to_dict(candidate: Any) -> dict[str, Any]:
         "bbox_xyxy": [float(value) for value in candidate.bbox_xyxy],
         "confidence": float(candidate.confidence),
         "reason": candidate.reason,
+    }
+
+
+def _resolved_target_to_candidate_dict(
+    target: ResolvedTarget,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "target_type": target.target_type,
+        "track_id": target.track_id,
+        "bbox_xyxy": [float(value) for value in target.bbox_xyxy],
+        "confidence": 1.0 if target.quality == "usable" else 0.0,
+        "reason": reason,
     }
 
 

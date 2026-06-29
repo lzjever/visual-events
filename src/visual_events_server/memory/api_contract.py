@@ -62,7 +62,7 @@ class TeachPersonRequest(_BaseMemoryRequest):
     def to_internal_request(self) -> dict[str, Any]:
         return {
             "camera": self.camera,
-            "target": {"mode": "attention_target"},
+            "target": self.target.model_dump(),
             "profile": dict(self.profile),
         }
 
@@ -87,9 +87,13 @@ class ResolveTargetRequest(_BaseMemoryRequest):
     def to_internal_request(self) -> dict[str, Any]:
         if self.target.kind == "object":
             raise ValueError("object target kind is not supported internally")
+        if self.target.kind == "person":
+            target: dict[str, Any] = self.target.model_dump()
+        else:
+            target = {"mode": "scene"}
         return {
             "camera": self.camera,
-            "target": {"mode": _internal_mode_for_kind(self.target.kind)},
+            "target": target,
         }
 
 
@@ -112,12 +116,6 @@ def validate_resolve_target_response(response: dict[str, Any]) -> None:
             "resolve-target response status must be one of "
             f"{sorted(RESOLVE_TARGET_STATUSES)}"
         )
-
-
-def _internal_mode_for_kind(kind: Literal["person", "scene"]) -> str:
-    if kind == "person":
-        return "attention_target"
-    return "scene"
 
 
 def _find_forbidden_agent_field(
