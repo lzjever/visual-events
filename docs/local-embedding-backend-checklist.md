@@ -21,7 +21,7 @@
 - 不把模型、cache、`runtime/`、`artifacts/`、`val-data/` 加进 Git。
 - 不新增第二套教学 API、streaming 协议或 CLI 控制链路。
 - 不把 YOLO pose latent 当作人物身份 embedding。
-- 不做 v0.4 的匿名熟人、身份纠错、自动聚类或手势指向增强。
+- 不做 v0.4 的匿名熟人、身份纠错、自动聚类或泛化手势指向增强；`third_person_introduction` 的受限人指向人解析属于 target resolver，不属于 local embedding backend。
 - 不承诺 RK3588 已验证通过；本阶段只保持模型/runtime 选择对后续 RK3588 迁移友好。
 
 ## 实现 Checklist
