@@ -529,6 +529,7 @@ def run_actual(
         "teach_requests": [_teach_request_summary(record) for record in payload_records],
         "forbidden_agent_payload_fields": forbidden_payload_fields,
         "api_responses": api_response_records,
+        "third_person_introduction": third_person_result,
         "object_no_write": object_result,
         "debug_test_channel_enabled": False,
         "artifacts": artifact_paths,
@@ -1753,39 +1754,141 @@ def _run_actual_third_person_introduction(
             payload=record["payload"],
             operation="teach_person_third_person",
         )
-        events = runner.start_query_and_drain(
+        b_positive_events = runner.start_query_and_drain(
             websocket,
             query_timestamp_ms=2_000,
             states_file=states_file,
-            phase="third-person-replay",
+            phase="third-person-b-positive-replay",
         )
-    known = memory_e2e.first_event(events, "known_person_present")
+        runner.processor.mode = "single"
+        a_only_events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=3_000,
+            states_file=states_file,
+            phase="third-person-a-only-negative-replay",
+        )
+    stored_person_id = teach["body"].get("person_id")
+    b_positive_known = _known_person_event_for_person(
+        b_positive_events,
+        stored_person_id,
+    )
+    a_only_known = _known_person_event_for_person(
+        a_only_events,
+        stored_person_id,
+    )
     candidates = resolve["body"].get("candidates") or []
     resolved_track_id = candidates[0].get("track_id") if candidates else None
+    resolve_evidence = (
+        resolve["body"].get("evidence")
+        if isinstance(resolve["body"].get("evidence"), dict)
+        else {}
+    )
+    teach_evidence = (
+        teach["body"].get("evidence")
+        if isinstance(teach["body"].get("evidence"), dict)
+        else {}
+    )
+    resolver_target_ref = (
+        teach_evidence.get("resolver_target_ref")
+        or resolve_evidence.get("resolver_target_ref")
+    )
+    introducer_ref = (
+        teach_evidence.get("introducer_ref") or resolve_evidence.get("introducer_ref")
+    )
+    stored_embedding_source_track_ref = teach_evidence.get("source_track_ref")
+    b_positive_replay = _known_person_replay_summary(
+        b_positive_events,
+        stored_person_id,
+    )
+    a_only_negative_replay = _known_person_replay_summary(
+        a_only_events,
+        stored_person_id,
+    )
     assertions = {
         "resolve_target_ok": resolve["body"].get("ok") is True,
         "resolve_target_resolved": resolve["body"].get("status") == "resolved",
         "resolver_selected_b": resolved_track_id == memory_e2e.AMBIGUOUS_TRACK_ID,
         "teach_person_ok": teach["body"].get("ok") is True,
-        "known_person_present": known is not None,
-        "known_person_is_b": bool(
-            known and known.get("track_id") == memory_e2e.AMBIGUOUS_TRACK_ID
+        "stored_embedding_source_is_target": bool(
+            stored_embedding_source_track_ref
+            and stored_embedding_source_track_ref == resolver_target_ref
         ),
+        "stored_embedding_source_not_introducer": bool(
+            stored_embedding_source_track_ref
+            and introducer_ref
+            and stored_embedding_source_track_ref != introducer_ref
+        ),
+        "known_person_present": b_positive_known is not None,
+        "known_person_is_b": bool(
+            b_positive_known
+            and b_positive_known.get("track_id") == memory_e2e.AMBIGUOUS_TRACK_ID
+        ),
+        "b_positive_known_person_present": b_positive_known is not None,
+        "a_only_no_known_person_for_stored_person": a_only_known is None,
     }
     _append_botified_frame_records(
         botified_frame_records,
         case="ga-third-person-introduction",
         scene=scene.name,
-        phase="third-person-replay",
-        events=events,
+        phase="third-person-b-positive-replay",
+        events=b_positive_events,
+    )
+    _append_botified_frame_records(
+        botified_frame_records,
+        case="ga-third-person-introduction",
+        scene=scene.name,
+        phase="third-person-a-only-negative-replay",
+        events=a_only_events,
     )
     return {
         "passed": all(assertions.values()),
         "assertions": assertions,
         "resolve_target": resolve["body"],
-        "person_id": teach["body"].get("person_id"),
+        "person_id": stored_person_id,
+        "resolver_target_ref": resolver_target_ref,
+        "introducer_ref": introducer_ref,
+        "stored_person_id": stored_person_id,
+        "stored_embedding_source_track_ref": stored_embedding_source_track_ref,
+        "b_positive_replay": b_positive_replay,
+        "a_only_negative_replay": a_only_negative_replay,
+        "events": b_positive_replay["events"],
+    }
+
+
+def _known_person_event_for_person(
+    events: list[dict[str, Any]],
+    person_id: Any,
+) -> dict[str, Any] | None:
+    if not person_id:
+        return None
+    for event in events:
+        if event.get("event") != "known_person_present":
+            continue
+        context_person_id = (
+            event.get("memory_context", {}).get("person", {}).get("person_id")
+        )
+        if context_person_id == person_id:
+            return event
+    return None
+
+
+def _known_person_replay_summary(
+    events: list[dict[str, Any]],
+    stored_person_id: Any,
+) -> dict[str, Any]:
+    stored_person_event = _known_person_event_for_person(events, stored_person_id)
+    summary = {
+        "known_person_present": memory_e2e.first_event(
+            events,
+            "known_person_present",
+        )
+        is not None,
+        "stored_person_known_person_present": stored_person_event is not None,
         "events": memory_e2e.compact_events(events),
     }
+    if stored_person_event is not None:
+        summary["stored_person_track_id"] = stored_person_event.get("track_id")
+    return summary
 
 
 def _run_actual_teach_scene(

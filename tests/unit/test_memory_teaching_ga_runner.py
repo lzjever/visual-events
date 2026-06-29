@@ -378,6 +378,47 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert checks["teach_scene_scene_activated"]["passed"] is True
     assert checks["object_resolve_unsupported_no_write"]["passed"] is True
 
+    third_person = report["third_person_introduction"]
+    assert third_person == checks["third_person_known_person_present"]["details"]
+    assert third_person["resolver_target_ref"] == "front:track:8"
+    assert third_person["introducer_ref"] == "front:track:7"
+    assert third_person["stored_person_id"] == third_person["person_id"]
+    assert third_person["stored_embedding_source_track_ref"] == "front:track:8"
+    assert third_person["assertions"][
+        "stored_embedding_source_is_target"
+    ] is True
+    assert third_person["assertions"][
+        "stored_embedding_source_not_introducer"
+    ] is True
+    assert third_person["assertions"][
+        "b_positive_known_person_present"
+    ] is True
+    assert third_person["assertions"][
+        "a_only_no_known_person_for_stored_person"
+    ] is True
+    assert third_person["b_positive_replay"]["known_person_present"] is True
+    assert third_person["b_positive_replay"][
+        "stored_person_known_person_present"
+    ] is True
+    assert third_person["b_positive_replay"]["stored_person_track_id"] == 8
+    assert any(
+        event["event"] == "known_person_present"
+        and event["track_id"] == 8
+        and event["memory_context"]["person"]["person_id"]
+        == third_person["stored_person_id"]
+        for event in third_person["b_positive_replay"]["events"]
+    )
+    assert third_person["a_only_negative_replay"][
+        "known_person_present"
+    ] is False
+    assert third_person["a_only_negative_replay"][
+        "stored_person_known_person_present"
+    ] is False
+    assert all(
+        event["event"] != "known_person_present"
+        for event in third_person["a_only_negative_replay"]["events"]
+    )
+
     payloads = json.loads((out / "teach_payloads.json").read_text(encoding="utf-8"))
     assert payloads["mode"] == "actual"
     for record in payloads["payloads"]:
