@@ -5,6 +5,7 @@ from .embedding import (
     EmbeddingResult,
     EmbeddingUnavailable,
     FakeEmbeddingBackend,
+    LocalEmbeddingBackend,
     MemoryEmbeddingBackend,
 )
 from .events import (
@@ -32,6 +33,7 @@ __all__ = [
     "EmbeddingResult",
     "EmbeddingUnavailable",
     "FakeEmbeddingBackend",
+    "LocalEmbeddingBackend",
     "MemoryEmbeddingBackend",
     "MemoryEventGate",
     "MemoryMatch",

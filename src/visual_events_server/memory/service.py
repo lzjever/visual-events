@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 import time
 import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any
 
 from visual_events_server.attention import AttentionResult
@@ -35,6 +37,8 @@ from .target_resolver import (
 
 
 _LOGGER = logging.getLogger(__name__)
+
+_PERSON_EMBEDDING_CROP_MARGIN_RATIO = 0.10
 
 
 class MemoryServiceError(RuntimeError):
@@ -177,7 +181,7 @@ class AppMemoryService:
         tags = tuple(str(tag) for tag in profile.get("tags", []) if str(tag))
         try:
             embedding = self.embedding_backend.embed_person(
-                _target_bytes(cached.frame.jpeg_bytes, target)
+                _person_embedding_bytes(cached.frame.jpeg_bytes, target)
             )
         except EmbeddingUnavailable as exc:
             raise MemoryServiceError(exc.code, exc.message, status_code=503) from exc
@@ -205,8 +209,15 @@ class AppMemoryService:
         }
 
     async def teach_scene(self, request: dict[str, Any]) -> dict[str, Any]:
+        target_request = _target_request(request)
+        if target_request.mode != "scene":
+            raise MemoryServiceError(
+                "unsupported_scene_target",
+                "teach_scene only supports target.mode=scene until region scene "
+                "queries are supported",
+            )
         cached = self._fresh_cached_frame(request)
-        target = self._resolve_cached_target(cached, _target_request(request))
+        target = self._resolve_cached_target(cached, target_request)
         memory = _required_mapping(request, "memory")
         title = _required_text(memory, "title")
         description = _optional_text(memory.get("description"))
@@ -527,7 +538,7 @@ class AppMemoryService:
     ) -> dict[str, Any] | None:
         try:
             embedding = self.embedding_backend.embed_person(
-                _target_bytes(plan.cached.frame.jpeg_bytes, target)
+                _person_embedding_bytes(plan.cached.frame.jpeg_bytes, target)
             )
         except EmbeddingUnavailable:
             return None
@@ -819,11 +830,112 @@ def _attention_from_visual_state(visual_state: dict[str, Any]) -> AttentionResul
 
 
 def _target_bytes(jpeg_bytes: bytes, target: ResolvedTarget) -> bytes:
-    bbox = ",".join(f"{value:.3f}" for value in target.bbox_xyxy)
-    prefix = (
-        f"type={target.target_type};track={target.track_id};bbox={bbox}\n"
-    ).encode("utf-8")
-    return prefix + jpeg_bytes
+    if target.target_type == "scene":
+        return jpeg_bytes
+    if target.target_type == "person":
+        return _person_embedding_bytes(jpeg_bytes, target)
+    if target.target_type == "region":
+        return _crop_target_jpeg(jpeg_bytes, target)
+    raise MemoryServiceError(
+        "invalid_target_type",
+        f"unsupported memory target type {target.target_type}",
+    )
+
+
+def _person_embedding_bytes(jpeg_bytes: bytes, target: ResolvedTarget) -> bytes:
+    if target.target_type not in {"person", "region"}:
+        raise MemoryServiceError(
+            "invalid_target_type",
+            "person embedding target must resolve to a person or region",
+        )
+    return _crop_target_jpeg(
+        jpeg_bytes,
+        target,
+        margin_ratio=_PERSON_EMBEDDING_CROP_MARGIN_RATIO,
+    )
+
+
+def _crop_target_jpeg(
+    jpeg_bytes: bytes,
+    target: ResolvedTarget,
+    *,
+    margin_ratio: float = 0.0,
+) -> bytes:
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError as exc:
+        raise MemoryServiceError(
+            "image_crop_unavailable",
+            "Pillow is required to crop memory target images",
+            status_code=503,
+        ) from exc
+
+    try:
+        with Image.open(BytesIO(jpeg_bytes)) as image:
+            source = image.convert("RGB")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise MemoryServiceError(
+            "invalid_frame_image",
+            "cached frame JPEG could not be decoded",
+        ) from exc
+
+    left, top, right, bottom = _target_crop_box(
+        target,
+        image_width=source.width,
+        image_height=source.height,
+        margin_ratio=margin_ratio,
+    )
+    crop = source.crop((left, top, right, bottom))
+    if crop.width <= 0 or crop.height <= 0:
+        raise MemoryServiceError("invalid_target_bbox", "target crop is empty")
+
+    buffer = BytesIO()
+    crop.save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
+def _target_crop_box(
+    target: ResolvedTarget,
+    *,
+    image_width: int,
+    image_height: int,
+    margin_ratio: float,
+) -> tuple[int, int, int, int]:
+    try:
+        bbox = tuple(float(value) for value in target.bbox_xyxy)
+    except (TypeError, ValueError) as exc:
+        raise MemoryServiceError("invalid_target_bbox", "target bbox is invalid") from exc
+    if len(bbox) != 4 or not all(math.isfinite(value) for value in bbox):
+        raise MemoryServiceError("invalid_target_bbox", "target bbox is invalid")
+
+    x1, y1, x2, y2 = bbox
+    if x1 >= x2 or y1 >= y2:
+        raise MemoryServiceError("invalid_target_bbox", "target bbox is empty")
+    if margin_ratio > 0.0:
+        margin_x = (x2 - x1) * margin_ratio
+        margin_y = (y2 - y1) * margin_ratio
+        x1 -= margin_x
+        y1 -= margin_y
+        x2 += margin_x
+        y2 += margin_y
+
+    left = math.floor(x1)
+    top = math.floor(y1)
+    right = math.ceil(x2)
+    bottom = math.ceil(y2)
+    if (
+        margin_ratio == 0.0
+        and (left < 0 or top < 0 or right > image_width or bottom > image_height)
+    ):
+        raise MemoryServiceError("invalid_target_bbox", "target bbox is outside image")
+
+    left = max(0, left)
+    top = max(0, top)
+    right = min(image_width, right)
+    bottom = min(image_height, bottom)
+    if left >= right or top >= bottom:
+        raise MemoryServiceError("invalid_target_bbox", "target crop is empty")
+    return left, top, right, bottom
 
 
 def _candidate_to_dict(candidate: Any) -> dict[str, Any]:

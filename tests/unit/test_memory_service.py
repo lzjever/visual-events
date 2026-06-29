@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from io import BytesIO
 
 import pytest
+from PIL import Image, ImageDraw
 
-from tests.jpeg_fixtures import JPEG_1280X720
 from visual_events_server.memory import AppMemoryService, MemoryServiceError
 from visual_events_server.memory.embedding import EmbeddingResult
 from visual_events_server.memory.embedding import FakeEmbeddingBackend
+from visual_events_server.memory.service import _target_bytes
 from visual_events_server.memory.store import MemoryStore
+from visual_events_server.memory.target_resolver import ResolvedTarget
 from visual_events_server.protocol import FrameMessage
 
 
@@ -49,6 +52,37 @@ class SequencePersonEmbeddingBackend(FakeEmbeddingBackend):
             embedding_version=self.model_version,
             quality=1.0,
         )
+
+
+class RecordingEmbeddingBackend(FakeEmbeddingBackend):
+    def __init__(self, *, person_dim: int, scene_dim: int) -> None:
+        super().__init__(person_dim=person_dim, scene_dim=scene_dim)
+        self.person_inputs: list[bytes] = []
+        self.scene_inputs: list[bytes] = []
+
+    def embed_person(self, image_crop: bytes):
+        self.person_inputs.append(image_crop)
+        return super().embed_person(image_crop)
+
+    def embed_scene(self, image_or_crop: bytes):
+        self.scene_inputs.append(image_or_crop)
+        return super().embed_scene(image_or_crop)
+
+
+def _jpeg_1280x720() -> bytes:
+    image = Image.new("RGB", (1280, 720), (28, 36, 46))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 1279, 719), fill=(36, 58, 76))
+    draw.rectangle((300, 100, 499, 374), fill=(35, 176, 99))
+    draw.rectangle((500, 100, 699, 374), fill=(234, 188, 45))
+    draw.rectangle((300, 375, 499, 649), fill=(46, 119, 214))
+    draw.rectangle((500, 375, 699, 649), fill=(202, 74, 168))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
+JPEG_1280X720 = _jpeg_1280x720()
 
 
 def frame(*, frame_id: int = 1, timestamp_ms: int = 1_000) -> FrameMessage:
@@ -93,12 +127,19 @@ def visual_state(*, frame_id: int = 1, timestamp_ms: int = 1_000) -> dict:
     }
 
 
-def service(tmp_path, *, now_ms: int = 10_000) -> AppMemoryService:
+def service(
+    tmp_path,
+    *,
+    now_ms: int = 10_000,
+    embedding_backend: FakeEmbeddingBackend | None = None,
+) -> AppMemoryService:
     clock = lambda: now_ms
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
     return AppMemoryService(
         store=store,
-        embedding_backend=FakeEmbeddingBackend(person_dim=8, scene_dim=8),
+        embedding_backend=embedding_backend
+        if embedding_backend is not None
+        else FakeEmbeddingBackend(person_dim=8, scene_dim=8),
         frame_cache_seconds=1,
         query_interval_ms=500,
         queue_size=4,
@@ -112,6 +153,199 @@ def service(tmp_path, *, now_ms: int = 10_000) -> AppMemoryService:
         event_cooldown_ms=5_000,
         clock_ms=clock,
     )
+
+
+def _decoded_jpeg(image_bytes: bytes) -> Image.Image:
+    with Image.open(BytesIO(image_bytes)) as image:
+        assert image.format == "JPEG"
+        return image.convert("RGB")
+
+
+def _assert_rgb_close(
+    actual: tuple[int, int, int],
+    expected: tuple[int, int, int],
+    *,
+    tolerance: int = 35,
+) -> None:
+    assert all(abs(left - right) <= tolerance for left, right in zip(actual, expected))
+
+
+@pytest.mark.asyncio
+async def test_teach_person_sends_decodable_face_safe_person_crop(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三"},
+        }
+    )
+
+    assert len(backend.person_inputs) == 1
+    crop = _decoded_jpeg(backend.person_inputs[0])
+    original = _decoded_jpeg(JPEG_1280X720)
+    assert crop.size == (480, 660)
+    assert crop.width < original.width
+    assert crop.height < original.height
+    _assert_rgb_close(crop.getpixel((20, 100)), original.getpixel((280, 145)))
+    _assert_rgb_close(crop.getpixel((80, 20)), original.getpixel((340, 65)))
+    _assert_rgb_close(crop.getpixel((460, 100)), original.getpixel((720, 145)))
+    _assert_rgb_close(crop.getpixel((80, 640)), original.getpixel((340, 685)))
+    _assert_rgb_close(crop.getpixel((60, 75)), original.getpixel((320, 120)))
+
+
+@pytest.mark.asyncio
+async def test_teach_person_bbox_target_uses_face_safe_person_crop(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {
+                "mode": "bbox",
+                "bbox_xyxy": [300.0, 100.0, 700.0, 650.0],
+            },
+            "profile": {"display_name": "张三"},
+        }
+    )
+
+    assert len(backend.person_inputs) == 1
+    crop = _decoded_jpeg(backend.person_inputs[0])
+    original = _decoded_jpeg(JPEG_1280X720)
+    assert crop.size == (480, 660)
+    _assert_rgb_close(crop.getpixel((20, 100)), original.getpixel((280, 145)))
+    _assert_rgb_close(crop.getpixel((80, 20)), original.getpixel((340, 65)))
+    _assert_rgb_close(crop.getpixel((460, 100)), original.getpixel((720, 145)))
+    _assert_rgb_close(crop.getpixel((80, 640)), original.getpixel((340, 685)))
+
+
+def test_target_bytes_region_uses_exact_bbox_crop():
+    target = ResolvedTarget(
+        source_target_mode="bbox",
+        target_type="region",
+        bbox_xyxy=(300.0, 100.0, 700.0, 650.0),
+        track_id=None,
+        quality="usable",
+    )
+
+    crop = _decoded_jpeg(_target_bytes(JPEG_1280X720, target))
+    original = _decoded_jpeg(JPEG_1280X720)
+
+    assert crop.size == (400, 550)
+    _assert_rgb_close(crop.getpixel((50, 50)), original.getpixel((350, 150)))
+    _assert_rgb_close(crop.getpixel((350, 500)), original.getpixel((650, 600)))
+
+
+@pytest.mark.asyncio
+async def test_teach_person_rejects_invalid_bbox_without_embedding_or_write(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "target": {
+                    "mode": "bbox",
+                    "bbox_xyxy": [300.0, 100.0, 305.0, 105.0],
+                },
+                "profile": {"display_name": "张三"},
+            }
+        )
+
+    assert exc.value.code == "target_too_small"
+    assert backend.person_inputs == []
+    assert subject.store.search_person_embeddings(
+        FakeEmbeddingBackend(person_dim=8, scene_dim=8).embed_person(b"unused"),
+        limit=1,
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_teach_scene_scene_mode_sends_original_decodable_jpeg_to_backend(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    await subject.teach_scene(
+        {
+            "camera": "front",
+            "target": {"mode": "scene"},
+            "memory": {"title": "新品展示区"},
+        }
+    )
+
+    assert backend.scene_inputs == [JPEG_1280X720]
+    scene_image = _decoded_jpeg(backend.scene_inputs[0])
+    assert scene_image.size == (1280, 720)
+
+
+@pytest.mark.asyncio
+async def test_teach_scene_rejects_bbox_target_without_writing_scene(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_scene(
+            {
+                "camera": "front",
+                "target": {
+                    "mode": "bbox",
+                    "bbox_xyxy": [300.0, 100.0, 700.0, 650.0],
+                },
+                "memory": {"title": "新品展示区局部"},
+            }
+        )
+
+    assert exc.value.code == "unsupported_scene_target"
+    assert "target.mode=scene" in exc.value.message
+    assert backend.scene_inputs == []
+    assert subject.store.search_scene_embeddings(
+        FakeEmbeddingBackend(person_dim=8, scene_dim=8).embed_scene(b"unused"),
+        limit=1,
+    ) == []
 
 
 @pytest.mark.asyncio

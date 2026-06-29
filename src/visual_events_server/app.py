@@ -16,6 +16,7 @@ from .memory import (
     AppMemoryService,
     DisabledEmbeddingBackend,
     FakeEmbeddingBackend,
+    LocalEmbeddingBackend,
     MemoryEmbeddingBackend,
     MemoryServiceError,
     MemoryStore,
@@ -402,10 +403,12 @@ def _embedding_backend_from_config(
     if backend_name == "disabled":
         return DisabledEmbeddingBackend(), 32, 32
     if backend_name == "local":
-        raise ValueError(
-            "memory local embedding backend is not implemented; "
-            "configure [memory.embedding].backend='fake' for PC/E2E"
+        embedding_config = config.memory.embedding
+        backend = LocalEmbeddingBackend(
+            person_model_path=embedding_config.person_model_path,
+            scene_model_path=embedding_config.scene_model_path,
         )
+        return backend, backend.person_dim, backend.scene_dim
     raise ValueError(f"unsupported memory embedding backend {backend_name}")
 
 

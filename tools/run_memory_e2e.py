@@ -33,6 +33,13 @@ DEFAULT_SCENE = "pic_hello"
 DEFAULT_CAMERA = "front"
 QUERY_INTERVAL_MS = 1000
 FRAME_CACHE_SECONDS = 10
+QUERY_DRAIN_WAIT_SECONDS = 0.25
+PRIMARY_TRACK_ID = 7
+AMBIGUOUS_TRACK_ID = 8
+PRIMARY_PERSON_BBOX_XYXY = (580.0, 60.0, 805.0, 650.0)
+AMBIGUOUS_PERSON_BBOX_XYXY = (650.0, 70.0, 875.0, 650.0)
+PRIMARY_ATTENTION_UV = (692.5, 160.0)
+AMBIGUOUS_POINT_UV = PRIMARY_ATTENTION_UV
 
 
 @dataclass(frozen=True)
@@ -59,15 +66,15 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
             "image_size": [frame.width, frame.height],
             "tracks": tracks,
             "attention": {
-                "target_track_id": 7,
-                "target_uv": [500.0, 160.0],
+                "target_track_id": PRIMARY_TRACK_ID,
+                "target_uv": list(PRIMARY_ATTENTION_UV),
                 "reason": "memory_e2e_stable_target",
                 "confidence": 0.96,
             },
             "scene_context": {
                 "engagement_state": "engaged",
                 "attention_available": True,
-                "target_track_id": 7,
+                "target_track_id": PRIMARY_TRACK_ID,
                 "no_engage_reasons": [],
                 "target_reacquired": False,
             },
@@ -82,8 +89,8 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
 
     def _tracks(self, frame: FrameMessage) -> list[dict[str, Any]]:
         primary = _track(
-            track_id=7,
-            bbox_xyxy=[300.0, 100.0, 700.0, 650.0],
+            track_id=PRIMARY_TRACK_ID,
+            bbox_xyxy=list(PRIMARY_PERSON_BBOX_XYXY),
             timestamp_ms=frame.timestamp_ms,
         )
         if self.mode != "ambiguous":
@@ -91,8 +98,8 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
         return [
             primary,
             _track(
-                track_id=8,
-                bbox_xyxy=[250.0, 90.0, 750.0, 670.0],
+                track_id=AMBIGUOUS_TRACK_ID,
+                bbox_xyxy=list(AMBIGUOUS_PERSON_BBOX_XYXY),
                 timestamp_ms=frame.timestamp_ms,
                 confidence=0.9,
             ),
@@ -107,11 +114,13 @@ class MemoryE2ERunner:
         out: Path,
         source_frame: SourceFrame,
         camera: str,
+        embedding_config: MemoryEmbeddingConfig,
     ) -> None:
         self.case = case
         self.out = out
         self.source_frame = source_frame
         self.camera = camera
+        self.embedding_config = embedding_config
         self.processor = MemoryScenarioProcessor()
         self.client = TestClient(
             create_app(processor=self.processor, config=self._config())
@@ -127,7 +136,7 @@ class MemoryE2ERunner:
                 frame_cache_seconds=FRAME_CACHE_SECONDS,
                 query_interval_ms=QUERY_INTERVAL_MS,
                 queue_size=8,
-                embedding=MemoryEmbeddingConfig(backend="fake"),
+                embedding=self.embedding_config,
                 matching=MemoryMatchingConfig(
                     known_person_threshold=0.99,
                     known_person_margin=0.0,
@@ -200,7 +209,7 @@ class MemoryE2ERunner:
         )
         # Give the in-process memory worker a short window to finish, then send a
         # drain-only frame whose timestamp does not satisfy query_interval_ms.
-        time.sleep(0.05)
+        time.sleep(QUERY_DRAIN_WAIT_SECONDS)
         drained = self.send(
             websocket,
             timestamp_ms=query_timestamp_ms + 1,
@@ -225,7 +234,92 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--scene", default=DEFAULT_SCENE)
     parser.add_argument("--camera", default=DEFAULT_CAMERA)
+    parser.add_argument(
+        "--embedding-backend",
+        choices=("fake", "local"),
+        default="fake",
+        help="Embedding backend to use. Defaults to deterministic fake embeddings.",
+    )
+    parser.add_argument(
+        "--person-model-path",
+        type=Path,
+        help="Local person embedding model bundle path. Required for --embedding-backend local.",
+    )
+    parser.add_argument(
+        "--scene-model-path",
+        type=Path,
+        help="Local scene embedding model bundle path. Required for --embedding-backend local.",
+    )
     return parser.parse_args(argv)
+
+
+def build_notes(args: argparse.Namespace) -> list[str]:
+    notes = ["Manual gate only; not wired into the default publish gate."]
+    if args.embedding_backend == "fake":
+        notes.append(
+            "Uses deterministic fake memory embeddings and stable synthetic "
+            "visual_state; this is not evidence of real local model behavior."
+        )
+    else:
+        notes.append(
+            "Uses the real local memory embedding backend with explicit model "
+            "paths; model files are local-only artifacts and are not written to Git."
+        )
+    notes.append("Real val-data JPEG bytes are used as frame payloads.")
+    return notes
+
+
+def build_embedding_config(args: argparse.Namespace) -> MemoryEmbeddingConfig:
+    if args.embedding_backend == "fake":
+        return MemoryEmbeddingConfig(backend="fake")
+    if args.person_model_path is None or args.scene_model_path is None:
+        missing = []
+        if args.person_model_path is None:
+            missing.append("--person-model-path")
+        if args.scene_model_path is None:
+            missing.append("--scene-model-path")
+        raise ValueError(
+            "--embedding-backend local requires " + " and ".join(missing)
+        )
+    missing_paths = []
+    if not args.person_model_path.exists():
+        missing_paths.append(f"person_model_path={args.person_model_path}")
+    if not args.scene_model_path.exists():
+        missing_paths.append(f"scene_model_path={args.scene_model_path}")
+    if missing_paths:
+        raise FileNotFoundError(
+            "local embedding model path missing: " + ", ".join(missing_paths)
+        )
+    return MemoryEmbeddingConfig(
+        backend="local",
+        person_model_path=args.person_model_path,
+        scene_model_path=args.scene_model_path,
+    )
+
+
+def embedding_report(args: argparse.Namespace) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "embedding_backend": args.embedding_backend,
+    }
+    if args.embedding_backend == "fake":
+        report["real_model_evidence"] = False
+        report["evidence_note"] = (
+            "fake mode uses deterministic test embeddings and is not proof that "
+            "real local models load or infer correctly"
+        )
+    else:
+        report["uses_real_model_backend"] = True
+        report["person_model_path"] = (
+            str(args.person_model_path) if args.person_model_path is not None else None
+        )
+        report["scene_model_path"] = (
+            str(args.scene_model_path) if args.scene_model_path is not None else None
+        )
+        report["evidence_note"] = (
+            "local mode runs the configured LocalEmbeddingBackend; require "
+            "ok=true before treating this report as real model evidence"
+        )
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -239,25 +333,54 @@ def main(argv: list[str] | None = None) -> int:
     states_path = out / "states.jsonl"
     report_path = out / "report.json"
     checks: list[dict[str, Any]] = []
-    notes = [
-        "Manual gate only; not wired into the default publish gate.",
-        "Uses fake memory embeddings and stable synthetic visual_state; real val-data JPEG bytes are used as frame payloads.",
-    ]
+    notes = build_notes(args)
+
+    try:
+        embedding_config = build_embedding_config(args)
+        checks.append(
+            {
+                "name": "preflight_embedding_backend",
+                "passed": True,
+                "details": embedding_report(args),
+            }
+        )
+    except Exception as exc:
+        checks.append(
+            {
+                "name": "preflight_embedding_backend",
+                "passed": False,
+                "details": {"error": str(exc), "error_type": type(exc).__name__},
+            }
+        )
+        report = build_report(
+            ok=False,
+            args=args,
+            checks=checks,
+            notes=notes,
+            states_path=states_path,
+            report_path=report_path,
+            source_frame=None,
+        )
+        write_report(report_path, report)
+        print(f"memory E2E failed embedding preflight: {exc}", file=sys.stderr)
+        print(f"report: {report_path}")
+        return 1
 
     try:
         source_frame = load_source_frame(args.data_dir, args.scene)
         shutil.copyfile(source_frame.path, out / "source_frame.jpeg")
     except Exception as exc:
+        checks.append(
+            {
+                "name": "preflight_val_data_source_frame",
+                "passed": False,
+                "details": {"error": str(exc), "error_type": type(exc).__name__},
+            }
+        )
         report = build_report(
             ok=False,
             args=args,
-            checks=[
-                {
-                    "name": "preflight_val_data_source_frame",
-                    "passed": False,
-                    "details": {"error": str(exc)},
-                }
-            ],
+            checks=checks,
             notes=notes,
             states_path=states_path,
             report_path=report_path,
@@ -276,6 +399,7 @@ def main(argv: list[str] | None = None) -> int:
                 out=out,
                 source_frame=source_frame,
                 camera=args.camera,
+                embedding_config=embedding_config,
                 states_file=states_file,
             ),
         )
@@ -286,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
                 out=out,
                 source_frame=source_frame,
                 camera=args.camera,
+                embedding_config=embedding_config,
                 states_file=states_file,
             ),
         )
@@ -296,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
                 out=out,
                 source_frame=source_frame,
                 camera=args.camera,
+                embedding_config=embedding_config,
                 states_file=states_file,
             ),
         )
@@ -306,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
                 out=out,
                 source_frame=source_frame,
                 camera=args.camera,
+                embedding_config=embedding_config,
                 states_file=states_file,
             ),
         )
@@ -333,6 +460,7 @@ def check_teach_person_scene_summary_link(
     out: Path,
     source_frame: SourceFrame,
     camera: str,
+    embedding_config: MemoryEmbeddingConfig,
     states_file: Any,
 ) -> dict[str, Any]:
     runner = MemoryE2ERunner(
@@ -340,6 +468,7 @@ def check_teach_person_scene_summary_link(
         out=out,
         source_frame=source_frame,
         camera=camera,
+        embedding_config=embedding_config,
     )
     with runner.open_stream() as websocket:
         runner.start_query_and_drain(
@@ -352,7 +481,7 @@ def check_teach_person_scene_summary_link(
             "/v1/memory/teach/person",
             {
                 "camera": camera,
-                "target": {"mode": "track_id", "track_id": 7},
+                "target": {"mode": "track_id", "track_id": PRIMARY_TRACK_ID},
                 "profile": {
                     "display_name": "Memory E2E Person",
                     "description": "stable synthetic target over val-data JPEG",
@@ -366,10 +495,9 @@ def check_teach_person_scene_summary_link(
                 "camera": camera,
                 "target": {"mode": "scene"},
                 "memory": {
-                    "title": "Memory E2E Region",
+                    "title": "Memory E2E Scene",
                     "description": "scene taught from the selected val-data JPEG",
-                    "activation_hint": "use remembered region context",
-                    "region_id": "memory_e2e_region",
+                    "activation_hint": "use remembered scene context",
                 },
             },
         )
@@ -420,12 +548,12 @@ def check_teach_person_scene_summary_link(
         ),
         "scene_teach_ok": scene.get("ok") is True,
         "scene_activated": scene_event is not None,
-        "scene_region_id": bool(
+        "scene_context": bool(
             scene_event
             and scene_event.get("memory_context", {})
             .get("scene", {})
-            .get("region_id")
-            == "memory_e2e_region"
+            .get("scene_id")
+            == scene.get("scene_id")
         ),
         "external_link_lookup": bool(
             external.get("person", {}).get("person_id") == person["person_id"]
@@ -449,6 +577,7 @@ def check_unknown_repeat_merge(
     out: Path,
     source_frame: SourceFrame,
     camera: str,
+    embedding_config: MemoryEmbeddingConfig,
     states_file: Any,
 ) -> dict[str, Any]:
     runner = MemoryE2ERunner(
@@ -456,6 +585,7 @@ def check_unknown_repeat_merge(
         out=out,
         source_frame=source_frame,
         camera=camera,
+        embedding_config=embedding_config,
     )
     with runner.open_stream() as websocket:
         first_events = runner.start_query_and_drain(
@@ -528,6 +658,7 @@ def check_correct_identity(
     out: Path,
     source_frame: SourceFrame,
     camera: str,
+    embedding_config: MemoryEmbeddingConfig,
     states_file: Any,
 ) -> dict[str, Any]:
     runner = MemoryE2ERunner(
@@ -535,6 +666,7 @@ def check_correct_identity(
         out=out,
         source_frame=source_frame,
         camera=camera,
+        embedding_config=embedding_config,
     )
     with runner.open_stream() as websocket:
         runner.start_query_and_drain(
@@ -547,7 +679,7 @@ def check_correct_identity(
             "/v1/memory/teach/person",
             {
                 "camera": camera,
-                "target": {"mode": "track_id", "track_id": 7},
+                "target": {"mode": "track_id", "track_id": PRIMARY_TRACK_ID},
                 "profile": {"display_name": "Wrong Memory E2E Person"},
             },
         )
@@ -609,6 +741,7 @@ def check_ambiguous_resolve_refuses_teach(
     out: Path,
     source_frame: SourceFrame,
     camera: str,
+    embedding_config: MemoryEmbeddingConfig,
     states_file: Any,
 ) -> dict[str, Any]:
     runner = MemoryE2ERunner(
@@ -616,6 +749,7 @@ def check_ambiguous_resolve_refuses_teach(
         out=out,
         source_frame=source_frame,
         camera=camera,
+        embedding_config=embedding_config,
     )
     runner.processor.mode = "ambiguous"
     with runner.open_stream() as websocket:
@@ -629,7 +763,7 @@ def check_ambiguous_resolve_refuses_teach(
             "/v1/memory/resolve-target",
             json={
                 "camera": camera,
-                "target": {"mode": "point_uv", "point_uv": [500.0, 160.0]},
+                "target": {"mode": "point_uv", "point_uv": list(AMBIGUOUS_POINT_UV)},
             },
         )
         preview = preview_response.json()
@@ -637,7 +771,7 @@ def check_ambiguous_resolve_refuses_teach(
             "/v1/memory/teach/person",
             json={
                 "camera": camera,
-                "target": {"mode": "point_uv", "point_uv": [500.0, 160.0]},
+                "target": {"mode": "point_uv", "point_uv": list(AMBIGUOUS_POINT_UV)},
                 "profile": {"display_name": "Should Not Be Written"},
             },
         )
@@ -766,6 +900,8 @@ def build_report(
     return {
         "ok": ok,
         "gate": "manual_memory_e2e",
+        "embedding_backend": args.embedding_backend,
+        "embedding": embedding_report(args),
         "data_dir": str(args.data_dir),
         "scene": args.scene,
         "camera": args.camera,

@@ -277,9 +277,10 @@ CLI 只负责：
 
 - 做 Botified notification gate：allowlist、`event_id` 幂等、pending/coalescing、same-key gap、global/burst limit、低价值事件静默。
 - 做 stdout writer 背压处理。
+- 不实现 Botified 业务 rate limiter。
 - 不重新实现视觉规则，不根据 attention 高频状态生成 Botified 事件；只消费 server 输出的 event type、event evidence、`scene_context`、`track_id`/`event_id`。
 
-Botified 通知频率由 server semantic event engine 的 rising-edge、cooldown、dedupe 与 CLI notification gate 共同约束，并由 PC/现场 report gate 验收。
+Botified 事件由 server semantic event engine 的 rising-edge、cooldown、dedupe 规则产生；通知频率由 server semantic event engine 的 rising-edge、cooldown、dedupe 与 CLI notification gate 共同约束，并由 PC/现场 report gate 验收。
 
 Botified stdout allowlist：
 

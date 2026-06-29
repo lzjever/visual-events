@@ -1,10 +1,13 @@
 import json
 import time
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw
 
-from tests.jpeg_fixtures import JPEG_1280X720
+import visual_events_server.app as app_module
 from visual_events_server.app import create_app
 from visual_events_server.config import (
     MemoryConfig,
@@ -12,10 +15,24 @@ from visual_events_server.config import (
     MemoryMatchingConfig,
     ServerConfig,
 )
+from visual_events_server.memory.embedding import LocalEmbeddingBackend
 from visual_events_server.protocol import FrameMessage, encode_frame_message
 
 
-JPEG_BYTES = JPEG_1280X720
+def jpeg_1280x720() -> bytes:
+    image = Image.new("RGB", (1280, 720), (28, 36, 46))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 1279, 719), fill=(36, 58, 76))
+    draw.rectangle((300, 100, 499, 374), fill=(35, 176, 99))
+    draw.rectangle((500, 100, 699, 374), fill=(234, 188, 45))
+    draw.rectangle((300, 375, 499, 649), fill=(46, 119, 214))
+    draw.rectangle((500, 375, 699, 649), fill=(202, 74, 168))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
+JPEG_BYTES = jpeg_1280x720()
 
 
 def frame_header(**overrides: Any) -> dict[str, Any]:
@@ -475,8 +492,16 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
             )
         )
         message = json.loads(websocket.receive_text())
+        events_by_type = {
+            event["event"]: event
+            for event in message["semantic_events"]
+            if event["event"] in {"known_person_present", "scene_activated"}
+        }
+        collected_event_names = [
+            event["event"] for event in message["semantic_events"]
+        ]
         for frame_id in range(3, 8):
-            if message["semantic_events"]:
+            if {"known_person_present", "scene_activated"}.issubset(events_by_type):
                 break
             time.sleep(0.05)
             websocket.send_bytes(
@@ -489,8 +514,19 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
                 )
             )
             message = json.loads(websocket.receive_text())
+            for event in message["semantic_events"]:
+                collected_event_names.append(event["event"])
+                if event["event"] in {"known_person_present", "scene_activated"}:
+                    events_by_type[event["event"]] = event
 
-    events = message["semantic_events"]
+    assert sorted(collected_event_names) == [
+        "known_person_present",
+        "scene_activated",
+    ]
+    events = [
+        events_by_type["known_person_present"],
+        events_by_type["scene_activated"],
+    ]
     assert [event["event"] for event in events] == [
         "known_person_present",
         "scene_activated",
@@ -504,6 +540,62 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
     assert events[0]["evidence"]["top2_margin"] >= 0.05
     assert events[1]["memory_context"]["scene"]["title"] == "新品展示区"
     assert events[1]["memory_context"]["scene"]["region_id"] == "display_zone"
+
+
+def test_local_memory_config_uses_bundle_dimensions_for_store(
+    tmp_path,
+    monkeypatch,
+):
+    person_bundle = _write_local_bundle(
+        tmp_path,
+        "person-local",
+        dim=3,
+        files={"detector": "detector.onnx", "recognizer": "recognizer.onnx"},
+    )
+    scene_bundle = _write_local_bundle(
+        tmp_path,
+        "scene-local",
+        dim=5,
+        files={"model": "scene.onnx"},
+    )
+
+    class StubLocalLoader:
+        def embed_person(self, image_crop: bytes) -> list[float]:
+            return [1.0, 0.0, 0.0]
+
+        def embed_scene(self, image_or_crop: bytes) -> list[float]:
+            return [1.0, 0.0, 0.0, 0.0, 0.0]
+
+    def local_backend_factory(*, person_model_path, scene_model_path):
+        return LocalEmbeddingBackend(
+            person_model_path=person_model_path,
+            scene_model_path=scene_model_path,
+            loader=StubLocalLoader(),
+        )
+
+    monkeypatch.setattr(
+        app_module,
+        "LocalEmbeddingBackend",
+        local_backend_factory,
+        raising=False,
+    )
+    config = ServerConfig(
+        memory=MemoryConfig(
+            enabled=True,
+            db_path=tmp_path / "memory.sqlite3",
+            embedding=MemoryEmbeddingConfig(
+                backend="local",
+                person_model_path=person_bundle,
+                scene_model_path=scene_bundle,
+            ),
+        )
+    )
+
+    app = create_app(processor=MemoryVisualProcessor(), config=config)
+
+    assert app.state.memory_service.store.person_dim == 3
+    assert app.state.memory_service.store.scene_dim == 5
+    app.state.memory_service.store.close()
 
 
 def test_configured_memory_resolve_target_endpoint_previews_without_writing(tmp_path):
@@ -541,3 +633,46 @@ def test_configured_memory_resolve_target_endpoint_previews_without_writing(tmp_
     assert response.status_code == 200
     assert response.json()["status"] == "resolved"
     assert response.json()["candidates"][0]["track_id"] == 7
+
+
+def _write_local_bundle(
+    tmp_path: Path,
+    name: str,
+    *,
+    dim: int,
+    files: dict[str, str],
+) -> Path:
+    bundle_path = tmp_path / name
+    bundle_path.mkdir()
+    for relative_path in files.values():
+        (bundle_path / relative_path).write_bytes(b"dummy onnx")
+    manifest: dict[str, Any] = {
+        "model_name": name,
+        "version": "v1",
+        "dim": dim,
+        "runtime": "onnxruntime",
+        "files": files,
+    }
+    if set(files) == {"detector", "recognizer"}:
+        manifest["input_size"] = {
+            "detector": [640, 640],
+            "recognizer": [112, 112],
+        }
+    else:
+        manifest.update(
+            {
+                "input_size": [224, 224],
+                "input_name": "image",
+                "output_name": "embedding",
+                "preprocess": {
+                    "mean": [0.48145466, 0.4578275, 0.40821073],
+                    "resize_mode": "resize_shorter_center_crop",
+                    "std": [0.26862954, 0.26130258, 0.27577711],
+                },
+            }
+        )
+    (bundle_path / "manifest.json").write_text(
+        json.dumps(manifest, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    return bundle_path
