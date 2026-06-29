@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 from tools.visual_evidence_helpers import (
@@ -14,6 +16,8 @@ from tools.visual_evidence_helpers import (
     render_html_document,
 )
 from tools.visualize_service_replay import _progress_line
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _visual_state() -> dict:
@@ -53,6 +57,24 @@ def _visual_state() -> dict:
             }
         ],
     }
+
+
+def test_visualize_service_replay_direct_script_help() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "tools" / "visualize_service_replay.py"),
+            "--help",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Replay JPEG frames through visual-events-server" in result.stdout
+    assert result.stderr == ""
 
 
 def _memory_events() -> list[dict]:
