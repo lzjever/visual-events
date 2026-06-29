@@ -472,6 +472,77 @@ def test_anonymous_profile_embedding_and_retrieval_round_trip(tmp_path) -> None:
     assert store.get_active_anonymous_profile("anon_inactive") is None
 
 
+def test_anonymous_embedding_records_provenance_and_merge_copies_it(tmp_path) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    store.create_anonymous_profile(
+        anonymous_id="anon_1",
+        seen_count=1,
+        first_seen_at_ms=1000,
+        last_seen_at_ms=1000,
+        familiar_score=0.0,
+    )
+    anonymous_embedding_id = store.add_anonymous_embedding(
+        anonymous_id="anon_1",
+        result=embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        source_target_type="recognition_track",
+        source_track_ref="front:track:7",
+        source_frame_ref="front:1:1000",
+        crop_hash="crop-hash",
+        crop_path_or_artifact_ref=None,
+        resolver_target_ref="front:track:7",
+        resolution_reason="recognition_track",
+        now_ms=1000,
+    )
+
+    assert store.get_embedding_provenance(anonymous_embedding_id) == {
+        "embedding_id": anonymous_embedding_id,
+        "owner_type": "anonymous",
+        "owner_id": "anon_1",
+        "source_track_ref": "front:track:7",
+        "source_frame_ref": "front:1:1000",
+        "crop_hash": "crop-hash",
+        "crop_path_or_artifact_ref": None,
+        "resolver_target_ref": "front:track:7",
+        "resolution_reason": "recognition_track",
+        "embedding_type": "face",
+        "embedding_model": "fake-face",
+        "embedding_version": "v1",
+        "embedding_dim": 4,
+        "created_at_ms": 1000,
+    }
+
+    store.upsert_person_profile(
+        person_id="person_1",
+        display_name="张三",
+        description="",
+        tags=(),
+        now_ms=1100,
+    )
+    copied_ids = store.copy_anonymous_embeddings_to_person(
+        anonymous_id="anon_1",
+        person_id="person_1",
+        now_ms=1100,
+    )
+
+    assert len(copied_ids) == 1
+    assert store.get_embedding_provenance(copied_ids[0]) == {
+        "embedding_id": copied_ids[0],
+        "owner_type": "person",
+        "owner_id": "person_1",
+        "source_track_ref": "front:track:7",
+        "source_frame_ref": "front:1:1000",
+        "crop_hash": "crop-hash",
+        "crop_path_or_artifact_ref": None,
+        "resolver_target_ref": "front:track:7",
+        "resolution_reason": "recognition_track",
+        "embedding_type": "face",
+        "embedding_model": "fake-face",
+        "embedding_version": "v1",
+        "embedding_dim": 4,
+        "created_at_ms": 1100,
+    }
+
+
 def test_memory_table_counts_include_sqlite_vec_tables_after_embedding_writes(
     tmp_path,
 ) -> None:

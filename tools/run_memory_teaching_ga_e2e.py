@@ -1028,7 +1028,7 @@ def _run_local_self_smoke(
             if body.get("status") != "resolved":
                 last_reason = _response_reason(body)
                 continue
-            teach = _post_and_record_api_response(
+            teach = _post_teach_person_with_optional_anonymous_merge(
                 runner=runner,
                 api_response_records=api_response_records,
                 payload_index=f"{_payload_index(record)}:local-teach-self",
@@ -1086,6 +1086,7 @@ def _run_local_self_smoke(
         "reason": "" if passed else "known_person_present_not_replayed",
         "assertions": assertions,
         "person_id": teach["body"].get("person_id"),
+        **_teach_person_report_fields(teach),
         "teach_crop_hash": _teach_crop_hash(teach["body"]),
         "teach_crop_path_or_artifact_ref": _teach_crop_path_or_artifact_ref(
             teach["body"],
@@ -1242,7 +1243,7 @@ def _run_local_third_person_probe(
                 invalid_resolve = body
                 continue
 
-            teach = _post_and_record_api_response(
+            teach = _post_teach_person_with_optional_anonymous_merge(
                 runner=runner,
                 api_response_records=api_response_records,
                 payload_index=f"{_payload_index(record)}:local-teach-third-person",
@@ -1263,6 +1264,7 @@ def _run_local_third_person_probe(
                         "reason": _response_reason(teach["body"]),
                         "resolve_target": body,
                         "person_id": teach["body"].get("person_id"),
+                        **_teach_person_report_fields(teach),
                         "pose_pointing_scoring": pose_pointing_scoring,
                         "selected_window": _selected_window(scene, source_frame),
                         "events": [],
@@ -1348,6 +1350,7 @@ def _run_local_third_person_probe(
                     "assertions": assertions,
                     "resolve_target": body,
                     "person_id": person_id,
+                    **_teach_person_report_fields(teach),
                     "resolver_target_ref": resolver_target_ref,
                     "introducer_ref": introducer_ref,
                     "pose_pointing_scoring": pose_pointing_scoring,
@@ -1626,6 +1629,33 @@ def _teach_crop_hash(body: dict[str, Any]) -> Any:
 
 def _teach_crop_path_or_artifact_ref(body: dict[str, Any]) -> Any:
     return _response_evidence(body).get("crop_path_or_artifact_ref")
+
+
+def _teach_person_report_fields(response: dict[str, Any]) -> dict[str, Any]:
+    body = response.get("body")
+    if not isinstance(body, dict):
+        return {}
+    fields: dict[str, Any] = {}
+    outcome = body.get("teach_person_outcome")
+    if outcome and outcome != "created_person":
+        fields["teach_person_outcome"] = outcome
+    teach_person = body.get("teach_person")
+    if teach_person is not None:
+        fields["teach_person"] = teach_person
+    merge_anonymous_person = body.get("merge_anonymous_person")
+    if merge_anonymous_person is not None:
+        fields["merge_anonymous_person"] = merge_anonymous_person
+    return fields
+
+
+def _prefixed_teach_person_report_fields(
+    prefix: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        f"{prefix}_{key}": value
+        for key, value in _teach_person_report_fields(response).items()
+    }
 
 
 def _local_smoke_preflight(
@@ -2110,7 +2140,7 @@ def _run_actual_post_teach_scene_replay(
             phase="post-teach-self-seed",
         )
         last_query_timestamp_ms = timestamp_ms
-        self_teach = _post_and_record_api_response(
+        self_teach = _post_teach_person_with_optional_anonymous_merge(
             runner=runner,
             api_response_records=api_response_records,
             payload_index=f"{_payload_index(self_record)}:post-teach",
@@ -2135,7 +2165,7 @@ def _run_actual_post_teach_scene_replay(
             states_file=states_file,
             phase="post-teach-third-person-seed",
         )
-        third_person_teach = _post_and_record_api_response(
+        third_person_teach = _post_teach_person_with_optional_anonymous_merge(
             runner=runner,
             api_response_records=api_response_records,
             payload_index=f"{_payload_index(third_person_record)}:post-teach",
@@ -2251,6 +2281,8 @@ def _run_actual_post_teach_scene_replay(
         "self_person_id": self_person_id,
         "third_person_id": third_person_id,
         "scene_id": scene_id,
+        **_prefixed_teach_person_report_fields("self", self_teach),
+        **_prefixed_teach_person_report_fields("third_person", third_person_teach),
         "scenes": replayed_scenes,
         "assertions": assertions,
     }
@@ -2335,7 +2367,7 @@ def _run_actual_self_introduction(
             states_file=states_file,
             phase="self-seed",
         )
-        teach = _post_and_record_api_response(
+        teach = _post_teach_person_with_optional_anonymous_merge(
             runner=runner,
             api_response_records=api_response_records,
             payload_index=_payload_index(record),
@@ -2364,6 +2396,7 @@ def _run_actual_self_introduction(
         "passed": all(assertions.values()),
         "assertions": assertions,
         "person_id": teach["body"].get("person_id"),
+        **_teach_person_report_fields(teach),
         "teach_crop_hash": _teach_crop_hash(teach["body"]),
         "teach_crop_path_or_artifact_ref": _teach_crop_path_or_artifact_ref(
             teach["body"],
@@ -2411,7 +2444,7 @@ def _run_actual_third_person_introduction(
             payload=resolve_payload,
             operation="resolve_third_person_target",
         )
-        teach = _post_and_record_api_response(
+        teach = _post_teach_person_with_optional_anonymous_merge(
             runner=runner,
             api_response_records=api_response_records,
             payload_index=_payload_index(record),
@@ -2516,6 +2549,7 @@ def _run_actual_third_person_introduction(
         "assertions": assertions,
         "resolve_target": resolve["body"],
         "person_id": stored_person_id,
+        **_teach_person_report_fields(teach),
         "resolver_target_ref": resolver_target_ref,
         "introducer_ref": introducer_ref,
         "pose_pointing_scoring": pose_pointing_scoring,
@@ -2742,6 +2776,81 @@ def _post_and_record_api_response(
     }
     api_response_records.append(record)
     return {"status_code": response.status_code, "body": body}
+
+
+def _post_teach_person_with_optional_anonymous_merge(
+    *,
+    runner: Any,
+    api_response_records: list[dict[str, Any]],
+    payload_index: int | str,
+    scene: str,
+    endpoint: str,
+    payload: dict[str, Any],
+    operation: str,
+) -> dict[str, Any]:
+    teach = _post_and_record_api_response(
+        runner=runner,
+        api_response_records=api_response_records,
+        payload_index=payload_index,
+        scene=scene,
+        endpoint=endpoint,
+        payload=payload,
+        operation=operation,
+    )
+    merge_required = _anonymous_merge_required_detail(teach)
+    if merge_required is None:
+        body = dict(teach["body"]) if isinstance(teach["body"], dict) else {}
+        if body.get("ok") is True:
+            body.setdefault("teach_person_outcome", body.get("outcome") or "created_person")
+        return {**teach, "body": body}
+
+    profile = payload.get("profile")
+    merge_payload: dict[str, Any] = {
+        "anonymous_id": merge_required["anonymous_id"],
+    }
+    if isinstance(profile, dict):
+        merge_payload["profile"] = dict(profile)
+    merge = _post_and_record_api_response(
+        runner=runner,
+        api_response_records=api_response_records,
+        payload_index=f"{payload_index}:merge-anonymous",
+        scene=scene,
+        endpoint="/v1/memory/merge-anonymous-person",
+        payload=merge_payload,
+        operation=f"{operation}_merge_anonymous_person",
+    )
+    merge_body = merge["body"] if isinstance(merge["body"], dict) else {}
+    final_body = {
+        **merge_body,
+        "evidence": merge_required.get("evidence", {}),
+        "teach_person_outcome": "merge_anonymous_required",
+        "teach_person": teach["body"],
+        "merge_anonymous_person": merge_body,
+    }
+    return {
+        "status_code": merge["status_code"],
+        "body": final_body,
+        "teach_person_response": teach,
+        "merge_anonymous_person_response": merge,
+    }
+
+
+def _anonymous_merge_required_detail(response: dict[str, Any]) -> dict[str, Any] | None:
+    if response.get("status_code") != 409:
+        return None
+    body = response.get("body")
+    if not isinstance(body, dict):
+        return None
+    detail = body.get("detail")
+    payload = detail if isinstance(detail, dict) else body
+    code = payload.get("code") or payload.get("error_code")
+    if code != "anonymous_merge_required":
+        return None
+    if payload.get("outcome") != "merge_anonymous_required":
+        return None
+    if not payload.get("anonymous_id"):
+        return None
+    return payload
 
 
 def _append_botified_frame_records(
@@ -3168,7 +3277,7 @@ def _build_actual_checks(
             for record in api_response_records
         ),
         "status_codes_ok": all(
-            int(record.get("status_code") or 0) < 400
+            _api_response_status_ok(record)
             for record in api_response_records
         ),
     }
@@ -3274,6 +3383,25 @@ def _build_actual_checks(
             },
         },
     ]
+
+
+def _api_response_status_ok(record: dict[str, Any]) -> bool:
+    status_code = int(record.get("status_code") or 0)
+    if status_code < 400:
+        return True
+    if status_code != 409:
+        return False
+    response = record.get("response")
+    if not isinstance(response, dict):
+        return False
+    detail = response.get("detail")
+    payload = detail if isinstance(detail, dict) else response
+    return (
+        (payload.get("code") or payload.get("error_code"))
+        == "anonymous_merge_required"
+        and payload.get("outcome") == "merge_anonymous_required"
+        and bool(payload.get("anonymous_id"))
+    )
 
 
 def _build_local_smoke_checks(

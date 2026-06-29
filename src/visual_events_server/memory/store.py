@@ -678,11 +678,39 @@ class MemoryStore:
         anonymous_id: str,
         result: EmbeddingResult,
         source_target_type: str,
+        source_track_ref: str | None = None,
+        source_frame_ref: str | None = None,
+        crop_hash: str | None = None,
+        crop_path_or_artifact_ref: str | None = None,
+        resolver_target_ref: str | None = None,
+        resolution_reason: str | None = None,
         now_ms: int,
     ) -> str:
         vector = self._checked_vector(result.vector, expected_dim=self.person_dim)
         embedding_id = _new_id("emb_anon")
         vector_blob = _serialize_vector(vector)
+        has_provenance = any(
+            value is not None
+            for value in (
+                source_frame_ref,
+                crop_hash,
+                resolver_target_ref,
+                resolution_reason,
+            )
+        )
+        if has_provenance and not all(
+            value is not None
+            for value in (
+                source_frame_ref,
+                crop_hash,
+                resolver_target_ref,
+                resolution_reason,
+            )
+        ):
+            raise MemoryStoreError(
+                "invalid_embedding_provenance",
+                "anonymous embedding provenance is incomplete",
+            )
         with self._lock:
             with self.connection:
                 cursor = self.connection.execute(
@@ -727,6 +755,23 @@ class MemoryStore:
                         source_target_type,
                     ),
                 )
+                if has_provenance:
+                    self._insert_embedding_provenance(
+                        embedding_id=embedding_id,
+                        owner_type="anonymous",
+                        owner_id=anonymous_id,
+                        source_track_ref=source_track_ref,
+                        source_frame_ref=str(source_frame_ref),
+                        crop_hash=str(crop_hash),
+                        crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                        resolver_target_ref=str(resolver_target_ref),
+                        resolution_reason=str(resolution_reason),
+                        embedding_type=result.embedding_type,
+                        embedding_model=result.embedding_model,
+                        embedding_version=result.embedding_version,
+                        embedding_dim=self.person_dim,
+                        now_ms=now_ms,
+                    )
         return embedding_id
 
     def list_anonymous_embeddings(self, anonymous_id: str) -> list[dict[str, Any]]:
@@ -768,7 +813,7 @@ class MemoryStore:
             rows = self.connection.execute(
                 """
                 SELECT
-                  embedding_type, embedding_model, embedding_version, embedding_dim,
+                  embedding_id, embedding_type, embedding_model, embedding_version, embedding_dim,
                   source_target_type, vector_blob, quality
                 FROM anonymous_embeddings
                 WHERE anonymous_id = ?
@@ -827,6 +872,37 @@ class MemoryStore:
                             row["source_target_type"],
                         ),
                     )
+                    provenance = self.connection.execute(
+                        """
+                        SELECT
+                          source_track_ref, source_frame_ref, crop_hash,
+                          crop_path_or_artifact_ref, resolver_target_ref,
+                          resolution_reason, embedding_type, embedding_model,
+                          embedding_version, embedding_dim
+                        FROM embedding_provenance
+                        WHERE embedding_id = ?
+                        """,
+                        (row["embedding_id"],),
+                    ).fetchone()
+                    if provenance is not None:
+                        self._insert_embedding_provenance(
+                            embedding_id=embedding_id,
+                            owner_type="person",
+                            owner_id=person_id,
+                            source_track_ref=provenance["source_track_ref"],
+                            source_frame_ref=provenance["source_frame_ref"],
+                            crop_hash=provenance["crop_hash"],
+                            crop_path_or_artifact_ref=provenance[
+                                "crop_path_or_artifact_ref"
+                            ],
+                            resolver_target_ref=provenance["resolver_target_ref"],
+                            resolution_reason=provenance["resolution_reason"],
+                            embedding_type=provenance["embedding_type"],
+                            embedding_model=provenance["embedding_model"],
+                            embedding_version=provenance["embedding_version"],
+                            embedding_dim=int(provenance["embedding_dim"]),
+                            now_ms=now_ms,
+                        )
                     copied_ids.append(embedding_id)
         return copied_ids
 

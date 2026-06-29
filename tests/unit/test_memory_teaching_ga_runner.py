@@ -208,6 +208,154 @@ def test_generated_payloads_parse_with_public_memory_api_contract(
             raise AssertionError(f"unexpected endpoint: {record['endpoint']}")
 
 
+def test_teach_person_helper_merges_anonymous_required_response() -> None:
+    posts: list[dict[str, Any]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, body: dict[str, Any]) -> None:
+            self.status_code = status_code
+            self._body = body
+
+        def json(self) -> dict[str, Any]:
+            return self._body
+
+    class FakeClient:
+        def post(self, endpoint: str, json: dict[str, Any]) -> FakeResponse:
+            posts.append({"endpoint": endpoint, "payload": json})
+            if endpoint == "/v1/memory/teach/person":
+                return FakeResponse(
+                    409,
+                    {
+                        "detail": {
+                            "code": "anonymous_merge_required",
+                            "error_code": "anonymous_merge_required",
+                            "outcome": "merge_anonymous_required",
+                            "anonymous_id": "anon_123",
+                            "evidence": {"resolver_target_ref": "front:track:8"},
+                        }
+                    },
+                )
+            assert endpoint == "/v1/memory/merge-anonymous-person"
+            return FakeResponse(
+                200,
+                {
+                    "ok": True,
+                    "anonymous_id": "anon_123",
+                    "person_id": "person_from_merge",
+                    "copied_embedding_count": 1,
+                    "merge_id": "merge_123",
+                },
+            )
+
+    records: list[dict[str, Any]] = []
+    result = module._post_teach_person_with_optional_anonymous_merge(
+        runner=SimpleNamespace(client=FakeClient()),
+        api_response_records=records,
+        payload_index="pic_teach_person:teach",
+        scene="pic_teach_person",
+        endpoint="/v1/memory/teach/person",
+        payload={
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "third_person_introduction",
+                "referent_text": "这位/彭刚",
+            },
+            "profile": {"display_name": "彭刚"},
+        },
+        operation="teach_person_third_person",
+    )
+
+    assert [post["endpoint"] for post in posts] == [
+        "/v1/memory/teach/person",
+        "/v1/memory/merge-anonymous-person",
+    ]
+    assert posts[1]["payload"] == {
+        "anonymous_id": "anon_123",
+        "profile": {"display_name": "彭刚"},
+    }
+    assert result["status_code"] == 200
+    assert result["body"]["person_id"] == "person_from_merge"
+    assert result["body"]["teach_person_outcome"] == "merge_anonymous_required"
+    assert result["body"]["evidence"] == {"resolver_target_ref": "front:track:8"}
+    assert result["body"]["teach_person"]["detail"]["anonymous_id"] == "anon_123"
+    assert result["body"]["merge_anonymous_person"]["person_id"] == "person_from_merge"
+    assert [record["operation"] for record in records] == [
+        "teach_person_third_person",
+        "teach_person_third_person_merge_anonymous_person",
+    ]
+
+
+def test_teach_person_helper_keeps_non_anonymous_409_failed() -> None:
+    posts: list[dict[str, Any]] = []
+
+    class FakeResponse:
+        status_code = 409
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "detail": {
+                    "code": "person_teach_conflict",
+                    "outcome": "conflict",
+                    "matched_person_id": "person_existing",
+                }
+            }
+
+    class FakeClient:
+        def post(self, endpoint: str, json: dict[str, Any]) -> FakeResponse:
+            posts.append({"endpoint": endpoint, "payload": json})
+            return FakeResponse()
+
+    records: list[dict[str, Any]] = []
+    result = module._post_teach_person_with_optional_anonymous_merge(
+        runner=SimpleNamespace(client=FakeClient()),
+        api_response_records=records,
+        payload_index="pic_teach_me:teach",
+        scene="pic_teach_me",
+        endpoint="/v1/memory/teach/person",
+        payload={
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "self_introduction",
+                "referent_text": "我",
+            },
+            "profile": {"display_name": "小李飞刀"},
+        },
+        operation="teach_person_self",
+    )
+
+    assert [post["endpoint"] for post in posts] == ["/v1/memory/teach/person"]
+    assert result["status_code"] == 409
+    assert result["body"]["detail"]["code"] == "person_teach_conflict"
+    assert records == [
+        {
+            "payload_index": "pic_teach_me:teach",
+            "scene": "pic_teach_me",
+            "endpoint": "/v1/memory/teach/person",
+            "operation": "teach_person_self",
+            "dry_run": False,
+            "status_code": 409,
+            "payload": {
+                "camera": "front",
+                "target": {
+                    "kind": "person",
+                    "intent": "self_introduction",
+                    "referent_text": "我",
+                },
+                "profile": {"display_name": "小李飞刀"},
+            },
+            "response": {
+                "detail": {
+                    "code": "person_teach_conflict",
+                    "outcome": "conflict",
+                    "matched_person_id": "person_existing",
+                }
+            },
+        }
+    ]
+
+
 def test_memory_e2e_runner_generates_public_rest_payloads_without_low_level_fields() -> None:
     payloads = [
         memory_e2e.self_introduction_payload(

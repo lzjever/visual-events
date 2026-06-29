@@ -796,6 +796,418 @@ async def test_teach_person_persists_embedding_provenance_for_resolved_target(tm
 
 
 @pytest.mark.asyncio
+async def test_teach_person_duplicate_same_display_name_updates_metadata_without_new_embedding_or_artifact(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[vector, vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    created = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三", "description": "旧备注"},
+        }
+    )
+    artifact_dir = tmp_path / "runtime" / "memory" / "artifacts"
+    before_counts = _store_counts(subject.store)
+    before_artifacts = sorted(
+        path.name for path in artifact_dir.rglob("*") if path.is_file()
+    )
+
+    updated = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {
+                "display_name": "张三",
+                "description": "新备注",
+                "tags": ["vip", "staff"],
+            },
+        }
+    )
+
+    assert updated["ok"] is True
+    assert updated["outcome"] == "updated_existing_person"
+    assert updated["person_id"] == created["person_id"]
+    assert updated["matched_person_id"] == created["person_id"]
+    assert updated["evidence"]["matched_type"] == "person"
+    assert updated["evidence"]["matched_id"] == created["person_id"]
+    assert updated["evidence"]["match_score"] >= 0.95
+    assert updated["store_delta"]["delta"]["person_profiles"] == 0
+    assert updated["store_delta"]["delta"]["person_embeddings"] == 0
+    assert updated["store_delta"]["delta"]["embedding_provenance"] == 0
+    assert subject.store.get_person_profile(created["person_id"]) == {
+        "person_id": created["person_id"],
+        "display_name": "张三",
+        "description": "新备注",
+        "tags": ["vip", "staff"],
+    }
+    assert _store_counts(subject.store) == before_counts
+    assert (
+        sorted(path.name for path in artifact_dir.rglob("*") if path.is_file())
+        == before_artifacts
+    )
+
+
+@pytest.mark.asyncio
+async def test_teach_person_duplicate_same_display_name_links_new_external_ref(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[vector, vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    created = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三"},
+        }
+    )
+    before_counts = _store_counts(subject.store)
+
+    updated = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {
+                "display_name": "张三",
+                "external_user_ref": "wechat:zhangsan",
+            },
+        }
+    )
+
+    assert updated["outcome"] == "updated_existing_person"
+    assert updated["person_id"] == created["person_id"]
+    assert subject.store.get_person_by_external_user("wechat:zhangsan")[
+        "person_id"
+    ] == created["person_id"]
+    assert updated["store_delta"]["delta"]["external_user_links"] == 1
+    assert updated["store_delta"]["delta"]["person_embeddings"] == 0
+    assert updated["store_delta"]["delta"]["embedding_provenance"] == 0
+    assert _store_counts(subject.store)["person_embeddings"] == before_counts[
+        "person_embeddings"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_teach_person_duplicate_external_ref_bound_elsewhere_conflicts_without_write(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[vector, vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    created = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三"},
+        }
+    )
+    subject.store.upsert_person_profile(
+        person_id="person_other",
+        display_name="另一个人",
+        description="",
+        tags=(),
+        now_ms=10_000,
+    )
+    subject.store.link_external_user(
+        person_id="person_other",
+        external_user_ref="wechat:other",
+        now_ms=10_000,
+    )
+    before_counts = _store_counts(subject.store)
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {
+                    "display_name": "张三",
+                    "external_user_ref": "wechat:other",
+                },
+            }
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.code == "person_teach_conflict"
+    assert exc.value.details["outcome"] == "conflict"
+    assert exc.value.details["matched_person_id"] == created["person_id"]
+    assert exc.value.details["external_user_ref"] == "wechat:other"
+    assert exc.value.details["external_user_person_id"] == "person_other"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
+    assert _store_counts(subject.store) == before_counts
+    assert subject.store.get_person_by_external_user("wechat:other")[
+        "person_id"
+    ] == "person_other"
+
+
+@pytest.mark.asyncio
+async def test_teach_person_duplicate_missing_metadata_fields_preserves_existing(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[vector, vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    created = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {
+                "display_name": "张三",
+                "description": "店长",
+                "tags": ["staff"],
+            },
+        }
+    )
+
+    await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三"},
+        }
+    )
+
+    assert subject.store.get_person_profile(created["person_id"]) == {
+        "person_id": created["person_id"],
+        "display_name": "张三",
+        "description": "店长",
+        "tags": ["staff"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_teach_person_duplicate_different_display_name_conflicts_without_write(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[vector, vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    created = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三", "description": "店长"},
+        }
+    )
+    artifact_dir = tmp_path / "runtime" / "memory" / "artifacts"
+    before_counts = _store_counts(subject.store)
+    before_artifacts = sorted(
+        path.name for path in artifact_dir.rglob("*") if path.is_file()
+    )
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "李四", "description": "新客户"},
+            }
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.code == "person_teach_conflict"
+    assert exc.value.details["error_code"] == "person_teach_conflict"
+    assert exc.value.details["outcome"] == "conflict"
+    assert exc.value.details["matched_person_id"] == created["person_id"]
+    assert exc.value.details["evidence"]["matched_type"] == "person"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
+    assert _store_counts(subject.store) == before_counts
+    assert subject.store.get_person_profile(created["person_id"]) == {
+        "person_id": created["person_id"],
+        "display_name": "张三",
+        "description": "店长",
+        "tags": [],
+    }
+    assert (
+        sorted(path.name for path in artifact_dir.rglob("*") if path.is_file())
+        == before_artifacts
+    )
+
+
+@pytest.mark.asyncio
+async def test_teach_person_duplicate_active_anonymous_requires_merge_without_write(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(person_vectors=[vector])
+    subject = service(tmp_path, embedding_backend=backend)
+    subject.store.create_anonymous_profile(
+        anonymous_id="anon_1",
+        seen_count=2,
+        first_seen_at_ms=9_000,
+        last_seen_at_ms=9_500,
+        familiar_score=0.75,
+    )
+    subject.store.add_anonymous_embedding(
+        anonymous_id="anon_1",
+        result=EmbeddingResult(
+            vector=vector,
+            embedding_type="face",
+            embedding_model=backend.person_model,
+            embedding_version=backend.model_version,
+            quality=1.0,
+        ),
+        source_target_type="recognition_track",
+        now_ms=9_500,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    artifact_dir = tmp_path / "runtime" / "memory" / "artifacts"
+    before_counts = _store_counts(subject.store)
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "张三"},
+            }
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.code == "anonymous_merge_required"
+    assert exc.value.details["error_code"] == "anonymous_merge_required"
+    assert exc.value.details["outcome"] == "merge_anonymous_required"
+    assert exc.value.details["anonymous_id"] == "anon_1"
+    assert exc.value.details["evidence"]["matched_type"] == "anonymous_person"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
+    assert _store_counts(subject.store) == before_counts
+    assert _count_rows(subject.store, "person_profiles") == 0
+    if artifact_dir.exists():
+        assert [path for path in artifact_dir.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
+async def test_query_created_anonymous_embedding_has_provenance(tmp_path):
+    vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(person_vectors=[vector])
+    subject = service(tmp_path, embedding_backend=backend)
+    source_frame = frame()
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(frame_message=source_frame),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    match = subject.store.search_anonymous_embeddings(
+        EmbeddingResult(
+            vector=vector,
+            embedding_type="face",
+            embedding_model=backend.person_model,
+            embedding_version=backend.model_version,
+            quality=1.0,
+        ),
+        limit=1,
+    )[0]
+    provenance = subject.store.get_embedding_provenance(match.embedding_id)
+
+    assert provenance is not None
+    assert provenance["owner_type"] == "anonymous"
+    assert provenance["owner_id"] == match.matched_id
+    assert provenance["source_track_ref"] == "front:track:7"
+    assert provenance["source_frame_ref"] == "front:1:1000"
+    assert provenance["resolver_target_ref"] == "front:track:7"
+    assert provenance["resolution_reason"] == "recognition_track"
+    assert provenance["crop_hash"] == hashlib.sha256(
+        backend.person_inputs[0],
+    ).hexdigest()
+    assert provenance["crop_path_or_artifact_ref"] is None
+
+
+@pytest.mark.asyncio
+async def test_teach_person_waits_pending_same_camera_before_duplicate_store_delta(
+    tmp_path,
+):
+    backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
+    backend.block_queries = True
+    subject = service(tmp_path, embedding_backend=backend)
+    source_frame = frame()
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(frame_message=source_frame),
+    )
+    assert await asyncio.to_thread(backend.entered.wait, 1.0)
+
+    teach = asyncio.create_task(
+        subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "张三"},
+            }
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not teach.done()
+    backend.release.set()
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await asyncio.wait_for(teach, 1.0)
+
+    assert exc.value.code == "anonymous_merge_required"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
+    assert _count_rows(subject.store, "anonymous_profiles") == 1
+
+
+@pytest.mark.asyncio
 async def test_teach_person_removes_crop_artifact_when_store_create_fails(
     tmp_path,
     monkeypatch,
@@ -1120,7 +1532,10 @@ async def test_self_introduction_latest_active_target_must_match_stable_track(tm
 
 @pytest.mark.asyncio
 async def test_self_introduction_uses_active_interaction_target_for_write(tmp_path):
-    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    success_vector = _unit_vector(0)
+    backend = ScriptedPersonEmbeddingBackend(
+        person_outcomes=[_no_usable_face(), _no_usable_face(), success_vector],
+    )
     subject = service(tmp_path, embedding_backend=backend)
     first_frame = frame(frame_id=1, timestamp_ms=1_000)
     await subject.observe_visual_state(
@@ -1138,6 +1553,7 @@ async def test_self_introduction_uses_active_interaction_target_for_write(tmp_pa
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     backend.person_inputs.clear()
+    backend.scene_inputs.clear()
 
     person = await subject.teach_person(
         {
@@ -1152,11 +1568,16 @@ async def test_self_introduction_uses_active_interaction_target_for_write(tmp_pa
     )
 
     assert len(backend.person_inputs) == 1
-    expected_embedding = FakeEmbeddingBackend(
-        person_dim=8,
-        scene_dim=8,
-    ).embed_person(backend.person_inputs[0])
-    matches = subject.store.search_person_embeddings(expected_embedding, limit=1)
+    matches = subject.store.search_person_embeddings(
+        EmbeddingResult(
+            vector=success_vector,
+            embedding_type="face",
+            embedding_model=backend.person_model,
+            embedding_version=backend.model_version,
+            quality=1.0,
+        ),
+        limit=1,
+    )
     assert matches[0].matched_id == person["person_id"]
     provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
     assert person["evidence"]["source_frame_ref"] == provenance["source_frame_ref"]
@@ -1402,7 +1823,16 @@ async def test_self_introduction_stale_snapshot_uses_allowed_ambiguity_type(tmp_
 async def test_third_person_introduction_uses_active_person_pose_pointing_for_write(
     tmp_path,
 ):
-    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    success_vector = _unit_vector(0)
+    backend = ScriptedPersonEmbeddingBackend(
+        person_outcomes=[
+            _no_usable_face(),
+            _no_usable_face(),
+            _no_usable_face(),
+            _no_usable_face(),
+            success_vector,
+        ],
+    )
     subject = service(tmp_path, embedding_backend=backend)
     first_frame = frame(frame_id=1, timestamp_ms=1_000)
     first_introducer = person_track(
@@ -1452,6 +1882,7 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     backend.person_inputs.clear()
+    backend.scene_inputs.clear()
 
     request = {
         "camera": "front",
@@ -1487,11 +1918,16 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     )
 
     assert len(backend.person_inputs) == 1
-    expected_embedding = FakeEmbeddingBackend(
-        person_dim=8,
-        scene_dim=8,
-    ).embed_person(backend.person_inputs[0])
-    matches = subject.store.search_person_embeddings(expected_embedding, limit=1)
+    matches = subject.store.search_person_embeddings(
+        EmbeddingResult(
+            vector=success_vector,
+            embedding_type="face",
+            embedding_model=backend.person_model,
+            embedding_version=backend.model_version,
+            quality=1.0,
+        ),
+        limit=1,
+    )
     assert matches[0].matched_id == person["person_id"]
     provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
     assert provenance["source_track_ref"] == "front:track:8"
@@ -1523,7 +1959,12 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
 async def test_third_person_fallback_keeps_introduced_person_evidence(tmp_path):
     success_vector = _unit_vector(0)
     backend = ScriptedPersonEmbeddingBackend(
-        person_outcomes=[_no_usable_face(), success_vector],
+        person_outcomes=[
+            _no_usable_face(),
+            _no_usable_face(),
+            _no_usable_face(),
+            _no_usable_face(),
+        ],
     )
     subject = service(tmp_path, embedding_backend=backend)
     first_frame = frame(frame_id=1, timestamp_ms=1_000)
@@ -2516,20 +2957,33 @@ async def test_observe_visual_state_does_not_wait_for_blocking_memory_query(tmp_
         )
     )
 
-    first_frame = frame(frame_id=1, timestamp_ms=1_000)
-    await subject.observe_visual_state(
-        connection_id="ws_1",
-        frame=first_frame,
-        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
-        memory_snapshot=memory_snapshot(frame_message=first_frame),
+    person_id = "person_known"
+    target = ResolvedTarget(
+        source_target_mode="recognition_track",
+        target_type="person",
+        bbox_xyxy=(300.0, 100.0, 700.0, 650.0),
+        track_id=7,
+        quality="usable",
     )
-    await _wait_for_memory_query_idle(subject, camera="front")
-    person = await subject.teach_person(
-        {
-            "camera": "front",
-            "target": {"mode": "track_id", "track_id": 7},
-            "profile": {"display_name": "张三"},
-        }
+    embedding_bytes = next(
+        _person_embedding_input_candidates(
+            JPEG_1280X720,
+            target,
+            tracks=memory_snapshot().tracks,
+        )
+    )
+    store.upsert_person_profile(
+        person_id=person_id,
+        display_name="张三",
+        description="",
+        tags=(),
+        now_ms=now,
+    )
+    store.add_person_embedding(
+        person_id=person_id,
+        result=backend.embed_person(embedding_bytes),
+        source_target_type="recognition_track",
+        now_ms=now,
     )
     backend.block_queries = True
 
@@ -2575,7 +3029,7 @@ async def test_observe_visual_state_does_not_wait_for_blocking_memory_query(tmp_
     )
 
     assert [event["event"] for event in events] == ["known_person_present"]
-    assert events[0]["memory_context"]["person"]["person_id"] == person["person_id"]
+    assert events[0]["memory_context"]["person"]["person_id"] == person_id
     assert events[0]["evidence"]["source_frame_id"] == 2
 
 
@@ -2811,7 +3265,6 @@ async def test_teach_summary_link_and_low_frequency_memory_events(tmp_path):
         connection_id="ws_1",
         frame=first_frame,
         visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
-        memory_snapshot=memory_snapshot(frame_message=first_frame),
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     person = await subject.teach_person(

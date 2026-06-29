@@ -120,6 +120,15 @@ class _RecognitionTickReport:
         }
 
 
+@dataclass(frozen=True)
+class _ExternalRefDecision:
+    external_user_ref: str
+    linked_person_id: str | None
+    conflict: bool
+    same_person: bool
+    should_link: bool
+
+
 class AppMemoryService:
     def __init__(
         self,
@@ -288,6 +297,8 @@ class AppMemoryService:
     async def teach_person(self, request: dict[str, Any]) -> dict[str, Any]:
         await self._enter_teach_request()
         try:
+            camera = _required_text(request, "camera")
+            await self._drain_pending_query_for_camera(camera)
             store_before = self._store_count_snapshot()
             try:
                 cached = self._fresh_cached_frame(request)
@@ -319,8 +330,18 @@ class AppMemoryService:
                 )
             profile = _required_mapping(request, "profile")
             display_name = _required_text(profile, "display_name")
-            description = _optional_text(profile.get("description"))
-            tags = tuple(str(tag) for tag in profile.get("tags", []) if str(tag))
+            description_provided = "description" in profile
+            tags_provided = "tags" in profile
+            description = (
+                _optional_text(profile.get("description"))
+                if description_provided
+                else ""
+            )
+            tags = (
+                tuple(str(tag) for tag in profile.get("tags", []) if str(tag))
+                if tags_provided
+                else ()
+            )
             embedding: EmbeddingResult | None = None
             embedding_bytes: bytes | None = None
             first_no_usable_face: MemoryServiceError | None = None
@@ -353,6 +374,102 @@ class AppMemoryService:
                     "embedding_unavailable",
                     "person embedding is unavailable",
                     status_code=503,
+                )
+
+            existing_person = self._retriever.query_person(
+                embedding,
+                threshold=self.known_person_threshold,
+                margin=self.known_person_margin,
+            )
+            if existing_person is not None:
+                existing_profile = self.store.get_person_profile(
+                    existing_person.matched_id,
+                )
+                if existing_profile is not None:
+                    external_ref = self._external_ref_decision(
+                        profile,
+                        existing_person.matched_id,
+                    )
+                    evidence = self._teach_match_evidence(
+                        existing_person,
+                        cached,
+                        target,
+                        interaction_snapshot=interaction_snapshot,
+                    )
+                    if external_ref.conflict:
+                        raise self._teach_person_conflict_error(
+                            matched_person_id=existing_person.matched_id,
+                            evidence=evidence,
+                            store_before=store_before,
+                            external_user_ref=external_ref.external_user_ref,
+                            external_user_person_id=external_ref.linked_person_id,
+                        )
+                    if (
+                        existing_profile["display_name"] == display_name
+                        or external_ref.same_person
+                    ):
+                        next_description = (
+                            description
+                            if description_provided
+                            else str(existing_profile["description"])
+                        )
+                        next_tags = (
+                            tags
+                            if tags_provided
+                            else tuple(str(tag) for tag in existing_profile["tags"])
+                        )
+                        now_ms = self._clock_ms()
+                        self.store.upsert_person_profile(
+                            person_id=existing_person.matched_id,
+                            display_name=display_name,
+                            description=next_description,
+                            tags=next_tags,
+                            now_ms=now_ms,
+                        )
+                        if external_ref.should_link:
+                            self.store.link_external_user(
+                                person_id=existing_person.matched_id,
+                                external_user_ref=external_ref.external_user_ref,
+                                now_ms=now_ms,
+                            )
+                        return {
+                            "ok": True,
+                            "person_id": existing_person.matched_id,
+                            "outcome": "updated_existing_person",
+                            "matched_person_id": existing_person.matched_id,
+                            "target_quality": target.quality,
+                            "evidence": evidence,
+                            "store_delta": self._store_delta(store_before),
+                        }
+                    raise self._teach_person_conflict_error(
+                        matched_person_id=existing_person.matched_id,
+                        evidence=evidence,
+                        store_before=store_before,
+                    )
+
+            anonymous_match = self._retriever.query_anonymous_person(
+                embedding,
+                threshold=self.anonymous_threshold,
+                margin=self.anonymous_margin,
+            )
+            if anonymous_match is not None:
+                raise MemoryServiceError(
+                    "anonymous_merge_required",
+                    "teach_person matched an active anonymous profile; "
+                    "merge it explicitly",
+                    status_code=409,
+                    details={
+                        "error_code": "anonymous_merge_required",
+                        "outcome": "merge_anonymous_required",
+                        "anonymous_id": anonymous_match.matched_id,
+                        "evidence": self._teach_match_evidence(
+                            anonymous_match,
+                            cached,
+                            target,
+                            interaction_snapshot=interaction_snapshot,
+                        ),
+                        "store_delta": self._store_delta(store_before),
+                    },
                 )
 
             now_ms = self._clock_ms()
@@ -687,6 +804,18 @@ class AppMemoryService:
                 return_exceptions=True,
             )
         self._pending_queries_by_camera.clear()
+
+    async def _drain_pending_query_for_camera(self, camera: str) -> None:
+        pending = self._pending_queries_by_camera.get(camera)
+        if pending is None:
+            return
+        if not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except Exception:
+                pass
+        if pending.done():
+            self._collect_completed_query(camera, pending)
 
     async def _wait_for_teach_embedding_futures(self) -> None:
         while True:
@@ -1343,6 +1472,7 @@ class AppMemoryService:
         target: ResolvedTarget,
     ) -> dict[str, Any] | None:
         embedding: EmbeddingResult | None = None
+        embedding_bytes: bytes | None = None
         for candidate_bytes in _person_embedding_input_candidates(
             plan.cached.frame.jpeg_bytes,
             target,
@@ -1358,8 +1488,9 @@ class AppMemoryService:
                 if exc.code == "no_usable_face":
                     continue
                 return None
+            embedding_bytes = candidate_bytes
             break
-        if embedding is None:
+        if embedding is None or embedding_bytes is None:
             return None
         match = self._retriever.query_person(
             embedding,
@@ -1367,7 +1498,12 @@ class AppMemoryService:
             margin=self.known_person_margin,
         )
         if match is None:
-            return self._query_anonymous_person(plan, target, embedding)
+            return self._query_anonymous_person(
+                plan,
+                target,
+                embedding,
+                embedding_bytes,
+            )
         profile = self.store.get_person_profile(match.matched_id)
         if profile is None:
             return None
@@ -1403,6 +1539,7 @@ class AppMemoryService:
         plan: _QueryPlan,
         target: ResolvedTarget,
         embedding,
+        embedding_bytes: bytes,
     ) -> dict[str, Any] | None:
         if target.quality != "usable":
             return None
@@ -1425,6 +1562,12 @@ class AppMemoryService:
                 anonymous_id=anonymous_id,
                 result=embedding,
                 source_target_type=target.source_target_mode,
+                source_track_ref=_source_track_ref(plan.cached, target),
+                source_frame_ref=_source_frame_ref(plan.cached),
+                crop_hash=_sha256_hex(embedding_bytes),
+                crop_path_or_artifact_ref=None,
+                resolver_target_ref=_resolver_target_ref(plan.cached, target),
+                resolution_reason=target.source_target_mode,
                 now_ms=now_ms,
             )
             return None
@@ -1572,6 +1715,92 @@ class AppMemoryService:
                 for table in sorted(set(before) | set(after))
             },
         }
+
+    def _teach_match_evidence(
+        self,
+        match: MemoryMatch,
+        cached: CachedFrame,
+        target: ResolvedTarget,
+        *,
+        interaction_snapshot: RequestInteractionSnapshot | None = None,
+    ) -> dict[str, Any]:
+        evidence = self._target_evidence(
+            cached,
+            target,
+            interaction_snapshot=interaction_snapshot,
+        )
+        evidence.update(
+            {
+                "memory_match_id": match.memory_match_id,
+                "matched_type": match.matched_type,
+                "matched_id": match.matched_id,
+                "embedding_id": match.embedding_id,
+                "match_type": match.match_type,
+                "match_score": match.match_score,
+                "top2_margin": match.top2_margin,
+                "embedding_model": match.embedding_model,
+                "embedding_version": match.embedding_version,
+            }
+        )
+        return evidence
+
+    def _teach_person_conflict_error(
+        self,
+        *,
+        matched_person_id: str,
+        evidence: dict[str, Any],
+        store_before: dict[str, int],
+        external_user_ref: str | None = None,
+        external_user_person_id: str | None = None,
+    ) -> MemoryServiceError:
+        details: dict[str, Any] = {
+            "error_code": "person_teach_conflict",
+            "outcome": "conflict",
+            "matched_person_id": matched_person_id,
+            "evidence": evidence,
+            "store_delta": self._store_delta(store_before),
+        }
+        if not external_user_ref:
+            return MemoryServiceError(
+                "person_teach_conflict",
+                "teach_person matched an existing person with a different display_name",
+                status_code=409,
+                details=details,
+            )
+        details["external_user_ref"] = external_user_ref
+        if external_user_person_id is not None:
+            details["external_user_person_id"] = external_user_person_id
+        return MemoryServiceError(
+            "person_teach_conflict",
+            "external_user_ref is already linked to a different person",
+            status_code=409,
+            details=details,
+        )
+
+    def _external_ref_decision(
+        self,
+        profile: dict[str, Any],
+        matched_person_id: str,
+    ) -> _ExternalRefDecision:
+        external_user_ref = _optional_text(profile.get("external_user_ref"))
+        if not external_user_ref:
+            return _ExternalRefDecision(
+                external_user_ref="",
+                linked_person_id=None,
+                conflict=False,
+                same_person=False,
+                should_link=False,
+            )
+        linked = self.store.get_person_by_external_user(external_user_ref)
+        linked_person_id = linked["person_id"] if linked is not None else None
+        same_person = linked_person_id == matched_person_id
+        return _ExternalRefDecision(
+            external_user_ref=external_user_ref,
+            linked_person_id=linked_person_id,
+            conflict=linked_person_id is not None and not same_person,
+            same_person=same_person,
+            should_link=linked_person_id is None,
+        )
 
     def _interaction_window_evidence_for_request(
         self,
