@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 
 import pytest
@@ -65,6 +66,104 @@ def test_person_profile_embedding_and_sqlite_vec_retrieval_round_trip(tmp_path) 
         "description": "店长",
         "tags": ["staff"],
     }
+
+
+def test_create_person_with_embedding_commits_profile_embedding_vector_and_provenance(
+    tmp_path,
+) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+
+    result = store.create_person_with_embedding(
+        person_id="person_atomic",
+        display_name="张三",
+        description="店长",
+        tags=("staff",),
+        embedding=embedding(
+            [1.0, 0.0, 0.0, 0.0],
+            embedding_type="face",
+            model="fake-face",
+        ),
+        source_target_type="track_id",
+        source_track_ref="front:track:7",
+        source_frame_ref="front:1:1000",
+        crop_hash=hashlib.sha256(b"person-crop").hexdigest(),
+        crop_path_or_artifact_ref=None,
+        resolver_target_ref="front:track:7",
+        resolution_reason="track_id",
+        now_ms=1000,
+    )
+
+    assert result["person_id"] == "person_atomic"
+    embedding_id = result["embedding_id"]
+    assert store.get_person_profile("person_atomic") == {
+        "person_id": "person_atomic",
+        "display_name": "张三",
+        "description": "店长",
+        "tags": ["staff"],
+    }
+    match = MemoryRetriever(store).query_person(
+        embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        threshold=0.95,
+        margin=0.0,
+    )
+    assert match is not None
+    assert match.embedding_id == embedding_id
+    assert store.get_embedding_provenance(embedding_id) == {
+        "embedding_id": embedding_id,
+        "owner_type": "person",
+        "owner_id": "person_atomic",
+        "source_track_ref": "front:track:7",
+        "source_frame_ref": "front:1:1000",
+        "crop_hash": hashlib.sha256(b"person-crop").hexdigest(),
+        "crop_path_or_artifact_ref": None,
+        "resolver_target_ref": "front:track:7",
+        "resolution_reason": "track_id",
+        "embedding_type": "face",
+        "embedding_model": "fake-face",
+        "embedding_version": "v1",
+        "embedding_dim": 4,
+        "created_at_ms": 1000,
+    }
+
+
+def test_create_person_with_embedding_rolls_back_orphan_rows_on_late_failure(
+    tmp_path,
+) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_person_with_embedding(
+            person_id="person_orphan",
+            display_name="张三",
+            description="店长",
+            tags=("staff",),
+            embedding=embedding(
+                [1.0, 0.0, 0.0, 0.0],
+                embedding_type="face",
+                model="fake-face",
+            ),
+            source_target_type="track_id",
+            source_track_ref="front:track:7",
+            source_frame_ref="front:1:1000",
+            crop_hash=None,
+            crop_path_or_artifact_ref=None,
+            resolver_target_ref="front:track:7",
+            resolution_reason="track_id",
+            now_ms=1000,
+        )
+
+    assert store.get_person_profile("person_orphan") is None
+    assert _count_rows(store, "person_embeddings", "person_id = ?", "person_orphan") == 0
+    assert (
+        _count_rows(
+            store,
+            "person_embedding_vectors",
+            "person_id = ?",
+            "person_orphan",
+        )
+        == 0
+    )
+    assert _count_rows(store, "embedding_provenance", "owner_id = ?", "person_orphan") == 0
 
 
 def test_retriever_rejects_low_score_or_small_margin(tmp_path) -> None:
@@ -182,6 +281,114 @@ def test_scene_memory_uses_separate_sqlite_vec_table(tmp_path) -> None:
     assert match.matched_id == "scene_1"
     assert match.embedding_id == embedding_id
     assert match.match_type == "scene"
+
+
+def test_create_scene_with_embedding_commits_memory_embedding_vector_and_provenance(
+    tmp_path,
+) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=6)
+
+    result = store.create_scene_with_embedding(
+        scene_id="scene_atomic",
+        title="货柜",
+        description="门口货柜",
+        activation_hint="有人停留时介绍货品",
+        target_type="scene",
+        region_id=None,
+        embedding=embedding(
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            embedding_type="scene",
+            model="fake-scene",
+        ),
+        source_target_type="scene",
+        source_track_ref=None,
+        source_frame_ref="front:2:2000",
+        crop_hash=hashlib.sha256(b"scene-frame").hexdigest(),
+        crop_path_or_artifact_ref=None,
+        resolver_target_ref="scene",
+        resolution_reason="scene",
+        now_ms=2000,
+    )
+
+    assert result["scene_id"] == "scene_atomic"
+    embedding_id = result["embedding_id"]
+    assert store.get_scene_memory("scene_atomic") == {
+        "scene_id": "scene_atomic",
+        "title": "货柜",
+        "description": "门口货柜",
+        "activation_hint": "有人停留时介绍货品",
+        "target_type": "scene",
+        "region_id": None,
+    }
+    match = MemoryRetriever(store).query_scene(
+        embedding(
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            embedding_type="scene",
+            model="fake-scene",
+        ),
+        threshold=0.95,
+        margin=0.0,
+    )
+    assert match is not None
+    assert match.embedding_id == embedding_id
+    assert store.get_embedding_provenance(embedding_id) == {
+        "embedding_id": embedding_id,
+        "owner_type": "scene",
+        "owner_id": "scene_atomic",
+        "source_track_ref": None,
+        "source_frame_ref": "front:2:2000",
+        "crop_hash": hashlib.sha256(b"scene-frame").hexdigest(),
+        "crop_path_or_artifact_ref": None,
+        "resolver_target_ref": "scene",
+        "resolution_reason": "scene",
+        "embedding_type": "scene",
+        "embedding_model": "fake-scene",
+        "embedding_version": "v1",
+        "embedding_dim": 6,
+        "created_at_ms": 2000,
+    }
+
+
+def test_create_scene_with_embedding_rolls_back_orphan_rows_on_late_failure(
+    tmp_path,
+) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=6)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_scene_with_embedding(
+            scene_id="scene_orphan",
+            title="货柜",
+            description="门口货柜",
+            activation_hint="有人停留时介绍货品",
+            target_type="scene",
+            region_id=None,
+            embedding=embedding(
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                embedding_type="scene",
+                model="fake-scene",
+            ),
+            source_target_type="scene",
+            source_track_ref=None,
+            source_frame_ref="front:2:2000",
+            crop_hash=None,
+            crop_path_or_artifact_ref=None,
+            resolver_target_ref="scene",
+            resolution_reason="scene",
+            now_ms=2000,
+        )
+
+    assert store.get_scene_memory("scene_orphan") is None
+    assert _count_rows(store, "scene_embeddings", "scene_id = ?", "scene_orphan") == 0
+    assert (
+        _count_rows(
+            store,
+            "scene_embedding_vectors",
+            "scene_id = ?",
+            "scene_orphan",
+        )
+        == 0
+    )
+    assert _count_rows(store, "embedding_provenance", "owner_id = ?", "scene_orphan") == 0
 
 
 def test_scene_memory_can_store_optional_region_id(tmp_path) -> None:
@@ -478,3 +685,16 @@ def test_store_persists_summary_external_link_and_match_record(tmp_path) -> None
         "frame_id": 7,
         "frame_timestamp_ms": 1300,
     }
+
+
+def _count_rows(
+    store: MemoryStore,
+    table: str,
+    where: str,
+    *params: object,
+) -> int:
+    row = store.connection.execute(
+        f"SELECT COUNT(*) AS count FROM {table} WHERE {where}",
+        params,
+    ).fetchone()
+    return int(row["count"])

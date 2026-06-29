@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 import time
 from io import BytesIO
@@ -205,6 +206,53 @@ async def test_teach_person_sends_decodable_face_safe_person_crop(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_teach_person_persists_embedding_provenance_for_resolved_target(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    person = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三"},
+        }
+    )
+
+    assert len(backend.person_inputs) == 1
+    expected_embedding = FakeEmbeddingBackend(
+        person_dim=8,
+        scene_dim=8,
+    ).embed_person(backend.person_inputs[0])
+    matches = subject.store.search_person_embeddings(expected_embedding, limit=1)
+    assert len(matches) == 1
+    assert matches[0].matched_id == person["person_id"]
+    assert subject.store.get_embedding_provenance(matches[0].embedding_id) == {
+        "embedding_id": matches[0].embedding_id,
+        "owner_type": "person",
+        "owner_id": person["person_id"],
+        "source_track_ref": "front:track:7",
+        "source_frame_ref": "front:1:1000",
+        "crop_hash": hashlib.sha256(backend.person_inputs[0]).hexdigest(),
+        "crop_path_or_artifact_ref": None,
+        "resolver_target_ref": "front:track:7",
+        "resolution_reason": "track_id",
+        "embedding_type": "face",
+        "embedding_model": "fake-face",
+        "embedding_version": "test-v1",
+        "embedding_dim": 8,
+        "created_at_ms": 10000,
+    }
+
+
+@pytest.mark.asyncio
 async def test_teach_person_bbox_target_uses_face_safe_person_crop(tmp_path):
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     subject = service(tmp_path, embedding_backend=backend)
@@ -312,6 +360,53 @@ async def test_teach_scene_scene_mode_sends_original_decodable_jpeg_to_backend(t
     assert backend.scene_inputs == [JPEG_1280X720]
     scene_image = _decoded_jpeg(backend.scene_inputs[0])
     assert scene_image.size == (1280, 720)
+
+
+@pytest.mark.asyncio
+async def test_teach_scene_persists_embedding_provenance_for_full_frame(tmp_path):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    scene = await subject.teach_scene(
+        {
+            "camera": "front",
+            "target": {"mode": "scene"},
+            "memory": {"title": "新品展示区"},
+        }
+    )
+
+    assert backend.scene_inputs == [JPEG_1280X720]
+    expected_embedding = FakeEmbeddingBackend(
+        person_dim=8,
+        scene_dim=8,
+    ).embed_scene(backend.scene_inputs[0])
+    matches = subject.store.search_scene_embeddings(expected_embedding, limit=1)
+    assert len(matches) == 1
+    assert matches[0].matched_id == scene["scene_id"]
+    assert subject.store.get_embedding_provenance(matches[0].embedding_id) == {
+        "embedding_id": matches[0].embedding_id,
+        "owner_type": "scene",
+        "owner_id": scene["scene_id"],
+        "source_track_ref": None,
+        "source_frame_ref": "front:1:1000",
+        "crop_hash": hashlib.sha256(JPEG_1280X720).hexdigest(),
+        "crop_path_or_artifact_ref": None,
+        "resolver_target_ref": "scene",
+        "resolution_reason": "scene",
+        "embedding_type": "scene",
+        "embedding_model": "fake-scene",
+        "embedding_version": "test-v1",
+        "embedding_dim": 8,
+        "created_at_ms": 10000,
+    }
 
 
 @pytest.mark.asyncio

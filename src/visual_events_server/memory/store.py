@@ -91,28 +91,14 @@ class MemoryStore:
         now_ms: int,
     ) -> None:
         with self._lock:
-            self.connection.execute(
-                """
-                INSERT INTO person_profiles (
-                  person_id, display_name, description, tags_json, created_at_ms, updated_at_ms
+            with self.connection:
+                self._upsert_person_profile(
+                    person_id=person_id,
+                    display_name=display_name,
+                    description=description,
+                    tags=tags,
+                    now_ms=now_ms,
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(person_id) DO UPDATE SET
-                  display_name = excluded.display_name,
-                  description = excluded.description,
-                  tags_json = excluded.tags_json,
-                  updated_at_ms = excluded.updated_at_ms
-                """,
-                (
-                    person_id,
-                    display_name,
-                    description,
-                    json.dumps(list(tags), ensure_ascii=False, separators=(",", ":")),
-                    now_ms,
-                    now_ms,
-                ),
-            )
-            self.connection.commit()
 
     def get_person_profile(self, person_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -133,6 +119,61 @@ class MemoryStore:
             "tags": json.loads(row["tags_json"]),
         }
 
+    def create_person_with_embedding(
+        self,
+        *,
+        person_id: str,
+        display_name: str,
+        description: str,
+        tags: tuple[str, ...],
+        embedding: EmbeddingResult,
+        source_target_type: str,
+        source_track_ref: str | None,
+        source_frame_ref: str,
+        crop_hash: str,
+        crop_path_or_artifact_ref: str | None,
+        resolver_target_ref: str,
+        resolution_reason: str,
+        now_ms: int,
+    ) -> dict[str, str]:
+        vector = self._checked_vector(embedding.vector, expected_dim=self.person_dim)
+        embedding_id = _new_id("emb_person")
+        vector_blob = _serialize_vector(vector)
+        with self._lock:
+            with self.connection:
+                self._upsert_person_profile(
+                    person_id=person_id,
+                    display_name=display_name,
+                    description=description,
+                    tags=tags,
+                    now_ms=now_ms,
+                )
+                self._insert_person_embedding_rows(
+                    embedding_id=embedding_id,
+                    person_id=person_id,
+                    result=embedding,
+                    source_target_type=source_target_type,
+                    vector_blob=vector_blob,
+                    now_ms=now_ms,
+                )
+                self._insert_embedding_provenance(
+                    embedding_id=embedding_id,
+                    owner_type="person",
+                    owner_id=person_id,
+                    source_track_ref=source_track_ref,
+                    source_frame_ref=source_frame_ref,
+                    crop_hash=crop_hash,
+                    crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                    resolver_target_ref=resolver_target_ref,
+                    resolution_reason=resolution_reason,
+                    embedding_type=embedding.embedding_type,
+                    embedding_model=embedding.embedding_model,
+                    embedding_version=embedding.embedding_version,
+                    embedding_dim=self.person_dim,
+                    now_ms=now_ms,
+                )
+        return {"person_id": person_id, "embedding_id": embedding_id}
+
     def create_scene_memory(
         self,
         *,
@@ -145,33 +186,16 @@ class MemoryStore:
         region_id: str | None = None,
     ) -> None:
         with self._lock:
-            self.connection.execute(
-                """
-                INSERT INTO scene_memories (
-                  scene_id, title, description, activation_hint, target_type, region_id,
-                  created_at_ms, updated_at_ms
+            with self.connection:
+                self._upsert_scene_memory(
+                    scene_id=scene_id,
+                    title=title,
+                    description=description,
+                    activation_hint=activation_hint,
+                    target_type=target_type,
+                    region_id=region_id,
+                    now_ms=now_ms,
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scene_id) DO UPDATE SET
-                  title = excluded.title,
-                  description = excluded.description,
-                  activation_hint = excluded.activation_hint,
-                  target_type = excluded.target_type,
-                  region_id = excluded.region_id,
-                  updated_at_ms = excluded.updated_at_ms
-                """,
-                (
-                    scene_id,
-                    title,
-                    description,
-                    activation_hint,
-                    target_type,
-                    region_id,
-                    now_ms,
-                    now_ms,
-                ),
-            )
-            self.connection.commit()
 
     def get_scene_memory(self, scene_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -193,6 +217,65 @@ class MemoryStore:
             "target_type": row["target_type"],
             "region_id": row["region_id"],
         }
+
+    def create_scene_with_embedding(
+        self,
+        *,
+        scene_id: str,
+        title: str,
+        description: str,
+        activation_hint: str,
+        target_type: str,
+        region_id: str | None,
+        embedding: EmbeddingResult,
+        source_target_type: str,
+        source_track_ref: str | None,
+        source_frame_ref: str,
+        crop_hash: str,
+        crop_path_or_artifact_ref: str | None,
+        resolver_target_ref: str,
+        resolution_reason: str,
+        now_ms: int,
+    ) -> dict[str, str]:
+        vector = self._checked_vector(embedding.vector, expected_dim=self.scene_dim)
+        embedding_id = _new_id("emb_scene")
+        vector_blob = _serialize_vector(vector)
+        with self._lock:
+            with self.connection:
+                self._upsert_scene_memory(
+                    scene_id=scene_id,
+                    title=title,
+                    description=description,
+                    activation_hint=activation_hint,
+                    target_type=target_type,
+                    region_id=region_id,
+                    now_ms=now_ms,
+                )
+                self._insert_scene_embedding_rows(
+                    embedding_id=embedding_id,
+                    scene_id=scene_id,
+                    result=embedding,
+                    source_target_type=source_target_type,
+                    vector_blob=vector_blob,
+                    now_ms=now_ms,
+                )
+                self._insert_embedding_provenance(
+                    embedding_id=embedding_id,
+                    owner_type="scene",
+                    owner_id=scene_id,
+                    source_track_ref=source_track_ref,
+                    source_frame_ref=source_frame_ref,
+                    crop_hash=crop_hash,
+                    crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                    resolver_target_ref=resolver_target_ref,
+                    resolution_reason=resolution_reason,
+                    embedding_type=embedding.embedding_type,
+                    embedding_model=embedding.embedding_model,
+                    embedding_version=embedding.embedding_version,
+                    embedding_dim=self.scene_dim,
+                    now_ms=now_ms,
+                )
+        return {"scene_id": scene_id, "embedding_id": embedding_id}
 
     def create_anonymous_profile(
         self,
@@ -494,47 +577,13 @@ class MemoryStore:
         vector_blob = _serialize_vector(vector)
         with self._lock:
             with self.connection:
-                cursor = self.connection.execute(
-                    """
-                    INSERT INTO person_embeddings (
-                      embedding_id, person_id, embedding_type, embedding_model,
-                      embedding_version, embedding_dim, source_target_type,
-                      vector_blob, quality, created_at_ms
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        embedding_id,
-                        person_id,
-                        result.embedding_type,
-                        result.embedding_model,
-                        result.embedding_version,
-                        self.person_dim,
-                        source_target_type,
-                        vector_blob,
-                        result.quality,
-                        now_ms,
-                    ),
-                )
-                self.connection.execute(
-                    """
-                    INSERT INTO person_embedding_vectors(
-                      rowid, embedding, embedding_id, person_id, embedding_type,
-                      embedding_model, embedding_version, embedding_dim, source_target_type
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        cursor.lastrowid,
-                        vector_blob,
-                        embedding_id,
-                        person_id,
-                        result.embedding_type,
-                        result.embedding_model,
-                        result.embedding_version,
-                        self.person_dim,
-                        source_target_type,
-                    ),
+                self._insert_person_embedding_rows(
+                    embedding_id=embedding_id,
+                    person_id=person_id,
+                    result=result,
+                    source_target_type=source_target_type,
+                    vector_blob=vector_blob,
+                    now_ms=now_ms,
                 )
         return embedding_id
 
@@ -551,49 +600,48 @@ class MemoryStore:
         vector_blob = _serialize_vector(vector)
         with self._lock:
             with self.connection:
-                cursor = self.connection.execute(
-                    """
-                    INSERT INTO scene_embeddings (
-                      embedding_id, scene_id, embedding_type, embedding_model,
-                      embedding_version, embedding_dim, source_target_type,
-                      vector_blob, quality, created_at_ms
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        embedding_id,
-                        scene_id,
-                        result.embedding_type,
-                        result.embedding_model,
-                        result.embedding_version,
-                        self.scene_dim,
-                        source_target_type,
-                        vector_blob,
-                        result.quality,
-                        now_ms,
-                    ),
-                )
-                self.connection.execute(
-                    """
-                    INSERT INTO scene_embedding_vectors(
-                      rowid, embedding, embedding_id, scene_id, embedding_type,
-                      embedding_model, embedding_version, embedding_dim, source_target_type
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        cursor.lastrowid,
-                        vector_blob,
-                        embedding_id,
-                        scene_id,
-                        result.embedding_type,
-                        result.embedding_model,
-                        result.embedding_version,
-                        self.scene_dim,
-                        source_target_type,
-                    ),
+                self._insert_scene_embedding_rows(
+                    embedding_id=embedding_id,
+                    scene_id=scene_id,
+                    result=result,
+                    source_target_type=source_target_type,
+                    vector_blob=vector_blob,
+                    now_ms=now_ms,
                 )
         return embedding_id
+
+    def get_embedding_provenance(self, embedding_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.connection.execute(
+                """
+                SELECT
+                  embedding_id, owner_type, owner_id, source_track_ref, source_frame_ref,
+                  crop_hash, crop_path_or_artifact_ref, resolver_target_ref,
+                  resolution_reason, embedding_type, embedding_model, embedding_version,
+                  embedding_dim, created_at_ms
+                FROM embedding_provenance
+                WHERE embedding_id = ?
+                """,
+                (embedding_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "embedding_id": row["embedding_id"],
+            "owner_type": row["owner_type"],
+            "owner_id": row["owner_id"],
+            "source_track_ref": row["source_track_ref"],
+            "source_frame_ref": row["source_frame_ref"],
+            "crop_hash": row["crop_hash"],
+            "crop_path_or_artifact_ref": row["crop_path_or_artifact_ref"],
+            "resolver_target_ref": row["resolver_target_ref"],
+            "resolution_reason": row["resolution_reason"],
+            "embedding_type": row["embedding_type"],
+            "embedding_model": row["embedding_model"],
+            "embedding_version": row["embedding_version"],
+            "embedding_dim": int(row["embedding_dim"]),
+            "created_at_ms": int(row["created_at_ms"]),
+        }
 
     def add_anonymous_embedding(
         self,
@@ -1025,6 +1073,227 @@ class MemoryStore:
             for row in rows
         ]
 
+    def _upsert_person_profile(
+        self,
+        *,
+        person_id: str,
+        display_name: str,
+        description: str,
+        tags: tuple[str, ...],
+        now_ms: int,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO person_profiles (
+              person_id, display_name, description, tags_json, created_at_ms, updated_at_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(person_id) DO UPDATE SET
+              display_name = excluded.display_name,
+              description = excluded.description,
+              tags_json = excluded.tags_json,
+              updated_at_ms = excluded.updated_at_ms
+            """,
+            (
+                person_id,
+                display_name,
+                description,
+                json.dumps(list(tags), ensure_ascii=False, separators=(",", ":")),
+                now_ms,
+                now_ms,
+            ),
+        )
+
+    def _upsert_scene_memory(
+        self,
+        *,
+        scene_id: str,
+        title: str,
+        description: str,
+        activation_hint: str,
+        target_type: str,
+        region_id: str | None,
+        now_ms: int,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO scene_memories (
+              scene_id, title, description, activation_hint, target_type, region_id,
+              created_at_ms, updated_at_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scene_id) DO UPDATE SET
+              title = excluded.title,
+              description = excluded.description,
+              activation_hint = excluded.activation_hint,
+              target_type = excluded.target_type,
+              region_id = excluded.region_id,
+              updated_at_ms = excluded.updated_at_ms
+            """,
+            (
+                scene_id,
+                title,
+                description,
+                activation_hint,
+                target_type,
+                region_id,
+                now_ms,
+                now_ms,
+            ),
+        )
+
+    def _insert_person_embedding_rows(
+        self,
+        *,
+        embedding_id: str,
+        person_id: str,
+        result: EmbeddingResult,
+        source_target_type: str,
+        vector_blob: bytes,
+        now_ms: int,
+    ) -> None:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO person_embeddings (
+              embedding_id, person_id, embedding_type, embedding_model,
+              embedding_version, embedding_dim, source_target_type,
+              vector_blob, quality, created_at_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                embedding_id,
+                person_id,
+                result.embedding_type,
+                result.embedding_model,
+                result.embedding_version,
+                self.person_dim,
+                source_target_type,
+                vector_blob,
+                result.quality,
+                now_ms,
+            ),
+        )
+        self.connection.execute(
+            """
+            INSERT INTO person_embedding_vectors(
+              rowid, embedding, embedding_id, person_id, embedding_type,
+              embedding_model, embedding_version, embedding_dim, source_target_type
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cursor.lastrowid,
+                vector_blob,
+                embedding_id,
+                person_id,
+                result.embedding_type,
+                result.embedding_model,
+                result.embedding_version,
+                self.person_dim,
+                source_target_type,
+            ),
+        )
+
+    def _insert_scene_embedding_rows(
+        self,
+        *,
+        embedding_id: str,
+        scene_id: str,
+        result: EmbeddingResult,
+        source_target_type: str,
+        vector_blob: bytes,
+        now_ms: int,
+    ) -> None:
+        cursor = self.connection.execute(
+            """
+            INSERT INTO scene_embeddings (
+              embedding_id, scene_id, embedding_type, embedding_model,
+              embedding_version, embedding_dim, source_target_type,
+              vector_blob, quality, created_at_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                embedding_id,
+                scene_id,
+                result.embedding_type,
+                result.embedding_model,
+                result.embedding_version,
+                self.scene_dim,
+                source_target_type,
+                vector_blob,
+                result.quality,
+                now_ms,
+            ),
+        )
+        self.connection.execute(
+            """
+            INSERT INTO scene_embedding_vectors(
+              rowid, embedding, embedding_id, scene_id, embedding_type,
+              embedding_model, embedding_version, embedding_dim, source_target_type
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cursor.lastrowid,
+                vector_blob,
+                embedding_id,
+                scene_id,
+                result.embedding_type,
+                result.embedding_model,
+                result.embedding_version,
+                self.scene_dim,
+                source_target_type,
+            ),
+        )
+
+    def _insert_embedding_provenance(
+        self,
+        *,
+        embedding_id: str,
+        owner_type: str,
+        owner_id: str,
+        source_track_ref: str | None,
+        source_frame_ref: str,
+        crop_hash: str,
+        crop_path_or_artifact_ref: str | None,
+        resolver_target_ref: str,
+        resolution_reason: str,
+        embedding_type: str,
+        embedding_model: str,
+        embedding_version: str,
+        embedding_dim: int,
+        now_ms: int,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO embedding_provenance (
+              embedding_id, owner_type, owner_id, source_track_ref, source_frame_ref,
+              crop_hash, crop_path_or_artifact_ref, resolver_target_ref,
+              resolution_reason, embedding_type, embedding_model, embedding_version,
+              embedding_dim, created_at_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                embedding_id,
+                owner_type,
+                owner_id,
+                source_track_ref,
+                source_frame_ref,
+                crop_hash,
+                crop_path_or_artifact_ref,
+                resolver_target_ref,
+                resolution_reason,
+                embedding_type,
+                embedding_model,
+                embedding_version,
+                embedding_dim,
+                now_ms,
+            ),
+        )
+
     def _initialize_schema(self) -> None:
         self.connection.executescript(
             f"""
@@ -1104,6 +1373,23 @@ class MemoryStore:
               source_target_type TEXT NOT NULL,
               vector_blob BLOB NOT NULL,
               quality REAL NOT NULL,
+              created_at_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS embedding_provenance (
+              embedding_id TEXT PRIMARY KEY,
+              owner_type TEXT NOT NULL,
+              owner_id TEXT NOT NULL,
+              source_track_ref TEXT,
+              source_frame_ref TEXT NOT NULL,
+              crop_hash TEXT NOT NULL,
+              crop_path_or_artifact_ref TEXT,
+              resolver_target_ref TEXT NOT NULL,
+              resolution_reason TEXT NOT NULL,
+              embedding_type TEXT NOT NULL,
+              embedding_model TEXT NOT NULL,
+              embedding_version TEXT NOT NULL,
+              embedding_dim INTEGER NOT NULL,
               created_at_ms INTEGER NOT NULL
             );
 

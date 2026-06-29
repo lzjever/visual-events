@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import threading
@@ -179,31 +180,33 @@ class AppMemoryService:
         display_name = _required_text(profile, "display_name")
         description = _optional_text(profile.get("description"))
         tags = tuple(str(tag) for tag in profile.get("tags", []) if str(tag))
+        embedding_bytes = _person_embedding_bytes(cached.frame.jpeg_bytes, target)
         try:
-            embedding = self.embedding_backend.embed_person(
-                _person_embedding_bytes(cached.frame.jpeg_bytes, target)
-            )
+            embedding = self.embedding_backend.embed_person(embedding_bytes)
         except EmbeddingUnavailable as exc:
             raise MemoryServiceError(exc.code, exc.message, status_code=503) from exc
 
         now_ms = self._clock_ms()
         person_id = _public_id("person")
-        self.store.upsert_person_profile(
+        created = self.store.create_person_with_embedding(
             person_id=person_id,
             display_name=display_name,
             description=description,
             tags=tags,
-            now_ms=now_ms,
-        )
-        self.store.add_person_embedding(
-            person_id=person_id,
-            result=embedding,
+            embedding=embedding,
             source_target_type=target.source_target_mode,
+            source_track_ref=_source_track_ref(cached, target),
+            source_frame_ref=_source_frame_ref(cached),
+            crop_hash=_sha256_hex(embedding_bytes),
+            crop_path_or_artifact_ref=None,
+            resolver_target_ref=_resolver_target_ref(cached, target),
+            resolution_reason=target.source_target_mode,
             now_ms=now_ms,
         )
         return {
             "ok": True,
-            "person_id": person_id,
+            "person_id": created["person_id"],
+            "embedding_id": created["embedding_id"],
             "embedding_count": 1,
             "target_quality": target.quality,
         }
@@ -223,33 +226,35 @@ class AppMemoryService:
         description = _optional_text(memory.get("description"))
         activation_hint = _optional_text(memory.get("activation_hint"))
         region_id = _optional_text(memory.get("region_id")) or None
+        embedding_bytes = _target_bytes(cached.frame.jpeg_bytes, target)
         try:
-            embedding = self.embedding_backend.embed_scene(
-                _target_bytes(cached.frame.jpeg_bytes, target)
-            )
+            embedding = self.embedding_backend.embed_scene(embedding_bytes)
         except EmbeddingUnavailable as exc:
             raise MemoryServiceError(exc.code, exc.message, status_code=503) from exc
 
         now_ms = self._clock_ms()
         scene_id = _public_id("scene")
-        self.store.create_scene_memory(
+        created = self.store.create_scene_with_embedding(
             scene_id=scene_id,
             title=title,
             description=description,
             activation_hint=activation_hint,
             target_type=target.target_type,
             region_id=region_id,
-            now_ms=now_ms,
-        )
-        self.store.add_scene_embedding(
-            scene_id=scene_id,
-            result=embedding,
+            embedding=embedding,
             source_target_type=target.source_target_mode,
+            source_track_ref=_source_track_ref(cached, target),
+            source_frame_ref=_source_frame_ref(cached),
+            crop_hash=_sha256_hex(embedding_bytes),
+            crop_path_or_artifact_ref=None,
+            resolver_target_ref=_resolver_target_ref(cached, target),
+            resolution_reason=target.source_target_mode,
             now_ms=now_ms,
         )
         return {
             "ok": True,
-            "scene_id": scene_id,
+            "scene_id": created["scene_id"],
+            "embedding_id": created["embedding_id"],
             "embedding_count": 1,
             "target_quality": target.quality,
         }
@@ -766,6 +771,36 @@ def _target_request(request: dict[str, Any]) -> TargetRequest:
             point_uv=(float(raw_point[0]), float(raw_point[1])),
         )
     return TargetRequest(mode=mode)
+
+
+def _source_frame_ref(cached: CachedFrame) -> str:
+    frame = cached.frame
+    return f"{frame.camera}:{frame.frame_id}:{frame.timestamp_ms}"
+
+
+def _source_track_ref(cached: CachedFrame, target: ResolvedTarget) -> str | None:
+    if target.track_id is None:
+        return None
+    return f"{cached.frame.camera}:track:{target.track_id}"
+
+
+def _resolver_target_ref(cached: CachedFrame, target: ResolvedTarget) -> str:
+    if target.source_target_mode == "scene":
+        return "scene"
+    source_track_ref = _source_track_ref(cached, target)
+    if source_track_ref is not None:
+        return source_track_ref
+    bbox = ",".join(_short_float(value) for value in target.bbox_xyxy)
+    return f"{target.source_target_mode}:{target.target_type}:{bbox}"
+
+
+def _sha256_hex(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _short_float(value: float) -> str:
+    text = f"{float(value):.3f}"
+    return text.rstrip("0").rstrip(".")
 
 
 def _tracks_from_visual_state(
