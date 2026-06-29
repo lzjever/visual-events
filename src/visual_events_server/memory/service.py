@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
@@ -41,6 +41,7 @@ from .target_resolver import (
 _LOGGER = logging.getLogger(__name__)
 
 _PERSON_EMBEDDING_CROP_MARGIN_RATIO = 0.10
+_PERSON_EMBEDDING_CONTEXT_MARGIN_RATIO = 0.50
 _MAX_PERSON_QUERY_TRACKS = 4
 
 
@@ -235,11 +236,39 @@ class AppMemoryService:
             display_name = _required_text(profile, "display_name")
             description = _optional_text(profile.get("description"))
             tags = tuple(str(tag) for tag in profile.get("tags", []) if str(tag))
-            embedding_bytes = _person_embedding_bytes(cached.frame.jpeg_bytes, target)
-            embedding = await self._run_teach_embedding(
-                self.embedding_backend.embed_person,
-                embedding_bytes,
-            )
+            embedding: EmbeddingResult | None = None
+            embedding_bytes: bytes | None = None
+            first_no_usable_face: MemoryServiceError | None = None
+            for candidate_bytes in _person_embedding_input_candidates(
+                cached.frame.jpeg_bytes,
+                target,
+                tracks=(
+                    cached.memory_snapshot.tracks
+                    if cached.memory_snapshot is not None
+                    else None
+                ),
+            ):
+                try:
+                    embedding = await self._run_teach_embedding(
+                        self.embedding_backend.embed_person,
+                        candidate_bytes,
+                    )
+                except MemoryServiceError as exc:
+                    if exc.code != "no_usable_face":
+                        raise
+                    if first_no_usable_face is None:
+                        first_no_usable_face = exc
+                    continue
+                embedding_bytes = candidate_bytes
+                break
+            if embedding is None or embedding_bytes is None:
+                if first_no_usable_face is not None:
+                    raise first_no_usable_face
+                raise MemoryServiceError(
+                    "embedding_unavailable",
+                    "person embedding is unavailable",
+                    status_code=503,
+                )
 
             now_ms = self._clock_ms()
             crop_hash = _sha256_hex(embedding_bytes)
@@ -914,11 +943,24 @@ class AppMemoryService:
         plan: _QueryPlan,
         target: ResolvedTarget,
     ) -> dict[str, Any] | None:
-        try:
-            embedding = self.embedding_backend.embed_person(
-                _person_embedding_bytes(plan.cached.frame.jpeg_bytes, target)
-            )
-        except EmbeddingUnavailable:
+        embedding: EmbeddingResult | None = None
+        for candidate_bytes in _person_embedding_input_candidates(
+            plan.cached.frame.jpeg_bytes,
+            target,
+            tracks=(
+                plan.cached.memory_snapshot.tracks
+                if plan.cached.memory_snapshot is not None
+                else None
+            ),
+        ):
+            try:
+                embedding = self.embedding_backend.embed_person(candidate_bytes)
+            except EmbeddingUnavailable as exc:
+                if exc.code == "no_usable_face":
+                    continue
+                return None
+            break
+        if embedding is None:
             return None
         match = self._retriever.query_person(
             embedding,
@@ -1425,6 +1467,76 @@ def _person_embedding_bytes(jpeg_bytes: bytes, target: ResolvedTarget) -> bytes:
         target,
         margin_ratio=_PERSON_EMBEDDING_CROP_MARGIN_RATIO,
     )
+
+
+def _person_embedding_input_candidates(
+    jpeg_bytes: bytes,
+    target: ResolvedTarget,
+    *,
+    tracks: Iterable[TrackSnapshot] | None = None,
+) -> Iterator[bytes]:
+    yield _person_embedding_bytes(jpeg_bytes, target)
+    if target.target_type != "person":
+        return
+
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError as exc:
+        raise MemoryServiceError(
+            "image_crop_unavailable",
+            "Pillow is required to crop memory target images",
+            status_code=503,
+        ) from exc
+
+    try:
+        with Image.open(BytesIO(jpeg_bytes)) as image:
+            source = image.convert("RGB")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise MemoryServiceError(
+            "invalid_frame_image",
+            "cached frame JPEG could not be decoded",
+        ) from exc
+
+    left, top, right, bottom = _target_crop_box(
+        target,
+        image_width=source.width,
+        image_height=source.height,
+        margin_ratio=_PERSON_EMBEDDING_CONTEXT_MARGIN_RATIO,
+    )
+    masked = Image.new("RGB", source.size, (0, 0, 0))
+    masked.paste(source.crop((left, top, right, bottom)), (left, top))
+    if tracks is not None:
+        for track in tracks:
+            if (
+                track.lost_ms != 0
+                or track.class_name != "person"
+                or track.track_id == target.track_id
+            ):
+                continue
+            other = ResolvedTarget(
+                source_target_mode="track_id",
+                target_type="person",
+                bbox_xyxy=track.bbox_xyxy,
+                track_id=track.track_id,
+                quality="usable",
+            )
+            try:
+                other_left, other_top, other_right, other_bottom = _target_crop_box(
+                    other,
+                    image_width=source.width,
+                    image_height=source.height,
+                    margin_ratio=0.0,
+                )
+            except MemoryServiceError:
+                continue
+            masked.paste(
+                (0, 0, 0),
+                (other_left, other_top, other_right, other_bottom),
+            )
+
+    buffer = BytesIO()
+    masked.save(buffer, format="JPEG", quality=95)
+    yield buffer.getvalue()
 
 
 def _crop_target_jpeg(

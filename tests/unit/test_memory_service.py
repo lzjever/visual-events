@@ -12,10 +12,13 @@ import pytest
 from PIL import Image, ImageDraw
 
 from visual_events_server.memory import AppMemoryService, MemoryServiceError
-from visual_events_server.memory.embedding import EmbeddingResult
+from visual_events_server.memory.embedding import EmbeddingResult, EmbeddingUnavailable
 from visual_events_server.memory.embedding import FakeEmbeddingBackend
 from visual_events_server.memory.frame_cache import MemoryFrameSnapshot
-from visual_events_server.memory.service import _target_bytes
+from visual_events_server.memory.service import (
+    _person_embedding_input_candidates,
+    _target_bytes,
+)
 from visual_events_server.memory.store import MemoryStore
 from visual_events_server.memory.target_resolver import ResolvedTarget
 from visual_events_server.attention import AttentionResult
@@ -100,6 +103,47 @@ class SequencePersonEmbeddingBackend(FakeEmbeddingBackend):
         )
 
 
+class ScriptedPersonEmbeddingBackend(FakeEmbeddingBackend):
+    def __init__(
+        self,
+        *,
+        person_outcomes: list[tuple[float, ...] | EmbeddingUnavailable],
+        scene_dim: int = 8,
+    ) -> None:
+        super().__init__(
+            person_dim=len(_first_vector(person_outcomes)),
+            scene_dim=scene_dim,
+        )
+        self._person_outcomes = list(person_outcomes)
+        self.person_inputs: list[bytes] = []
+        self.scene_inputs: list[bytes] = []
+
+    def embed_person(self, image_crop: bytes):
+        self.person_inputs.append(image_crop)
+        if not self._person_outcomes:
+            raise AssertionError("no person embedding outcome queued")
+        outcome = self._person_outcomes.pop(0)
+        if isinstance(outcome, EmbeddingUnavailable):
+            raise outcome
+        return EmbeddingResult(
+            vector=outcome,
+            embedding_type="face",
+            embedding_model=self.person_model,
+            embedding_version=self.model_version,
+            quality=1.0,
+        )
+
+    def embed_scene(self, image_or_crop: bytes):
+        self.scene_inputs.append(image_or_crop)
+        return super().embed_scene(image_or_crop)
+
+    def set_person_outcomes(
+        self,
+        outcomes: list[tuple[float, ...] | EmbeddingUnavailable],
+    ) -> None:
+        self._person_outcomes = list(outcomes)
+
+
 class RecordingEmbeddingBackend(FakeEmbeddingBackend):
     def __init__(self, *, person_dim: int, scene_dim: int) -> None:
         super().__init__(person_dim=person_dim, scene_dim=scene_dim)
@@ -113,6 +157,19 @@ class RecordingEmbeddingBackend(FakeEmbeddingBackend):
     def embed_scene(self, image_or_crop: bytes):
         self.scene_inputs.append(image_or_crop)
         return super().embed_scene(image_or_crop)
+
+
+def _first_vector(
+    outcomes: list[tuple[float, ...] | EmbeddingUnavailable],
+) -> tuple[float, ...]:
+    for outcome in outcomes:
+        if not isinstance(outcome, EmbeddingUnavailable):
+            return outcome
+    return (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def _no_usable_face() -> EmbeddingUnavailable:
+    return EmbeddingUnavailable("no_usable_face", "no usable face detected")
 
 
 def _jpeg_1280x720() -> bytes:
@@ -708,6 +765,100 @@ async def test_teach_person_persists_embedding_provenance_for_resolved_target(tm
 
 
 @pytest.mark.asyncio
+async def test_teach_person_falls_back_to_target_masked_context_on_no_usable_face(
+    tmp_path,
+):
+    success_vector = _unit_vector(0)
+    backend = ScriptedPersonEmbeddingBackend(
+        person_outcomes=[_no_usable_face(), success_vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    person = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三"},
+        }
+    )
+
+    target = ResolvedTarget(
+        source_target_mode="track_id",
+        target_type="person",
+        bbox_xyxy=(300.0, 100.0, 700.0, 650.0),
+        track_id=7,
+        quality="usable",
+    )
+    assert len(backend.person_inputs) == 2
+    assert backend.person_inputs[0] == _target_bytes(JPEG_1280X720, target)
+    fallback = _decoded_jpeg(backend.person_inputs[1])
+    original = _decoded_jpeg(JPEG_1280X720)
+    assert fallback.size == original.size
+    _assert_rgb_close(fallback.getpixel((20, 20)), (0, 0, 0), tolerance=10)
+    _assert_rgb_close(fallback.getpixel((500, 150)), original.getpixel((500, 150)))
+
+    matches = subject.store.search_person_embeddings(
+        EmbeddingResult(
+            vector=success_vector,
+            embedding_type="face",
+            embedding_model=backend.person_model,
+            embedding_version=backend.model_version,
+            quality=1.0,
+        ),
+        limit=1,
+    )
+    assert len(matches) == 1
+    assert matches[0].matched_id == person["person_id"]
+    provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
+    assert provenance["crop_hash"] == hashlib.sha256(
+        backend.person_inputs[1],
+    ).hexdigest()
+    assert person["evidence"]["crop_hash"] == provenance["crop_hash"]
+    assert _count_rows(subject.store, "person_profiles") == 1
+    assert _count_rows(subject.store, "person_embeddings") == 1
+    assert _count_rows(subject.store, "embedding_provenance") == 1
+
+
+@pytest.mark.asyncio
+async def test_teach_person_no_usable_face_all_candidates_does_not_write(tmp_path):
+    backend = ScriptedPersonEmbeddingBackend(
+        person_outcomes=[_no_usable_face(), _no_usable_face()],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "张三"},
+            }
+        )
+
+    assert exc.value.code == "no_usable_face"
+    assert len(backend.person_inputs) == 2
+    assert _count_rows(subject.store, "person_profiles") == 0
+    assert _count_rows(subject.store, "person_embeddings") == 0
+    assert _count_rows(subject.store, "embedding_provenance") == 0
+
+
+@pytest.mark.asyncio
 async def test_self_introduction_requires_active_interaction_target_and_does_not_fallback(
     tmp_path,
 ):
@@ -1076,6 +1227,78 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
 
 
 @pytest.mark.asyncio
+async def test_third_person_fallback_keeps_introduced_person_evidence(tmp_path):
+    success_vector = _unit_vector(0)
+    backend = ScriptedPersonEmbeddingBackend(
+        person_outcomes=[_no_usable_face(), success_vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    source_frame = frame()
+    introducer = person_track(
+        7,
+        bbox_xyxy=(620.0, 100.0, 780.0, 650.0),
+        keypoints=(
+            kp("left_shoulder", 650.0, 240.0),
+            kp("left_elbow", 720.0, 260.0),
+            kp("left_wrist", 790.0, 275.0),
+        ),
+        frame_message=source_frame,
+    )
+    introduced = person_track(
+        8,
+        bbox_xyxy=(820.0, 190.0, 1020.0, 390.0),
+        frame_message=source_frame,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [introducer, introduced],
+            frame_message=source_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.set_person_outcomes([_no_usable_face(), success_vector])
+
+    person = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "third_person_introduction",
+                "referent_text": "他",
+            },
+            "profile": {"display_name": "李四"},
+        }
+    )
+
+    assert len(backend.person_inputs) == 2
+    fallback = _decoded_jpeg(backend.person_inputs[1])
+    original = _decoded_jpeg(JPEG_1280X720)
+    _assert_rgb_close(fallback.getpixel((750, 200)), (0, 0, 0), tolerance=10)
+    _assert_rgb_close(fallback.getpixel((900, 220)), original.getpixel((900, 220)))
+    matches = subject.store.search_person_embeddings(
+        EmbeddingResult(
+            vector=success_vector,
+            embedding_type="face",
+            embedding_model=backend.person_model,
+            embedding_version=backend.model_version,
+            quality=1.0,
+        ),
+        limit=1,
+    )
+    provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
+    assert provenance["source_track_ref"] == "front:track:8"
+    assert provenance["resolver_target_ref"] == "front:track:8"
+    assert person["evidence"]["resolver_target_ref"] == "front:track:8"
+    assert person["evidence"]["introducer_ref"] == "front:track:7"
+
+
+@pytest.mark.asyncio
 async def test_third_person_introduction_pose_unclear_does_not_write(tmp_path):
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     subject = service(tmp_path, embedding_backend=backend)
@@ -1317,6 +1540,21 @@ def test_target_bytes_region_uses_exact_bbox_crop():
     _assert_rgb_close(crop.getpixel((350, 500)), original.getpixel((650, 600)))
 
 
+def test_person_embedding_input_candidates_are_lazy_and_primary_first():
+    target = ResolvedTarget(
+        source_target_mode="track_id",
+        target_type="person",
+        bbox_xyxy=(300.0, 100.0, 700.0, 650.0),
+        track_id=7,
+        quality="usable",
+    )
+
+    candidates = _person_embedding_input_candidates(JPEG_1280X720, target)
+
+    assert iter(candidates) is candidates
+    assert next(candidates) == _target_bytes(JPEG_1280X720, target)
+
+
 @pytest.mark.asyncio
 async def test_teach_person_rejects_invalid_bbox_without_embedding_or_write(tmp_path):
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
@@ -1489,6 +1727,43 @@ async def test_memory_query_uses_snapshot_tracks_not_public_visual_state(tmp_pat
     assert events[0]["evidence"]["source_target_mode"] == "recognition_track"
     assert events[0]["memory_context"]["person"]["display_name"] == "Snapshot Person"
     assert len(backend.person_inputs) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_query_falls_back_to_target_masked_context_for_known_person(
+    tmp_path,
+):
+    match_vector = _unit_vector(0)
+    backend = ScriptedPersonEmbeddingBackend(
+        person_outcomes=[_no_usable_face(), match_vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_person(subject, backend, vector=match_vector, display_name="Snapshot Person")
+    source_frame = frame(frame_id=2, timestamp_ms=1_500)
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [person_track(8, frame_message=source_frame)],
+            frame_message=source_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    events = await _drain_memory_events(
+        subject,
+        camera="front",
+        connection_id="ws_1",
+        frame_id=2,
+        frame_timestamp_ms=1_500,
+    )
+
+    assert [event["event"] for event in events] == ["known_person_present"]
+    assert events[0]["track_id"] == 8
+    assert events[0]["memory_context"]["person"]["display_name"] == "Snapshot Person"
+    assert len(backend.person_inputs) == 2
 
 
 @pytest.mark.asyncio
