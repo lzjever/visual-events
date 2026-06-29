@@ -302,6 +302,7 @@ async def replay_scene(
     connector: Callable[..., Any] | None = None,
     realtime: bool = True,
     response_timeout_ms: int | None = None,
+    continue_on_timeout: bool = False,
     semantic_event_cooldown_ms: int = DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS,
 ) -> ReplayStats:
     if semantic_event_cooldown_ms < 0:
@@ -336,8 +337,15 @@ async def replay_scene(
             mode = "a" if append_jsonl else "w"
             jsonl_file = save_jsonl.open(mode, encoding="utf-8")
 
-        async with connect(server, max_size=None) as websocket:
+        websocket_cm = None
+        websocket = None
+        try:
             for frame in frames:
+                if websocket is None:
+                    next_websocket_cm = connect(server, max_size=None)
+                    websocket = await next_websocket_cm.__aenter__()
+                    websocket_cm = next_websocket_cm
+
                 frame_started_s = time.perf_counter()
                 jpeg_bytes = frame.path.read_bytes()
                 payload = encode_frame_message(frame.header, jpeg_bytes)
@@ -371,6 +379,12 @@ async def replay_scene(
                             )
                             + "\n"
                         )
+                    if websocket_cm is not None:
+                        await websocket_cm.__aexit__(None, None, None)
+                    websocket_cm = None
+                    websocket = None
+                    if continue_on_timeout:
+                        continue
                     break
                 latency_ms = (time.perf_counter() - frame_started_s) * 1000.0
                 response = _decode_response(raw_response)
@@ -406,6 +420,9 @@ async def replay_scene(
                     elapsed = time.perf_counter() - frame_started_s
                     if elapsed < interval_s:
                         await asyncio.sleep(interval_s - elapsed)
+        finally:
+            if websocket_cm is not None:
+                await websocket_cm.__aexit__(None, None, None)
     finally:
         if jsonl_file is not None:
             jsonl_file.close()
@@ -548,6 +565,7 @@ async def replay_data_dir(
     save_jsonl: Path | None,
     realtime: bool = True,
     response_timeout_ms: int | None = None,
+    continue_on_timeout: bool = False,
     semantic_event_cooldown_ms: int = DEFAULT_SEMANTIC_EVENT_COOLDOWN_MS,
 ) -> list[ReplayStats]:
     if semantic_event_cooldown_ms < 0:
@@ -573,6 +591,7 @@ async def replay_data_dir(
                 append_jsonl=append_jsonl,
                 realtime=realtime,
                 response_timeout_ms=response_timeout_ms,
+                continue_on_timeout=continue_on_timeout,
                 semantic_event_cooldown_ms=semantic_event_cooldown_ms,
             )
         )
@@ -598,6 +617,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="Stop waiting for a frame response after this many milliseconds.",
+    )
+    parser.add_argument(
+        "--continue-on-timeout",
+        action="store_true",
+        help="Reconnect and continue replaying later frames after a response timeout.",
     )
     parser.add_argument(
         "--summary-json",
@@ -635,6 +659,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         save_jsonl=args.save_jsonl,
         realtime=not args.no_realtime,
         response_timeout_ms=args.response_timeout_ms,
+        continue_on_timeout=args.continue_on_timeout,
         semantic_event_cooldown_ms=args.semantic_event_cooldown_ms,
     )
     if args.summary_json is not None:

@@ -33,8 +33,10 @@ def _state(
     attention: dict[str, Any] | None = None,
     events: list[dict[str, Any]] | None = None,
     person_count: int = 0,
+    frame_timestamp_ms: int | None = None,
+    server_timestamp_ms: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    state = {
         "type": "visual_state",
         "camera": "front",
         "frame_id": frame_id,
@@ -46,6 +48,11 @@ def _state(
         "attention": attention,
         "semantic_events": events or [],
     }
+    if frame_timestamp_ms is not None:
+        state["frame_timestamp_ms"] = frame_timestamp_ms
+    if server_timestamp_ms is not None:
+        state["server_timestamp_ms"] = server_timestamp_ms
+    return state
 
 
 def _event(event_type: str, track_id: int = 7) -> dict[str, Any]:
@@ -146,6 +153,8 @@ def test_wrapped_jsonl_generates_root_scene_outputs_and_summary(
                 attention={"target_track_id": 7, "target_uv": [2, 3]},
                 events=[],
                 person_count=1,
+                frame_timestamp_ms=1000,
+                server_timestamp_ms=1033,
             ),
         ),
         _wrapped(
@@ -222,7 +231,9 @@ def test_wrapped_jsonl_generates_root_scene_outputs_and_summary(
     assert summary["attention"]["target_switches"] == 1
     assert summary["semantic_events"]["total"] == 1
     assert summary["semantic_events"]["counts_by_type"] == {"person_waving": 1}
-    assert summary["semantic_events"]["first_frame_by_type"] == {"person_waving": 1}
+    assert summary["semantic_events"]["first_frame_by_type"] == {
+        "person_waving": {"scene": "lobby", "frame_id": 1}
+    }
     assert summary["keyframes"] == {
         "hall": {
             "first_frame": 0,
@@ -241,6 +252,9 @@ def test_wrapped_jsonl_generates_root_scene_outputs_and_summary(
     }
     assert set(summary["scenes"]) == {"hall", "lobby"}
     assert summary["scenes"]["lobby"]["keyframes"] == summary["keyframes"]["lobby"]
+    assert summary["scenes"]["lobby"]["semantic_events"]["first_frame_by_type"] == {
+        "person_waving": 1
+    }
 
     summary_json = json.loads((out / "summary.json").read_text(encoding="utf-8"))
     assert summary_json == summary
@@ -249,6 +263,20 @@ def test_wrapped_jsonl_generates_root_scene_outputs_and_summary(
     assert "oracle" not in json.dumps(summary_json)
 
     root_html = (out / "index.html").read_text(encoding="utf-8")
+    assert "<table" in root_html
+    assert "<th>Scene</th>" in root_html
+    assert "<th>Frames</th>" in root_html
+    assert "<th>OK / Errors</th>" in root_html
+    assert "<th>Person Frames / Max</th>" in root_html
+    assert "<th>Tracks</th>" in root_html
+    assert "<th>Attention</th>" in root_html
+    assert "<th>Events</th>" in root_html
+    assert "<th>Keyframes</th>" in root_html
+    assert "2 / 1" in root_html
+    assert "2 / 2" in root_html
+    assert "ids=[7,8]" in root_html
+    assert "available=2 null=0 switches=1" in root_html
+    assert "person_waving=1" in root_html
     assert "Keyframes" in root_html
     assert 'href="scenes/lobby/index.html#frame-0">lobby first_frame</a>' in root_html
     assert (
@@ -273,7 +301,16 @@ def test_wrapped_jsonl_generates_root_scene_outputs_and_summary(
     assert "events=none" in scene_html
     assert "path=" in scene_html
     assert "latency_ms=12.5" in scene_html
+    assert "track_ids=[]" in scene_html
+    assert "timestamp=-" in scene_html
+    assert "server_timestamp_ms=-" in scene_html
     assert "<details><summary>visual_state</summary>" in scene_html
+
+    lobby_html = (out / "scenes" / "lobby" / "index.html").read_text(encoding="utf-8")
+    assert "track_ids=[7]" in lobby_html
+    assert "frame_timestamp_ms=1000" in lobby_html
+    assert "server_timestamp_ms=1033" in lobby_html
+    assert "latency_ms=12.5" in lobby_html
 
 
 def test_attention_summary_uses_ok_frames_and_available_attention_only() -> None:
@@ -438,6 +475,7 @@ async def test_online_mode_calls_replay_data_dir_without_websocket(
             "save_jsonl": out / "visual_state.jsonl",
             "realtime": False,
             "response_timeout_ms": 50,
+            "continue_on_timeout": True,
         }
     ]
     assert summary["frames_total"] == 1

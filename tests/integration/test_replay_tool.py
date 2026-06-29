@@ -256,6 +256,35 @@ class HangingConnect(FakeConnect):
         self.urls = []
 
 
+class TimeoutThenOkConnect:
+    def __init__(self):
+        self.websockets = [HangingWebSocket(), FakeWebSocket()]
+        self.contexts = []
+        self.urls = []
+        self._next_index = 0
+
+    def __call__(self, url, *, max_size=None):
+        self.urls.append((url, max_size))
+        websocket = self.websockets[self._next_index]
+        self._next_index += 1
+        context = _SingleWebSocketContext(websocket)
+        self.contexts.append(context)
+        return context
+
+
+class _SingleWebSocketContext:
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.exited = False
+
+    async def __aenter__(self):
+        return self.websocket
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.exited = True
+        return False
+
+
 @pytest.mark.asyncio
 async def test_replay_scene_sends_one_frame_at_a_time_and_saves_jsonl(tmp_path):
     scene = tmp_path / "pic_hello"
@@ -1444,6 +1473,7 @@ def test_parse_args_accepts_events_gate_and_all_includes_events():
             "events",
             "--semantic-event-cooldown-ms",
             "50",
+            "--continue-on-timeout",
         ]
     )
     stats = ReplayStats(
@@ -1461,6 +1491,7 @@ def test_parse_args_accepts_events_gate_and_all_includes_events():
 
     assert args.gate == "events"
     assert args.semantic_event_cooldown_ms == 50
+    assert args.continue_on_timeout is True
     assert _stats_passed(stats, gate="tracking") is True
     assert _stats_passed(stats, gate="attention") is True
     assert _stats_passed(stats, gate="events") is False
@@ -1493,7 +1524,9 @@ async def test_replay_scene_response_timeout_records_error_and_returns(tmp_path)
     scene = tmp_path / "pic_hello"
     scene.mkdir()
     write_jpeg(scene / "img_1710000000000000000.jpeg")
+    write_jpeg(scene / "img_1710000000100000000.jpeg")
     connector = HangingConnect()
+    save_jsonl = tmp_path / "visual_state.jsonl"
 
     stats = await replay_scene(
         server="ws://127.0.0.1:8765/v1/stream",
@@ -1501,6 +1534,7 @@ async def test_replay_scene_response_timeout_records_error_and_returns(tmp_path)
         camera="front",
         fps=10,
         head_motion="stationary",
+        save_jsonl=save_jsonl,
         connector=connector,
         realtime=False,
         response_timeout_ms=1,
@@ -1510,6 +1544,57 @@ async def test_replay_scene_response_timeout_records_error_and_returns(tmp_path)
     assert stats.frames_ok == 0
     assert stats.errors == 1
     assert stats.ok_rate == 0.0
+
+    lines = [json.loads(line) for line in save_jsonl.read_text().splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["frame_id"] == 0
+    assert lines[0]["response"]["code"] == "response_timeout"
+
+
+@pytest.mark.asyncio
+async def test_replay_scene_can_reconnect_and_continue_after_response_timeout(
+    tmp_path,
+):
+    scene = tmp_path / "pic_hello"
+    write_scene_frames(scene, 3)
+    save_jsonl = tmp_path / "visual_state.jsonl"
+    connector = TimeoutThenOkConnect()
+
+    stats = await replay_scene(
+        server="ws://127.0.0.1:8765/v1/stream",
+        scene_dir=scene,
+        camera="front",
+        fps=10,
+        head_motion="stationary",
+        save_jsonl=save_jsonl,
+        connector=connector,
+        realtime=False,
+        response_timeout_ms=1,
+        continue_on_timeout=True,
+    )
+
+    assert stats.frames_sent == 3
+    assert stats.frames_ok == 2
+    assert stats.errors == 1
+    assert connector.urls == [
+        ("ws://127.0.0.1:8765/v1/stream", None),
+        ("ws://127.0.0.1:8765/v1/stream", None),
+    ]
+    assert connector.contexts[0].exited is True
+    assert [
+        decode_frame_message(payload).frame_id
+        for payload in connector.websockets[0].sent_payloads
+    ] == [0]
+    assert [
+        decode_frame_message(payload).frame_id
+        for payload in connector.websockets[1].sent_payloads
+    ] == [1, 2]
+
+    lines = [json.loads(line) for line in save_jsonl.read_text().splitlines()]
+    assert len(lines) == 3
+    assert lines[0]["response"]["code"] == "response_timeout"
+    assert [line["frame_id"] for line in lines[1:]] == [1, 2]
+    assert [line["response"]["frame_id"] for line in lines[1:]] == [1, 2]
 
 
 @pytest.mark.asyncio

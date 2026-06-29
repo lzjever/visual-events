@@ -88,6 +88,7 @@ async def generate_visual_evidence_from_args(args: argparse.Namespace) -> dict[s
             save_jsonl=jsonl_path,
             realtime=not args.no_realtime,
             response_timeout_ms=args.response_timeout_ms,
+            continue_on_timeout=True,
         )
 
     records = read_wrapped_visual_state_jsonl(jsonl_path)
@@ -257,13 +258,17 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         scene_summaries[scene] = scene_summary
 
     return {
-        **_summary_for_records(records),
+        **_summary_for_records(records, include_scene_in_event_first_frame=True),
         "keyframes": scene_keyframes,
         "scenes": scene_summaries,
     }
 
 
-def _summary_for_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _summary_for_records(
+    records: list[dict[str, Any]],
+    *,
+    include_scene_in_event_first_frame: bool = False,
+) -> dict[str, Any]:
     frames_total = len(records)
     frames_ok = 0
     errors = 0
@@ -278,7 +283,7 @@ def _summary_for_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     has_last_attention_target = False
     semantic_event_total = 0
     event_counts: dict[str, int] = {}
-    first_frame_by_type: dict[str, int] = {}
+    first_frame_by_type: dict[str, int | dict[str, Any]] = {}
 
     for record in records:
         response = record["response"]
@@ -320,7 +325,13 @@ def _summary_for_records(records: list[dict[str, Any]]) -> dict[str, Any]:
                 event_type = str(event.get("event", "-"))
                 semantic_event_total += 1
                 event_counts[event_type] = event_counts.get(event_type, 0) + 1
-                first_frame_by_type.setdefault(event_type, int(record["frame_id"]))
+                if event_type not in first_frame_by_type:
+                    frame_id = int(record["frame_id"])
+                    first_frame_by_type[event_type] = (
+                        {"scene": record["scene"], "frame_id": frame_id}
+                        if include_scene_in_event_first_frame
+                        else frame_id
+                    )
 
     return {
         "frames_total": frames_total,
@@ -534,11 +545,7 @@ def _render_root_html(
     frames: list[dict[str, Any]],
     input_jsonl: Path,
 ) -> str:
-    scene_items = "\n".join(
-        f'<li><a href="scenes/{html.escape(scene)}/index.html">{html.escape(scene)}</a> '
-        f'frames={item["frames_total"]} events={item["semantic_events"]["total"]}</li>'
-        for scene, item in summary["scenes"].items()
-    )
+    scenes_table = _scenes_table_html(summary["scenes"])
     keyframes = _keyframes_html(summary["keyframes"])
     timeline = _semantic_event_timeline(out, frames)
     return f"""<!doctype html>
@@ -562,9 +569,7 @@ def _render_root_html(
     <a href="visual_state.jsonl">visual_state.jsonl</a>
   </p>
   <h2>Scenes</h2>
-  <ul>
-    {scene_items}
-  </ul>
+  {scenes_table}
   <h2>Keyframes</h2>
   {keyframes}
   <h2>Semantic Event Timeline</h2>
@@ -572,6 +577,110 @@ def _render_root_html(
 </body>
 </html>
 """
+
+
+def _scenes_table_html(scene_summaries: dict[str, dict[str, Any]]) -> str:
+    if not scene_summaries:
+        return '<p class="meta">scenes=none</p>'
+
+    rows = []
+    for scene, item in scene_summaries.items():
+        person = item["person"]
+        tracking = item["tracking"]
+        attention = item["attention"]
+        events = item["semantic_events"]
+        rows.append(
+            "    <tr>"
+            f'<td><a href="scenes/{html.escape(scene)}/index.html">{html.escape(scene)}</a></td>'
+            f'<td>{item["frames_total"]}</td>'
+            f'<td>{item["frames_ok"]} / {item["errors"]}</td>'
+            f'<td>{person["frames_with_person"]} / {person["max_person_count"]}</td>'
+            f'<td>{_tracks_cell(tracking)}</td>'
+            f'<td>{_attention_cell(attention)}</td>'
+            f'<td>{_events_cell(events)}</td>'
+            f'<td>{_scene_keyframes_cell(scene, item.get("keyframes"))}</td>'
+            "</tr>"
+        )
+
+    return (
+        '<table class="scenes">\n'
+        "  <thead><tr>"
+        "<th>Scene</th>"
+        "<th>Frames</th>"
+        "<th>OK / Errors</th>"
+        "<th>Person Frames / Max</th>"
+        "<th>Tracks</th>"
+        "<th>Attention</th>"
+        "<th>Events</th>"
+        "<th>Keyframes</th>"
+        "</tr></thead>\n"
+        "  <tbody>\n"
+        + "\n".join(rows)
+        + "\n  </tbody>\n"
+        "</table>"
+    )
+
+
+def _tracks_cell(tracking: dict[str, Any]) -> str:
+    return (
+        f'unique={tracking["unique_track_count"]} '
+        f'ids={html.escape(_compact_list(tracking["track_ids"]))}'
+    )
+
+
+def _attention_cell(attention: dict[str, Any]) -> str:
+    return (
+        f'available={attention["available_frames"]} '
+        f'null={attention["null_frames"]} '
+        f'switches={attention["target_switches"]}'
+    )
+
+
+def _events_cell(events: dict[str, Any]) -> str:
+    counts = events.get("counts_by_type")
+    if not isinstance(counts, dict) or not counts:
+        return f'total={events["total"]}'
+    count_text = ", ".join(
+        f"{html.escape(str(event_type))}={count}"
+        for event_type, count in counts.items()
+    )
+    return f'total={events["total"]} {count_text}'
+
+
+def _scene_keyframes_cell(scene: str, keyframes: Any) -> str:
+    if not isinstance(keyframes, dict):
+        return "-"
+    links = []
+    for label in ("first_frame", "first_person_frame", "first_attention_frame"):
+        frame_id = keyframes.get(label)
+        if frame_id is not None:
+            links.append(_inline_keyframe_link(scene, label, int(frame_id)))
+    first_events = keyframes.get("first_event_frame_by_type")
+    if isinstance(first_events, dict):
+        for event_type, frame_id in sorted(first_events.items()):
+            if frame_id is not None:
+                links.append(
+                    _inline_keyframe_link(scene, f"{event_type}_event", int(frame_id))
+                )
+    frame_id = keyframes.get("last_frame")
+    if frame_id is not None:
+        links.append(_inline_keyframe_link(scene, "last_frame", int(frame_id)))
+    return " ".join(links) if links else "-"
+
+
+def _inline_keyframe_link(scene: str, label: str, frame_id: int) -> str:
+    href = f"scenes/{scene}/index.html#frame-{frame_id}"
+    return (
+        f'<a href="{html.escape(href)}">'
+        f"{html.escape(label)}={frame_id}"
+        "</a>"
+    )
+
+
+def _compact_list(values: Any) -> str:
+    if not isinstance(values, list):
+        return "[]"
+    return "[" + ",".join(str(value) for value in values) + "]"
 
 
 def _keyframes_html(keyframes_by_scene: dict[str, dict[str, Any]]) -> str:

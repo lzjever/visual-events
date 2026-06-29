@@ -23,6 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _visual_state() -> dict:
     return {
         "frame_id": 12,
+        "frame_timestamp_ms": 1200,
+        "server_timestamp_ms": 1234,
         "camera": "front",
         "tracks": [{"track_id": 7, "lost_ms": 0}],
         "attention": {"target_track_id": 7},
@@ -146,6 +148,7 @@ def _frame_evidence(tmp_path: Path, state: dict, *, scene: str = "fixtures/scene
         "image_path": tmp_path / "frames" / "frame_001.jpg",
         "state_path": tmp_path / "states" / "frame_001.json",
         "state": state,
+        "latency_ms": 34.5,
     }
 
 
@@ -253,6 +256,10 @@ def test_visual_debug_html_and_progress_include_short_summaries(tmp_path: Path) 
 
     assert "frame=1 frame_001.jpg" in rendered
     assert "scene=fixtures/scene" in rendered
+    assert "track_ids=[7]" in rendered
+    assert "frame_timestamp_ms=1200" in rendered
+    assert "server_timestamp_ms=1234" in rendered
+    assert "latency_ms=34.5" in rendered
     assert "scene_context=engagement=no_engage_target reasons=too_far,camera_motion_not_stationary" in rendered
     assert "reacq=reacq 4-&gt;7 elapsed_ms=850" in rendered
     assert (

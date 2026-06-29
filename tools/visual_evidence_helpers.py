@@ -378,6 +378,30 @@ def _list_len(value: Any) -> int:
     return len(value) if isinstance(value, list) else 0
 
 
+def _track_ids_summary(tracks: Any) -> str:
+    if not isinstance(tracks, list):
+        return "[]"
+    track_ids = []
+    for track in tracks:
+        if isinstance(track, dict) and "track_id" in track:
+            track_ids.append(_short(track["track_id"], 24))
+    return "[" + ",".join(track_ids) + "]"
+
+
+def _frame_timestamp_summary(response: dict[str, Any]) -> str:
+    if "frame_timestamp_ms" in response:
+        return f"frame_timestamp_ms={_short(response['frame_timestamp_ms'])}"
+    return "timestamp=-"
+
+
+def _server_timestamp_summary(response: dict[str, Any]) -> str:
+    return f"server_timestamp_ms={_short(response.get('server_timestamp_ms'))}"
+
+
+def _latency_summary(frame_evidence: dict[str, Any]) -> str:
+    return f"latency_ms={_short(frame_evidence.get('latency_ms'))}"
+
+
 def _engagement_state(scene_context: Any) -> str:
     if not isinstance(scene_context, dict):
         return "-"
@@ -453,6 +477,10 @@ def render_frame_card(
     scene = frame_evidence.get("scene")
     scene_text = str(scene) if scene is not None else "-"
     frame_id = frame_evidence.get("frame_id", response.get("frame_id", "-"))
+    track_ids_text = _track_ids_summary(response.get("tracks"))
+    frame_timestamp_text = _frame_timestamp_summary(response)
+    server_timestamp_text = _server_timestamp_summary(response)
+    latency_text = _latency_summary(frame_evidence)
     state_json = json.dumps(response, ensure_ascii=False, indent=2)
     anchor_attr = f' id="{html.escape(anchor)}"' if anchor else ""
     return f"""<div class="card"{anchor_attr}>
@@ -461,6 +489,10 @@ def render_frame_card(
     frame={html.escape(str(frame_id))} {html.escape(source_name)}
     | scene={html.escape(scene_text)}
     | tracks={_list_len(response.get("tracks"))}
+    | track_ids={html.escape(track_ids_text)}
+    | {html.escape(frame_timestamp_text)}
+    | {html.escape(server_timestamp_text)}
+    | {html.escape(latency_text)}
     | attention={html.escape(attention_text)}
     | {html.escape(scene_context_text)}
     | reacq={html.escape(reacquire_summary)}
