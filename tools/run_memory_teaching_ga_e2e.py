@@ -1980,20 +1980,21 @@ def _run_actual_object_negative(
         operation="resolve_object_unsupported",
     )
     after_counts = memory_e2e._memory_write_counts(store)
+    store_delta = memory_e2e._memory_store_delta(before_counts, after_counts)
     body = response["body"]
     assertions = {
         "status_code_200": response["status_code"] == 200,
         "status_not_found": body.get("status") == "not_found",
         "unsupported_target_kind": body.get("error_code") == "unsupported_target_kind",
         "no_candidates": body.get("candidates") == [],
-        "no_memory_write": before_counts == after_counts,
+        "no_memory_write": memory_e2e._no_memory_write(store_delta),
     }
     return {
         "passed": all(assertions.values()),
         "assertions": assertions,
         "resolve_target": body,
-        "before_counts": before_counts,
-        "after_counts": after_counts,
+        "store_delta": store_delta,
+        "store_delta_source": memory_e2e._memory_store_delta_source(),
     }
 
 

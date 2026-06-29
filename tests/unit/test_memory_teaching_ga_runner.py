@@ -368,7 +368,26 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert all(
         fields == [] for fields in report["forbidden_agent_payload_fields"].values()
     )
-    assert report["object_no_write"]["assertions"]["no_memory_write"] is True
+    object_no_write = report["object_no_write"]
+    assert object_no_write["assertions"]["no_memory_write"] is True
+    store_delta = object_no_write["store_delta"]
+    assert store_delta["before"] == store_delta["after"]
+    assert all(value == 0 for value in store_delta["delta"].values())
+    assert {
+        "embedding_provenance",
+        "conversation_summaries",
+        "external_user_links",
+        "memory_match_records",
+        "profile_merge_history",
+        "negative_identity_matches",
+        "person_embedding_vectors",
+        "scene_embedding_vectors",
+        "anonymous_embedding_vectors",
+    } <= set(store_delta["delta"])
+    assert object_no_write["store_delta_source"] == {
+        "universe": "MemoryStore.memory_table_counts",
+        "allowed_diagnostic_whitelist": [],
+    }
 
     checks = {check["name"]: check for check in report["checks"]}
     assert checks["all_scenes_replayed"]["passed"] is True

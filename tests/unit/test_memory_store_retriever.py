@@ -519,6 +519,24 @@ def test_memory_table_counts_include_sqlite_vec_tables_after_embedding_writes(
 
     counts = store.memory_table_counts()
 
+    assert set(counts) == {
+        "person_profiles",
+        "person_embeddings",
+        "person_embedding_vectors",
+        "scene_memories",
+        "scene_embeddings",
+        "scene_embedding_vectors",
+        "anonymous_profiles",
+        "anonymous_embeddings",
+        "anonymous_embedding_vectors",
+        "embedding_provenance",
+        "conversation_summaries",
+        "external_user_links",
+        "memory_match_records",
+        "profile_merge_history",
+        "negative_identity_matches",
+    }
+    assert len(counts) == 15
     assert counts["person_embeddings"] == 1
     assert counts["person_embedding_vectors"] == 1
     assert counts["anonymous_embeddings"] == 1

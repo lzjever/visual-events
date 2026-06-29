@@ -2064,6 +2064,17 @@ def _store_counts(store: MemoryStore) -> dict[str, int]:
 
 
 def _assert_zero_store_delta(store_delta: dict) -> None:
+    assert {
+        "embedding_provenance",
+        "conversation_summaries",
+        "external_user_links",
+        "memory_match_records",
+        "profile_merge_history",
+        "negative_identity_matches",
+        "person_embedding_vectors",
+        "scene_embedding_vectors",
+        "anonymous_embedding_vectors",
+    } <= set(store_delta["delta"])
     assert store_delta["before"] == store_delta["after"]
     assert all(value == 0 for value in store_delta["delta"].values())
 

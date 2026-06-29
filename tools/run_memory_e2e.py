@@ -994,19 +994,20 @@ def check_object_resolve_unsupported_no_write(
     )
     body = response.json()
     after_counts = _memory_write_counts(store)
+    store_delta = _memory_store_delta(before_counts, after_counts)
     assertions = {
         "status_code_200": response.status_code == 200,
         "status_not_found": body.get("status") == "not_found",
         "unsupported_target_kind": body.get("error_code") == "unsupported_target_kind",
         "no_candidates": body.get("candidates") == [],
-        "no_memory_write": before_counts == after_counts,
+        "no_memory_write": _no_memory_write(store_delta),
     }
     return {
         "passed": all(assertions.values()),
         "assertions": assertions,
         "resolve_target": body,
-        "before_counts": before_counts,
-        "after_counts": after_counts,
+        "store_delta": store_delta,
+        "store_delta_source": _memory_store_delta_source(),
     }
 
 
@@ -1062,22 +1063,34 @@ def _snapshot_track(
 
 
 def _memory_write_counts(store: Any) -> dict[str, int]:
-    tables = (
-        "person_profiles",
-        "person_embeddings",
-        "scene_memories",
-        "scene_embeddings",
-        "anonymous_profiles",
-        "anonymous_embeddings",
-    )
+    return store.memory_table_counts()
+
+
+def _memory_store_delta(
+    before_counts: dict[str, int],
+    after_counts: dict[str, int],
+) -> dict[str, dict[str, int]]:
+    tables = list(before_counts)
+    tables.extend(table for table in after_counts if table not in before_counts)
     return {
-        table: int(
-            store.connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()[
-                "count"
-            ]
-        )
-        for table in tables
+        "before": before_counts,
+        "after": after_counts,
+        "delta": {
+            table: int(after_counts.get(table, 0) - before_counts.get(table, 0))
+            for table in tables
+        },
     }
+
+
+def _memory_store_delta_source() -> dict[str, Any]:
+    return {
+        "universe": "MemoryStore.memory_table_counts",
+        "allowed_diagnostic_whitelist": [],
+    }
+
+
+def _no_memory_write(store_delta: dict[str, dict[str, int]]) -> bool:
+    return all(value == 0 for value in store_delta["delta"].values())
 
 
 def load_source_frame(data_dir: Path, scene: str) -> SourceFrame:
