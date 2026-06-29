@@ -422,6 +422,10 @@ def run_actual(
         "error": "not_run",
     }
     object_result: dict[str, Any] = {"passed": False, "error": "not_run"}
+    supporting_contracts_result: dict[str, Any] = {
+        "passed": False,
+        "error": "not_run",
+    }
 
     with visual_states_path.open("w", encoding="utf-8") as states_file:
         replay_result = _run_actual_scene_replay(
@@ -500,6 +504,15 @@ def run_actual(
                 api_response_records=api_response_records,
             )
 
+        supporting_contracts_result = _run_actual_supporting_contracts(
+            scenes=scenes,
+            out=out,
+            camera=camera,
+            states_file=states_file,
+            api_response_records=api_response_records,
+            botified_frame_records=botified_frame_records,
+        )
+
     _write_json(
         teach_payloads_path,
         {
@@ -555,6 +568,7 @@ def run_actual(
         scene_result=scene_result,
         post_teach_scene_replay_result=post_teach_scene_replay_result,
         object_result=object_result,
+        supporting_contracts_result=supporting_contracts_result,
         botified_frame_records=botified_frame_records,
         bounded_multi_person_recognition=bounded_multi_person_recognition,
     )
@@ -581,6 +595,7 @@ def run_actual(
         "post_teach_scene_replay": post_teach_scene_replay_result,
         "bounded_multi_person_recognition": bounded_multi_person_recognition,
         "object_no_write": object_result,
+        "supporting_contracts": supporting_contracts_result,
         "debug_test_channel_enabled": False,
         "artifacts": artifact_paths,
         "visual_evidence_index": visual_evidence_index,
@@ -2722,6 +2737,533 @@ def _run_actual_object_negative(
     }
 
 
+def _run_actual_supporting_contracts(
+    *,
+    scenes: list[SceneDir],
+    out: Path,
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    source_scene = _find_scene(scenes, "pic_teach_me") or (
+        scenes[0] if scenes else None
+    )
+    if source_scene is None:
+        return {
+            "passed": False,
+            "reason": "no_source_scene",
+            "assertions": {"source_scene_present": False},
+        }
+    source_frame = _load_source_frame_from_scene(source_scene)
+    summary_link = _run_actual_supporting_summary_link(
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+        states_file=states_file,
+        api_response_records=api_response_records,
+        botified_frame_records=botified_frame_records,
+    )
+    familiar_merge = _run_actual_supporting_familiar_merge(
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+        states_file=states_file,
+        api_response_records=api_response_records,
+        botified_frame_records=botified_frame_records,
+    )
+    correct_identity = _run_actual_supporting_correct_identity(
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+        states_file=states_file,
+        api_response_records=api_response_records,
+        botified_frame_records=botified_frame_records,
+    )
+    resolve_states = _run_actual_supporting_resolve_target_states(
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+        states_file=states_file,
+        api_response_records=api_response_records,
+    )
+    assertions = {
+        "conversation_summary_context": bool(
+            summary_link["assertions"].get("summary_context_present")
+        ),
+        "external_user_link_lookup": bool(
+            summary_link["assertions"].get("external_link_lookup")
+        ),
+        "external_lookup_summary_present": bool(
+            summary_link["assertions"].get("external_lookup_summary_present")
+        ),
+        "familiar_unknown_present": bool(
+            familiar_merge["assertions"].get("familiar_unknown_present")
+        ),
+        "merge_suppressed_anonymous": bool(
+            familiar_merge["assertions"].get("old_anonymous_suppressed")
+        ),
+        "merge_known_replay": bool(familiar_merge["assertions"].get("known_replay_present")),
+        "correct_identity_suppressed_wrong_person": bool(
+            correct_identity["assertions"].get("wrong_person_not_returned")
+        ),
+        "resolve_target_resolved": resolve_states["resolved"].get("status") == "resolved",
+        "resolve_target_ambiguous": resolve_states["ambiguous"].get("status") == "ambiguous",
+        "resolve_target_ambiguous_no_write": bool(
+            resolve_states["ambiguous"].get("no_memory_write")
+        ),
+        "resolve_target_not_found": (
+            resolve_states["not_found"].get("status") == "not_found"
+        ),
+        "resolve_target_not_found_no_write": bool(
+            resolve_states["not_found"].get("no_memory_write")
+        ),
+    }
+    passed = all(assertions.values())
+    return {
+        "passed": passed,
+        "reason": "" if passed else _first_failed_assertion(assertions),
+        "runner_cases": {
+            "conversation_summary_context": summary_link["runner_case"],
+            "familiar_unknown_merge": familiar_merge["runner_case"],
+            "correct_identity": correct_identity["runner_case"],
+            "resolve_target_states": resolve_states["runner_case"],
+        },
+        "assertions": assertions,
+        "conversation_summary_context": summary_link["conversation_summary_context"],
+        "external_user_link": summary_link["external_user_link"],
+        "familiar_unknown": familiar_merge["familiar_unknown"],
+        "merge_anonymous_person": familiar_merge["merge_anonymous_person"],
+        "correct_identity": correct_identity["correct_identity"],
+        "resolve_target_states": {
+            "resolved": resolve_states["resolved"],
+            "ambiguous": resolve_states["ambiguous"],
+            "not_found": resolve_states["not_found"],
+        },
+    }
+
+
+def _run_actual_supporting_summary_link(
+    *,
+    out: Path,
+    source_frame: memory_e2e.SourceFrame,
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="ga-supporting-summary-link",
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+    )
+    _attach_cli_botified_projection_recorder(runner, botified_frame_records)
+    external_user_ref = "memory-ga-supporting:user"
+    with runner.open_stream() as websocket:
+        _seed_stable_interaction_window(
+            runner,
+            websocket,
+            start_timestamp_ms=1_000,
+            states_file=states_file,
+            phase="supporting-summary-link-seed",
+        )
+        teach = _post_teach_person_with_optional_anonymous_merge(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:summary-link:teach-person",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/teach/person",
+            payload=memory_e2e.self_introduction_payload(
+                camera=camera,
+                display_name="Supporting Summary Person",
+                description="supporting contracts summary/link fixture",
+                tags=["memory-ga"],
+            ),
+            operation="supporting_teach_person_summary_link",
+        )
+        person_id = teach["body"].get("person_id")
+        summary = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:summary-link:conversation-summary",
+            scene="supporting_contracts",
+            endpoint=f"/v1/memory/person/{person_id}/conversation-summary",
+            payload={
+                "summary": (
+                    "Remembered as a supporting contracts GA person with a compact "
+                    "background summary."
+                ),
+                "source": "agent",
+                "source_conversation_id": "memory-ga-supporting",
+            },
+            operation="supporting_add_conversation_summary",
+        )
+        link = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:summary-link:external-link",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/link-external-user",
+            payload={
+                "person_id": person_id,
+                "external_user_ref": external_user_ref,
+            },
+            operation="supporting_link_external_user",
+        )
+        lookup = _get_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:summary-link:get-by-external",
+            scene="supporting_contracts",
+            endpoint=f"/v1/memory/person/by-external-user/{external_user_ref}",
+            operation="supporting_get_person_by_external_user",
+        )
+        events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=3_000,
+            states_file=states_file,
+            phase="supporting-summary-link-replay",
+        )
+    known = _known_person_event_for_person(events, person_id)
+    event_conversation_summaries = (
+        known.get("memory_context", {}).get("conversation_summaries")
+        if known is not None
+        else None
+    )
+    if not isinstance(event_conversation_summaries, list):
+        event_conversation_summaries = []
+    lookup_conversation_summaries = lookup["body"].get("conversation_summaries")
+    if not isinstance(lookup_conversation_summaries, list):
+        lookup_conversation_summaries = []
+    assertions = {
+        "teach_person_ok": teach["body"].get("ok") is True,
+        "summary_ok": summary["body"].get("ok") is True,
+        "link_ok": link["body"].get("ok") is True,
+        "external_link_lookup": (
+            lookup["body"].get("person", {}).get("person_id") == person_id
+        ),
+        "external_lookup_summary_present": bool(lookup_conversation_summaries),
+        "known_person_present": known is not None,
+        "summary_context_present": bool(event_conversation_summaries),
+    }
+    return {
+        "runner_case": runner.case,
+        "assertions": assertions,
+        "conversation_summary_context": {
+            "person_id": person_id,
+            "summary_id": summary["body"].get("summary_id"),
+            "event_conversation_summaries": event_conversation_summaries,
+            "lookup_conversation_summaries": lookup_conversation_summaries,
+            "event": memory_e2e.compact_events([known])[0] if known is not None else None,
+        },
+        "external_user_link": {
+            "external_user_ref": external_user_ref,
+            "link": link["body"],
+            "lookup": lookup["body"],
+            "lookup_conversation_summaries": lookup_conversation_summaries,
+        },
+    }
+
+
+def _run_actual_supporting_familiar_merge(
+    *,
+    out: Path,
+    source_frame: memory_e2e.SourceFrame,
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="ga-supporting-familiar-merge",
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+    )
+    _attach_cli_botified_projection_recorder(runner, botified_frame_records)
+    with runner.open_stream() as websocket:
+        first_events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=1_000,
+            states_file=states_file,
+            phase="supporting-familiar-first",
+        )
+        familiar_events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=3_000,
+            states_file=states_file,
+            phase="supporting-familiar-repeat",
+        )
+        familiar = memory_e2e.first_event(
+            familiar_events,
+            "familiar_unknown_present",
+        )
+        anonymous_id = _anonymous_id_from_event(familiar)
+        merge = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:familiar-merge:merge-anonymous",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/merge-anonymous-person",
+            payload={
+                "anonymous_id": anonymous_id,
+                "profile": {
+                    "display_name": "Supporting Merged Person",
+                    "description": "created from familiar unknown supporting contract",
+                },
+                "merge_reason": "memory_teaching_ga_supporting_contract",
+            },
+            operation="supporting_merge_anonymous_person",
+        )
+        merged_events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=5_000,
+            states_file=states_file,
+            phase="supporting-familiar-merged-replay",
+        )
+    person_id = merge["body"].get("person_id")
+    known = _known_person_event_for_person(merged_events, person_id)
+    old_anonymous_events = [
+        event
+        for event in merged_events
+        if event.get("event") == "familiar_unknown_present"
+        and _anonymous_id_from_event(event) == anonymous_id
+    ]
+    assertions = {
+        "first_unknown_has_no_event": first_events == [],
+        "familiar_unknown_present": familiar is not None,
+        "anonymous_id_present": bool(anonymous_id),
+        "merge_ok": merge["body"].get("ok") is True,
+        "old_anonymous_suppressed": not old_anonymous_events,
+        "known_replay_present": known is not None,
+    }
+    return {
+        "runner_case": runner.case,
+        "assertions": assertions,
+        "familiar_unknown": {
+            "present": familiar is not None,
+            "anonymous_id": anonymous_id,
+            "events": memory_e2e.compact_events(familiar_events),
+        },
+        "merge_anonymous_person": {
+            "anonymous_id": anonymous_id,
+            "person_id": person_id,
+            "merge": merge["body"],
+            "old_anonymous_suppressed": not old_anonymous_events,
+            "known_replay_present": known is not None,
+            "events": memory_e2e.compact_events(merged_events),
+        },
+    }
+
+
+def _run_actual_supporting_correct_identity(
+    *,
+    out: Path,
+    source_frame: memory_e2e.SourceFrame,
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="ga-supporting-correct-identity",
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+    )
+    _attach_cli_botified_projection_recorder(runner, botified_frame_records)
+    with runner.open_stream() as websocket:
+        _seed_stable_interaction_window(
+            runner,
+            websocket,
+            start_timestamp_ms=1_000,
+            states_file=states_file,
+            phase="supporting-correct-seed",
+        )
+        wrong = _post_teach_person_with_optional_anonymous_merge(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:correct-identity:teach-wrong-person",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/teach/person",
+            payload=memory_e2e.self_introduction_payload(
+                camera=camera,
+                display_name="Supporting Wrong Person",
+            ),
+            operation="supporting_teach_wrong_person",
+        )
+        wrong_person_id = wrong["body"].get("person_id")
+        before_events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=3_000,
+            states_file=states_file,
+            phase="supporting-correct-before",
+        )
+        before_known = _known_person_event_for_person(before_events, wrong_person_id)
+        memory_match_id = (
+            before_known.get("evidence", {}).get("memory_match_id")
+            if before_known is not None
+            else None
+        )
+        correction = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:correct-identity:correct",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/correct-identity",
+            payload={
+                "memory_match_id": memory_match_id,
+                "wrong_person_id": wrong_person_id,
+            },
+            operation="supporting_correct_identity",
+        )
+        after_events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=5_000,
+            states_file=states_file,
+            phase="supporting-correct-after",
+        )
+    wrong_person_after = _known_person_event_for_person(after_events, wrong_person_id)
+    assertions = {
+        "wrong_person_known_before": before_known is not None,
+        "memory_match_id_present": bool(memory_match_id),
+        "correction_ok": correction["body"].get("ok") is True,
+        "wrong_person_not_returned": wrong_person_after is None,
+    }
+    return {
+        "runner_case": runner.case,
+        "assertions": assertions,
+        "correct_identity": {
+            "wrong_person_id": wrong_person_id,
+            "memory_match_id": memory_match_id,
+            "correction": correction["body"],
+            "wrong_person_not_returned": wrong_person_after is None,
+            "before_events": memory_e2e.compact_events(before_events),
+            "after_events": memory_e2e.compact_events(after_events),
+        },
+    }
+
+
+def _run_actual_supporting_resolve_target_states(
+    *,
+    out: Path,
+    source_frame: memory_e2e.SourceFrame,
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="ga-supporting-resolve-target-states",
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+    )
+    with runner.open_stream() as websocket:
+        memory_service = runner.client.app.state.memory_service
+        memory_service._last_query_frame_timestamp_ms[camera] = 1_000  # noqa: SLF001
+        runner.send(
+            websocket,
+            timestamp_ms=1_000,
+            states_file=states_file,
+            phase="supporting-resolve-single-frame",
+        )
+        resolved_response = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:resolve-target:resolved",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/resolve-target",
+            payload={
+                "camera": camera,
+                "target": {
+                    "kind": "scene",
+                    "intent": "teach_scene",
+                    "referent_text": "这里",
+                },
+            },
+            operation="supporting_resolve_target_resolved",
+        )
+        ambiguous_response = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:resolve-target:ambiguous",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/resolve-target",
+            payload={
+                "camera": camera,
+                "target": {
+                    "kind": "person",
+                    "intent": "self_introduction",
+                    "referent_text": "我",
+                },
+            },
+            operation="supporting_resolve_target_ambiguous",
+        )
+        not_found_response = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:resolve-target:not-found",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/resolve-target",
+            payload=memory_e2e.object_resolve_payload(
+                camera=camera,
+                referent_text="手机",
+            ),
+            operation="supporting_resolve_target_not_found",
+        )
+    resolved = resolved_response["body"]
+    ambiguous = ambiguous_response["body"]
+    not_found = not_found_response["body"]
+    return {
+        "runner_case": runner.case,
+        "resolved": {
+            "status_code": resolved_response["status_code"],
+            "status": resolved.get("status"),
+            "response": resolved,
+        },
+        "ambiguous": {
+            "status_code": ambiguous_response["status_code"],
+            "status": ambiguous.get("status"),
+            "ambiguity_type": ambiguous.get("ambiguity_type"),
+            "no_memory_write": _response_store_delta_no_write(ambiguous),
+            "store_delta": ambiguous.get("store_delta"),
+            "response": ambiguous,
+        },
+        "not_found": {
+            "status_code": not_found_response["status_code"],
+            "status": not_found.get("status"),
+            "error_code": not_found.get("error_code"),
+            "no_memory_write": _response_store_delta_no_write(not_found),
+            "store_delta": not_found.get("store_delta"),
+            "response": not_found,
+        },
+    }
+
+
+def _anonymous_id_from_event(event: dict[str, Any] | None) -> Any:
+    if not event:
+        return None
+    memory_context = event.get("memory_context", {})
+    anonymous = memory_context.get("anonymous_person")
+    if isinstance(anonymous, dict):
+        return anonymous.get("anonymous_id")
+    anonymous = memory_context.get("anonymous")
+    if isinstance(anonymous, dict):
+        return anonymous.get("anonymous_id")
+    return None
+
+
+def _response_store_delta_no_write(body: dict[str, Any]) -> bool:
+    store_delta = body.get("store_delta")
+    if not isinstance(store_delta, dict):
+        return False
+    delta = store_delta.get("delta")
+    if not isinstance(delta, dict):
+        return False
+    return all(value == 0 for value in delta.values())
+
+
 def _actual_runner(
     *,
     case: str,
@@ -2772,6 +3314,32 @@ def _post_and_record_api_response(
         "dry_run": False,
         "status_code": response.status_code,
         "payload": payload,
+        "response": body,
+    }
+    api_response_records.append(record)
+    return {"status_code": response.status_code, "body": body}
+
+
+def _get_and_record_api_response(
+    *,
+    runner: Any,
+    api_response_records: list[dict[str, Any]],
+    payload_index: int | str,
+    scene: str,
+    endpoint: str,
+    operation: str,
+) -> dict[str, Any]:
+    response = runner.client.get(endpoint)
+    body = response.json()
+    record = {
+        "payload_index": payload_index,
+        "scene": scene,
+        "endpoint": endpoint,
+        "operation": operation,
+        "method": "GET",
+        "dry_run": False,
+        "status_code": response.status_code,
+        "payload": None,
         "response": body,
     }
     api_response_records.append(record)
@@ -3254,6 +3822,7 @@ def _build_actual_checks(
     scene_result: dict[str, Any],
     post_teach_scene_replay_result: dict[str, Any],
     object_result: dict[str, Any],
+    supporting_contracts_result: dict[str, Any],
     botified_frame_records: list[dict[str, Any]],
     bounded_multi_person_recognition: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -3373,6 +3942,11 @@ def _build_actual_checks(
             "name": "object_resolve_unsupported_no_write",
             "passed": bool(object_result.get("passed")),
             "details": object_result,
+        },
+        {
+            "name": "supporting_contracts",
+            "passed": bool(supporting_contracts_result.get("passed")),
+            "details": supporting_contracts_result,
         },
         {
             "name": "artifact_skeleton",

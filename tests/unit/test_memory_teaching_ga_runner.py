@@ -747,6 +747,82 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert {"known_person_present", "scene_activated"} <= event_names
 
 
+def test_actual_fake_runner_report_includes_supporting_contracts(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    scene_jpegs = {
+        "pic_teach_me": _valid_jpeg_bytes((196, 64, 64)),
+        "pic_teach_person": _valid_jpeg_bytes((64, 180, 96)),
+        "pic_teach_scene_galbot": _valid_jpeg_bytes((220, 190, 72)),
+        "pic_teach_item_phone": _valid_jpeg_bytes((140, 80, 196)),
+    }
+    _make_scene(
+        data_dir,
+        "pic_teach_me",
+        des_text="请你记住我，我是小李飞刀",
+        jpeg_bytes=scene_jpegs["pic_teach_me"],
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_person",
+        des_text="这是彭刚，请你记住",
+        jpeg_bytes=scene_jpegs["pic_teach_person"],
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        des_text="这是银河通用的办公室，请你记住",
+        jpeg_bytes=scene_jpegs["pic_teach_scene_galbot"],
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_item_phone",
+        des_text="这是手机，请你记住",
+        jpeg_bytes=scene_jpegs["pic_teach_item_phone"],
+    )
+    out = tmp_path / "artifacts" / "memory-teaching-ga"
+
+    exit_code = module.main(["--data-dir", str(data_dir), "--out", str(out)])
+
+    assert exit_code == 0
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    checks = {check["name"]: check for check in report["checks"]}
+    supporting = report["supporting_contracts"]
+
+    assert supporting["passed"] is True
+    assert checks["supporting_contracts"]["passed"] is True
+    assert checks["supporting_contracts"]["details"] == supporting
+    assert {
+        "conversation_summary_context",
+        "external_user_link",
+        "familiar_unknown",
+        "merge_anonymous_person",
+        "correct_identity",
+        "resolve_target_states",
+    } <= set(supporting)
+    summary_context = supporting["conversation_summary_context"]
+    assert summary_context["event_conversation_summaries"]
+    assert summary_context["lookup_conversation_summaries"]
+    assert "conversation_summaries" not in summary_context
+    assert (
+        supporting["external_user_link"]["lookup"]["person"]["person_id"]
+        == summary_context["person_id"]
+    )
+    assert supporting["external_user_link"]["lookup_conversation_summaries"]
+    assert supporting["familiar_unknown"]["present"] is True
+    assert supporting["merge_anonymous_person"]["old_anonymous_suppressed"] is True
+    assert supporting["merge_anonymous_person"]["known_replay_present"] is True
+    assert supporting["correct_identity"]["wrong_person_not_returned"] is True
+    resolve_states = supporting["resolve_target_states"]
+    assert set(resolve_states) == {"resolved", "ambiguous", "not_found"}
+    assert resolve_states["resolved"]["status"] == "resolved"
+    assert resolve_states["ambiguous"]["status"] == "ambiguous"
+    assert resolve_states["ambiguous"]["no_memory_write"] is True
+    assert resolve_states["not_found"]["status"] == "not_found"
+    assert resolve_states["not_found"]["no_memory_write"] is True
+
+
 def test_bounded_recognition_projection_reads_service_report_without_recomputing() -> None:
     service_report = {
         "camera": "front",

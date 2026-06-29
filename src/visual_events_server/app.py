@@ -277,7 +277,15 @@ def create_app(
         payload: ResolveTargetRequest = Body(...),
     ) -> dict[str, Any]:
         if payload.target.kind == "object":
-            return unsupported_target_kind_response()
+            before_counts = _memory_table_counts(app.state.memory_service)
+            response = unsupported_target_kind_response()
+            after_counts = _memory_table_counts(app.state.memory_service)
+            if before_counts is not None and after_counts is not None:
+                response["store_delta"] = _memory_store_delta(
+                    before_counts,
+                    after_counts,
+                )
+            return response
         response = await _memory_response(
             app.state.memory_service.resolve_target(payload.to_internal_request())
         )
@@ -350,6 +358,30 @@ def create_app(
             await websocket.send_text(serialize_json_message(response))
 
     return app
+
+
+def _memory_table_counts(memory_service: Any) -> dict[str, int] | None:
+    store = getattr(memory_service, "store", None)
+    counts = getattr(store, "memory_table_counts", None)
+    if not callable(counts):
+        return None
+    result = counts()
+    return dict(result) if isinstance(result, dict) else None
+
+
+def _memory_store_delta(
+    before_counts: dict[str, int],
+    after_counts: dict[str, int],
+) -> dict[str, dict[str, int]]:
+    tables = sorted(set(before_counts) | set(after_counts))
+    return {
+        "before": before_counts,
+        "after": after_counts,
+        "delta": {
+            table: int(after_counts.get(table, 0) - before_counts.get(table, 0))
+            for table in tables
+        },
+    }
 
 
 async def _memory_response(awaitable: Any) -> dict[str, Any]:
