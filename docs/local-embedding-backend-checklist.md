@@ -45,11 +45,11 @@
 - [ ] `scene_model_path` 可以是 image embedding 模型和 preprocess metadata 的本地 bundle 路径；当前 scene image-only 主线不需要 tokenizer/config。
 - [ ] scene bundle metadata 必须至少声明 `model_name`、`version`、`dim`、`runtime`、`files.model`、`input_size`、`input_name`、`output_name`、`preprocess`；`input_size` 必须是 `[width, height]` 两个正整数。
 - [ ] scene bundle 的 `preprocess.resize_mode` 必须显式声明为 `resize_shorter_center_crop`，并与 `mean` / `std` 一起启动校验。
-- [ ] bundle metadata 只用于启动校验和记录 `embedding_model` / `embedding_version`，不新增统一 manifest/schema、治理报告或 release gate。
+- [ ] bundle metadata 只用于启动校验和记录 embedding provenance（`embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim`），不新增统一 manifest/schema、治理报告或 release gate。
 - [ ] 模型文件只从 `runtime/models/` 或显式路径读取。
 - [ ] server 启动时如果 `backend = "local"` 但模型路径缺失，必须明确失败。
 - [ ] 不调用会隐式下载模型的 API。
-- [ ] 记录实际模型名、版本、embedding 维度和 runtime，写入 `embedding_model` / `embedding_version`。
+- [ ] 记录实际 embedding 类型、模型名、版本、维度和 runtime，持久写入 `embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim`。
 - [ ] face 模型优先选择成熟 ONNX/InsightFace/ArcFace 类轻量方案。
 - [ ] scene 模型优先选择成熟 CLIP/OpenCLIP/SigLIP/MobileCLIP 类轻量图像 embedding 方案。
 - [ ] 只选一条 face 路径和一条 scene 路径作为主线，不并行维护多套实现。
@@ -84,7 +84,7 @@
 - [ ] 不新增独立向量数据库。
 - [ ] 如果真实模型维度不同，由 `LocalEmbeddingBackend` 初始化时给出 person/scene dim，再复用现有 store 初始化流程，不写硬编码分支。
 - [ ] store / retriever 打开已有 SQLite DB 时，如果 SQLite schema、`sqlite-vec` virtual table 维度或 table shape 与当前 local backend 不匹配，必须 fail fast 并给出明确错误。
-- [ ] `embedding_model` / `embedding_version` 通过 retriever 查询条件过滤；同一次相似度检索不得混查不同 `embedding_type`、`embedding_model`、`embedding_version` 或 `embedding_dim` 的向量。
+- [ ] `embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim` 通过 retriever 查询条件过滤；同一次相似度检索不得混查不同 `embedding_type`、`embedding_model`、`embedding_version` 或 `embedding_dim` 的向量。
 - [ ] 切换模型不会隐式迁移或重建旧向量；必要时人工新 DB 或显式离线迁移，不属于本 checklist。
 - [ ] 已有 fake backend 测试继续通过。
 - [ ] local backend 的测试只覆盖核心运行边界，不对测试工具再写测试。

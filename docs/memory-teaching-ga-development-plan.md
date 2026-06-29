@@ -260,13 +260,13 @@ server recent frame snapshot/history cache
 3. 确保 teach API 是原子 `resolve + write`：
    - teach 内部重新调用 resolver；只有 `resolved` 且质量通过时写库；`resolve-target` dry-run 响应不得被当作后续写库凭证。
    - store 层必须新增 `create_person_with_embedding(...)`、`create_scene_with_embedding(...)` 或等价 transaction context；profile/scene + embedding + embedding provenance all-or-nothing，成功一起提交，失败一起回滚，不能留下 orphan row。
-   - 新增 store/embedding provenance 字段或表，不能只依赖截图或 transient report；至少保存 `source_track_ref`、`source_frame_ref`、`crop_hash`、`crop_path_or_artifact_ref`、`resolver_target_ref`、`resolution_reason`。
+   - 新增 store/embedding provenance 字段或表，不能只依赖截图或 transient report；至少保存 `source_track_ref`、`source_frame_ref`、`crop_hash`、`crop_path_or_artifact_ref`、`resolver_target_ref`、`resolution_reason`、`embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim`。这些字段随 person/scene + embedding 同事务持久提交。
    - 增加 orphan row injection / failure 测试：模拟 embedding 写入、provenance 写入或 profile/scene 写入失败，断言 transaction 回滚且没有孤儿 profile、scene、embedding 或 provenance row。
-   - 所有 no-write case 必须在 response/report 中记录 `store_delta`；`store_delta` 来源于 DB/store 前后快照或 transaction observer，覆盖所有 memory-owned tables。除明确白名单诊断表外，no-write 的每个 memory-owned table delta 都必须为 0。
+   - 所有 no-write case 必须在 response/report 中记录 `store_delta`；`store_delta` 来源于 DB/store 前后快照或 transaction observer，覆盖 store/migration 暴露的 memory-owned table universe。store/migration 层必须暴露或生成 memory-owned table universe 和 allowed diagnostic whitelist，runner/assertion 从该权威来源读取，不手写表名；除该白名单诊断/临时表外，no-write 的每个 memory-owned table delta 都必须为 0，report 列出 universe/whitelist 来源。
 4. 确保 `MemoryService` 只从 server 内部 `MemoryFrameSnapshot` cache 和 request-arrival interaction snapshot 解析 target；无新鲜 stream、snapshot 过期、目标不稳定、歧义或质量不足时明确报错且不写入。
    - `MemoryFrameSnapshot` 由 stream processor/session 在 `TrackSnapshot` 仍包含 keypoints、event result / `scene_context` 仍在内存中时写入 memory frame cache，至少保存 frame bytes/ref、timestamp、image size、tracks、bbox、keypoints、attention target 输入、scene_context / engagement、track freshness / stability。
    - `MemoryService` 不能从 public `visual_state` 重建 keypoints、bbox、track refs；这些字段只能进入内部 resolver、report、visual evidence、runner-only envelope 或 gated internal-only debug/test route，不能进入 agent-facing REST request。
-   - teach / resolve 必须按 request-arrival 绑定新鲜且稳定的 interaction snapshot；记录并检查 `observed_at_ms`、frame timestamp TTL、snapshot TTL、N-of-M stability window。不引入 token、`resolution_id` 或 dry-run 结果复用协议。
+   - teach / resolve 必须按 request-arrival 绑定新鲜且稳定的 interaction snapshot；response/report 必须记录本次解析实际使用的 `request_snapshot_ref`、`source_frame_ref`、frame timestamp、snapshot `observed_at_ms`、frame timestamp TTL、snapshot TTL、N-of-M stability window，并能和固定 frame/window、`visual_evidence_index[]` join。不引入 token、`resolution_id` 或 dry-run 结果复用协议。
 5. 确保 intent-to-target resolver 支持稳定输入 `target.kind=person|scene|object`；`region` 只在测试-only fixture 或后续能力路径中处理，不作为 stable agent-facing capability。正式 `status` 只输出 `resolved`、`ambiguous`、`not_found`；不支持的 target kind 返回 `status=not_found` 并带 `error_code=unsupported_target_kind` / reason。`resolve-target` 和 teach API 使用同一套 resolver，但 teach 不能复用 dry-run 结果。
 6. 正式 REST schema 只允许 agent-facing 字段：`camera`、`target.kind`、`target.intent`、`target.referent_text`、profile/memory metadata。`track_id`、`bbox`、`point_uv`、`test_hint`、`source_scene`、`source_frame` 主路径只能在 runner-only envelope 或 report 出现；如确需 server debug/test channel，只能通过唯一 config gate `memory.test_debug_channel.enabled=true` 的 internal-only route，默认不注册 OpenAPI、不进入生产 handler。
    - Pydantic / strict schema 使用 `extra=forbid`。
@@ -288,12 +288,14 @@ server recent frame snapshot/history cache
    - 正式 request 不接收 bbox/point/test hint 等低层字段。
    - 没有可靠 region hint 或 runner-only fixture 输入时返回 `ambiguous` 或 `not_found`，不写库；debug channel 不是主路径，若启用必须遵守唯一 config gate 和 internal-only route 约束。
    - 如果实现 region crop/query path，report 可以记录 `region_query_path`、`crop_bbox`、`camera`、`embedding_source`、候选数和分数作为非 GA evidence。
-9. 确保 SQLite/sqlite-vec 是唯一正式检索实现；不要添加第二套手写向量检索主路径。
+9. 确保 SQLite/sqlite-vec 是唯一正式检索实现；不要添加第二套手写向量检索主路径。检索必须按 `embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim` 过滤后再进入 sqlite-vec 相似度查询，不能混查不同 type/model/version/dim。person 和 scene 可以使用不同 `embedding_type` / `embedding_dim`，但每次查询必须按目标类型和维度过滤。
 10. 确保 teach/write embedding 通过 bounded worker、线程池或等价非阻塞路径执行；async handler 不能同步跑 local embedding。worker queue、timeout 和 backpressure 必须可配置并写入 report。
 11. 确保后续 recognition 走 bounded multi-person retrieval：对稳定可见 person tracks 做限流/限量检索，不只检查 attention target；复用 worker、cooldown、rate limit，不能阻塞 10Hz/gaze。
 12. 确保 `known_person_present`、`scene_activated`、`familiar_unknown_present` 事件带稳定 evidence，且进入同一 cooldown/rate-limit 路径。
 13. 确保 CLI allowlist 对 memory semantic event 子集只允许 3 类 memory events，并稳定投影 `memory_context`；CLI 不新增身份逻辑，也不删除既有非 memory 事件支持。
 14. 更新 schema/API docs 和 CLI Botified projection docs，列出稳定字段、错误码和 evidence/report 字段边界。
+
+核心逻辑 TDD 最小矩阵：`MemoryFrameSnapshotCache` TTL/N-of-M、`active_interaction_target` no-fallback、pose pointing scorer、bounded worker/backpressure、retrieval caps/cooldown、store_delta observer。
 
 ### 6.2 配置
 
@@ -325,6 +327,7 @@ runtime DB、模型和 artifact 继续保持 gitignored。
 - runner 根据每个场景的 `des.txt` 手工映射正式 REST request body，不调用 LLM 解析。
 - runner-only envelope 与正式 REST request body 必须硬隔离：`source_scene`、`source_frame`、`track_id`、`bbox`、`point_uv`、`test_hint` 主路径只能存在于 envelope 或 report，不能进入稳定 REST contract 示例，也不能伪装成 agent 提供的字段；生产/普通 agent REST 路径不可达，低层 fixture 字段不得进入生产 handler 的 agent-facing request body。
 - 如确需 server debug/test channel，只能通过唯一 config gate `memory.test_debug_channel.enabled=true` 打开 internal-only route；默认 `debug_test_channel_enabled=false`，默认 OpenAPI/生产 handler 不出现低层字段。
+- runner 可以用 stream barrier 或等价方式等待预期固定 frame/window 已进入 `MemoryFrameSnapshot` cache，再发 REST；断言 teach/resolve response/report 使用的 `request_snapshot_ref`、`source_frame_ref`、frame timestamp 和 snapshot `observed_at_ms` 对应预期 snapshot/source frame，而不是其他帧。
 - fake backend 覆盖完整稳定合同；local backend 只做固定样本 smoke，验证真实模型核心路径和同一 API/store/event/CLI 投影路径。
 - local third-person 正例只能固定输入 frame/window；A/B/keypoints/tracks 必须来自真实 `YOLOv8n-pose` + tracker + `active_interaction_target` 路径，不能用 fixture 直接指定被介绍人 B。local core gate 必须同时记录并满足 `debug_test_channel_enabled=false`、`fixture_inputs_consumed=[]`（未消费 target fixture 输入）和 `debug_fixture_used_for_target_resolution=false`。
 - fake backend 可以用构造 keypoints 覆盖 resolver 合同，但必须在 report 中标明 fake/constructed evidence，不能把它当作 local 真实模型通过。
@@ -341,7 +344,7 @@ runtime DB、模型和 artifact 继续保持 gitignored。
 - memory event 到 Botified frame 的对应关系。
 - third-person introduction：画出介绍人 A、被介绍人 B、手臂方向线、候选框、candidate score 和最终 `resolution_reason`。
 - 每张 visual evidence 图必须叠加 `assertion_id`、track refs、stored crop hash/path、event_id 或 `memory_match_id`，确保人工截图能和机器 report 对齐。
-- 生成 `visual_evidence_index[]` 并写入 report；每项至少包含 evidence file path、`assertion_id`、可选 `event_id`、`memory_match_id`、`source_frame_ref`、`stored_crop_frame/path`、`crop_hash`、track refs，runner 必须断言文件存在且这些 key 能 join 到 assertion、event、stored crop 或 replay sample。
+- 生成 `visual_evidence_index[]` 并写入 report；每项至少包含 evidence file path、`assertion_id`、可选 `event_id`、`memory_match_id`、`request_snapshot_ref`、`source_frame_ref`、frame timestamp、snapshot `observed_at_ms`、`stored_crop_frame/path`、`crop_hash`、track refs，runner 必须断言文件存在且这些 key 能 join 到 assertion、teach/resolve response、event、stored crop、固定 frame/window 或 replay sample。
 - 如果启用实验性 region path，记录 region crop 或样本索引作为非 GA evidence。
 - negative cases 截图或样本索引。
 
@@ -507,7 +510,7 @@ ambiguity：
 - 目标不确定时返回 `ambiguous`；teach API 不写入 memory。
 - `target_ambiguous` 不作为 Botified event 输出。
 - `ambiguous` / `not_found` response 必须能被 agent 用来追问用户；不支持目标类型用 `status=not_found` 加 `error_code=unsupported_target_kind` / reason 表达。失败响应不写库、不进入 memory semantic event。
-- no-write response/report 必须断言 `store_delta` 来自 DB/store 前后快照或 transaction observer，覆盖所有 memory-owned tables；除白名单诊断表外，每个 memory-owned table delta 都为 0。
+- no-write response/report 必须断言 `store_delta` 来自 DB/store 前后快照或 transaction observer，覆盖 store/migration 暴露的 memory-owned table universe；allowed diagnostic whitelist 也从同一权威来源读取，不手写表名。除白名单诊断/临时表外，每个 memory-owned table delta 都为 0。
 
 negative cases：
 
@@ -516,7 +519,7 @@ negative cases：
 - `pic_leave`、`pic_walk_away` 等离开场景不应持续刷出已知人物事件。
 - 与已教学人物/整图场景不相似的场景不应输出 confirmed memory event。
 - 低相似度、低质量、无新鲜 frame、过期 runner-only target fixture 都必须返回明确错误或无事件。
-- 所有 negative no-write case 必须断言 `store_delta` 来自 DB/store 前后快照或 transaction observer，覆盖所有 memory-owned tables；除白名单诊断表外，每个 memory-owned table delta 都为 0。
+- 所有 negative no-write case 必须断言 `store_delta` 来自 DB/store 前后快照或 transaction observer，覆盖 store/migration 暴露的 memory-owned table universe；allowed diagnostic whitelist 也从同一权威来源读取，不手写表名。除白名单诊断/临时表外，每个 memory-owned table delta 都为 0。
 
 ### 7.4 fake backend 和 local backend
 
@@ -577,17 +580,17 @@ artifacts/memory-teaching-ga/
 
 - data dir、场景列表、实际跑到的场景数，必须覆盖全 15 个 `val-data` 场景；如使用 auxiliary local smoke scene，单独列出 `auxiliary_local_smoke_scenes[]`。如果 auxiliary scene 加入 `val-data/`，场景数必须为 16+ 并列出新增项。
 - backend 类型、inference pose model path、embedding model path、是否 real model、固定 thresholds/config。
-- short window cache / interaction snapshot 摘要：`MemoryFrameSnapshot` count/source、snapshot timestamp、`observed_at_ms`、frame timestamp TTL、snapshot TTL、freshness、N-of-M stability window、active_interaction_target ref、engagement_state、失败 reason `stale_interaction|no_active_interaction_target`；不包含 agent-facing request 禁止字段。
+- short window cache / interaction snapshot 摘要：`MemoryFrameSnapshot` count/source、`request_snapshot_ref`、`source_frame_ref`、snapshot timestamp、snapshot `observed_at_ms`、frame timestamp、frame timestamp TTL、snapshot TTL、freshness、N-of-M stability window、active_interaction_target ref、engagement_state、失败 reason `stale_interaction|no_active_interaction_target`；不包含 agent-facing request 禁止字段。
 - 每个 des.txt 场景的正式 request 摘要：`camera`、`target.kind`、`target.intent`、`referent_text`、`profile.display_name` 或 `memory.title/description`。
 - third-person introduction 结果：introducer/target 内部 refs、arm side、pose keypoint confidence、candidate scores、margin、N-of-M stability result、`resolution_reason=pose_pointing_to_person`、`debug_test_channel_enabled=false`、`fixture_inputs_consumed=[]`（未消费 target fixture 输入）、`debug_fixture_used_for_target_resolution=false` 和是否写库。
 - third-person 写库证明字段：`stored_person_id`、`stored_embedding_source_track_ref`、`stored_crop_frame/path`、`stored_crop_hash`、`profile.display_name`、`resolver_target_ref`、`introducer_ref`、B-positive replay result、A-only negative replay result。runner 必须断言 `stored_embedding_source_track_ref == resolver_target_ref` 且 `stored_embedding_source_track_ref != introducer_ref`，并从 `stored_crop_frame/path` 重算 `stored_crop_hash`。
-- embedding provenance：store/DB 持久字段或表中的 `source_track_ref`、`source_frame_ref`、`crop_hash`、`crop_path_or_artifact_ref`、`resolver_target_ref`、`resolution_reason`，以及与 person/scene + embedding 同事务提交的结果。
+- embedding provenance：store/DB 持久字段或表中的 `source_track_ref`、`source_frame_ref`、`crop_hash`、`crop_path_or_artifact_ref`、`resolver_target_ref`、`resolution_reason`、`embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim`，以及与 person/scene + embedding 同事务提交的结果。report 必须列出本次检索使用的 type/model/version/dim filter，证明没有混查不同 embedding。
 - B-positive / A-only replay 样本标注：每个样本的 A/B 人工标注、frame/window、截图或 frame path、期望结果和实际结果。
 - bounded multi-person recognition 字段：`tracks_seen`、`tracks_eligible`、`tracks_queried`、`tracks_skipped_reason`、`attention_target_only=false`，证明不是 attention-only retrieval。
 - runner-only envelope 摘要：`source_scene`、固定 teach frame、target fixture 输入、resolver evidence；这些不得混入正式 request body。
 - teach/resolve/summary/link/merge/correct API 调用结果。
 - 失败 response 字段：`retryable`、`ask_user_hint`、`ambiguity_type`。
-- no-write cases 的 `store_delta` 和 `store_delta_source`：来源必须是 DB/store 前后快照或 transaction observer，覆盖所有 memory-owned tables；除白名单诊断表外，每个 memory-owned table delta 都为 0。
+- no-write cases 的 `store_delta` 和 `store_delta_source`：来源必须是 DB/store 前后快照或 transaction observer，覆盖 store/migration 暴露的 memory-owned table universe；allowed diagnostic whitelist 也从该权威来源读取。除白名单诊断/临时表外，每个 memory-owned table delta 都为 0，report 列出 universe/whitelist 的来源。
 - DB transaction 结果：`create_person_with_embedding(...)`、`create_scene_with_embedding(...)` 或等价 transaction context 是否覆盖 profile/scene + embedding + provenance all-or-nothing，并包含 orphan row injection / failure 测试结果。
 - replay assertions。
 - memory event 计数、cooldown/drop 计数，并按 3 类事件分组。
@@ -598,7 +601,7 @@ artifacts/memory-teaching-ga/
 - negative cases 结果。
 - 如果启用实验性 scene region，记录正/负例结果以及 region query path/crop evidence，并标记为非 GA evidence。
 - 每个失败 assertion 的 `failure_category` 和最小证据路径。
-- `visual_evidence_index[]`：每个文件路径存在，且 key 能 join 到 assertion、event、stored crop 或 replay sample；每张图可通过 `assertion_id`、track refs、stored crop hash/path、event_id 或 `memory_match_id` 对齐机器 report。
+- `visual_evidence_index[]`：每个文件路径存在，且 key 能 join 到 assertion、teach/resolve response、event、stored crop、固定 frame/window 或 replay sample；每张图可通过 `assertion_id`、`request_snapshot_ref`、`source_frame_ref`、frame timestamp、snapshot `observed_at_ms`、track refs、stored crop hash/path、event_id 或 `memory_match_id` 对齐机器 report。
 
 ## 8. 验收标准
 
@@ -610,17 +613,17 @@ core GA gate：
 - 已完成 public `target.kind` 到内部 target 结构的 adapter / schema migration，`des.txt` 映射出的正式 request 可被当前服务执行；`region` 只作为测试-only fixture 或后续能力，不作为 stable agent-facing GA capability。
 - 正式 REST contract 和示例只包含 `camera`、`target.kind`、`target.intent`、`target.referent_text`、profile/memory metadata；Pydantic / strict schema `extra=forbid`；生产 handler 单元测试禁止 `track_id`、`bbox`、`point_uv`、`test_hint`、`source_scene`、`source_frame`；debug/test channel 默认关闭且只由唯一 config gate 打开 internal-only route，默认 OpenAPI/生产 handler 不出现低层字段。
 - server 内部 `MemoryFrameSnapshot` cache 包含 resolver 所需的 frame bytes/ref、timestamp、image size、tracks、bbox、keypoints、attention target 输入、event result、scene_context / engagement、track freshness / stability；它由 stream processor/session 在 `TrackSnapshot` 和 scene_context 仍在内存中时写入，不能由 `MemoryService` 从 public `visual_state` 重建；这些字段不进入 agent-facing request。
-- teach / resolve 到达时绑定新鲜稳定的 request-arrival interaction snapshot；snapshot 过期、不稳定或无 `active_interaction_target` 时返回失败，不写库；report 包含 `observed_at_ms`、frame timestamp TTL、snapshot TTL、N-of-M stability window 和失败 reason `stale_interaction|no_active_interaction_target`；不引入 `resolution_id` 或 token。
+- teach / resolve 到达时绑定新鲜稳定的 request-arrival interaction snapshot；snapshot 过期、不稳定或无 `active_interaction_target` 时返回失败，不写库；teach/resolve response 和 report 包含本次实际使用的 `request_snapshot_ref`、`source_frame_ref`、frame timestamp、snapshot `observed_at_ms`、frame timestamp TTL、snapshot TTL、N-of-M stability window 和失败 reason `stale_interaction|no_active_interaction_target`，并可 join 到固定 frame/window 和 `visual_evidence_index[]`；不引入 `resolution_id` 或 token。
 - teach API 是原子 `resolve + write`：teach 内部重新 resolve；store 层通过 `create_person_with_embedding(...)`、`create_scene_with_embedding(...)` 或等价 transaction context 让 profile/scene + embedding + provenance all-or-nothing；orphan row injection / failure 测试通过。
 - fake backend 下 core 合同通过：self introduction、third-person introduction resolved/ambiguous、known replay、whole-scene teach/activation、ambiguous/no-write、object unsupported、bounded retrieval、nonblocking、Botified projection。
 - local backend 下至少通过一次来自 `pic_teach_me` 的真实店门口 self introduction `teach_person -> known_person_present`；self introduction 只接受新鲜、可互动、可见的 `active_interaction_target`，attention target 只作为派生输入，不走 raw attention target、单人、最近或最大候选 fallback；这不是合成治理用例。
 - self introduction 负例必须覆盖用户说“请记住我/我是 xxx”但 `active_interaction_target` 不稳定或多人无法确定时返回 `ambiguous`，不写库，并带 `retryable=true`、`ask_user_hint=true`、`ambiguity_type=target_unclear`，response/report 记录可供 agent 追问重新说明、靠近或单独站位的失败事件。
 - local backend 下至少通过一次真实模型 third-person introduction `pose_pointing_to_person -> teach_person -> known_person_present`；local 正例只能固定 frame/window，不能指定 B，且必须记录 `debug_test_channel_enabled=false`、`fixture_inputs_consumed=[]`（未消费 target fixture 输入）、`debug_fixture_used_for_target_resolution=false`。
-- third-person 写库必须用 `stored_person_id`、`stored_embedding_source_track_ref`、`stored_crop_frame/path`、`stored_crop_hash`、`profile.display_name`、`resolver_target_ref`、`introducer_ref` 和持久 embedding provenance 证明写入的是 B 不是 A；runner 必须断言 `stored_embedding_source_track_ref == resolver_target_ref` 且 `stored_embedding_source_track_ref != introducer_ref`，并从 `stored_crop_frame/path` 重算 crop hash。
+- third-person 写库必须用 `stored_person_id`、`stored_embedding_source_track_ref`、`stored_crop_frame/path`、`stored_crop_hash`、`profile.display_name`、`resolver_target_ref`、`introducer_ref` 和持久 embedding provenance 证明写入的是 B 不是 A；provenance 必须包含 `embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim`。runner 必须断言 `stored_embedding_source_track_ref == resolver_target_ref` 且 `stored_embedding_source_track_ref != introducer_ref`，并从 `stored_crop_frame/path` 重算 crop hash。
 - third-person 必须通过有 A/B 标注的 B-positive replay 和 A-only negative replay；A 指向不清、候选接近、没有 `active_interaction_target`、手臂关键点不足或 snapshot stale 时返回 `ambiguous`，不写库，并返回 `retryable`、`ask_user_hint`、`ambiguity_type`。
 - local backend 下至少通过一次真实模型 whole-scene `teach_scene -> scene_activated`。
-- known-person recognition 对稳定可见 person tracks 做 bounded multi-person retrieval，不只查 attention target；report 必须包含 `tracks_seen`、`tracks_eligible`、`tracks_queried`、`tracks_skipped_reason`、`attention_target_only=false`、max tracks、rate limit、worker backlog 和 cooldown。
-- local/fake backend 下 ambiguous、not_found、conflict、object unsupported 等 no-write cases 都断言 `store_delta` 来源于 DB/store 前后快照或 transaction observer，覆盖所有 memory-owned tables；除白名单诊断表外，每个 memory-owned table delta 都为 0。
+- known-person recognition 对稳定可见 person tracks 做 bounded multi-person retrieval，不只查 attention target；检索必须按 `embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim` 过滤，不混查不同 embedding，person/scene 可有不同 type/dim；report 必须包含 filter、`tracks_seen`、`tracks_eligible`、`tracks_queried`、`tracks_skipped_reason`、`attention_target_only=false`、max tracks、rate limit、worker backlog 和 cooldown。
+- local/fake backend 下 ambiguous、not_found、conflict、object unsupported 等 no-write cases 都断言 `store_delta` 来源于 DB/store 前后快照或 transaction observer，覆盖 store/migration 暴露的 memory-owned table universe；allowed diagnostic whitelist 从同一权威来源读取，除白名单诊断/临时表外，每个 memory-owned table delta 都为 0，report 列出 universe/whitelist 来源。
 - local/fake backend 下 `target.kind=object` 是 negative-only：返回 `status=not_found` 且带 `error_code=unsupported_target_kind` / reason；`pic_teach_item_phone` 不被当作 person/object memory 主线成功，不声称手机记忆可用。
 - memory semantic event 子集只包含 `known_person_present`、`familiar_unknown_present`、`scene_activated`；teach/merge/correction/ambiguity 等结果只在 API response/report/evidence 中出现，既有非 memory semantic events 不在本条约束内。
 - memory event 不误触发、不刷屏：无关场景不输出 confirmed memory event；同 person/scene/anonymous 在 cooldown 内不会重复输出 Botified frame。
@@ -639,8 +642,8 @@ supporting contract/report gate：
 人工 visual evidence 必须满足：
 
 - 能看到 teach frame、payload 摘要、resolve-target 预览、replay event 和 Botified frame 的对应关系。
-- 每张图叠加 `assertion_id`、track refs、stored crop hash/path、event_id 或 `memory_match_id`，能和 `report.json` 中的同名字段对齐。
-- `visual_evidence_index[]` 中每个文件都存在，且 key 能 join 到 assertion、event、stored crop 或 replay sample。
+- 每张图叠加 `assertion_id`、`request_snapshot_ref`、`source_frame_ref`、frame timestamp、track refs、stored crop hash/path、event_id 或 `memory_match_id`，能和 `report.json` 中的同名字段对齐。
+- `visual_evidence_index[]` 中每个文件都存在，且 key 能 join 到 assertion、teach/resolve response、event、stored crop、固定 frame/window 或 replay sample。
 - 能快速检查至少一个 self introduction person 正例、一个 third-person introduction person 正例、一个 scene 整图正例、一个 familiar/merge 样例、一个 correction 样例、一个 ambiguity 样例、一个 negative 样例；third-person introduction 证据需要画出介绍人、被介绍人、手臂方向和候选分数，实验性 region 如启用则额外展示其正/负例 evidence。
 - visual evidence 不作为硬 gate；它不能替代 report assertions。
 
@@ -656,17 +659,17 @@ supporting contract/report gate：
 3. 确认正式 REST contract 与示例不包含 `track_id`、`bbox`、`point_uv`、`test_hint`、`source_scene`、`source_frame`；Pydantic / strict schema `extra=forbid`，生产 handler 单元测试覆盖这些字段被拒绝或不可达。
 4. 确认 runner-only envelope 不混入 agent-facing request body；如确需 debug/test channel，只能由唯一 config gate `memory.test_debug_channel.enabled=true` 打开 internal-only route，默认关闭、默认不进 OpenAPI/生产 handler。
 5. 确认 stream processor/session 写入内部 `MemoryFrameSnapshot`，其中保存 frame bytes/ref、timestamp、image size、tracks、bbox、keypoints、attention target 输入、event result、scene_context / engagement、track freshness / stability；`MemoryService` 不从 public `visual_state` 重建这些字段，并只供内部 resolver 使用。
-6. 确认 teach / resolve 使用 request-arrival interaction snapshot；report 记录 `observed_at_ms`、frame timestamp TTL、snapshot TTL、N-of-M stability window，没有 snapshot、snapshot stale 或无 `active_interaction_target` 时失败不写库，reason 为 `stale_interaction|no_active_interaction_target` 等固定枚举。
+6. 确认 teach / resolve 使用 request-arrival interaction snapshot；response/report 记录实际使用的 `request_snapshot_ref`、`source_frame_ref`、frame timestamp、snapshot `observed_at_ms`、frame timestamp TTL、snapshot TTL、N-of-M stability window，并能 join 到固定 frame/window 和 `visual_evidence_index[]`；runner 用 stream barrier 或等价方式证明 REST 到达前预期 fixed frame/window 已进入 `MemoryFrameSnapshot` cache，没有 snapshot、snapshot stale 或无 `active_interaction_target` 时失败不写库，reason 为 `stale_interaction|no_active_interaction_target` 等固定枚举。
 7. 确认 teach API 内部重新 resolve，并通过 `create_person_with_embedding(...)`、`create_scene_with_embedding(...)` 或等价 transaction context 原子写库；profile/scene + embedding + provenance all-or-nothing；`resolve-target` 只是 dry-run/debug/agent 追问辅助，不提供写库承诺。
 8. 确认 intent-to-target resolver 接受 stable `target.kind=person|scene|object`，`region` 仅为测试-only fixture 或后续能力；正式 `status` 只输出 `resolved`、`ambiguous`、`not_found`。
 9. 确认 `target.intent=self_introduction` 只使用新鲜、可互动、可见的 `active_interaction_target` 解析“我”；attention target 只作为派生输入，不走 raw attention target、单人、最近或最大候选 fallback。
 10. 确认 `target.intent=third_person_introduction` 使用 `active_interaction_target` 作为介绍人 A，并用现有 `YOLOv8n-pose` keypoints + tracker + pose pointing resolver 解析 B；不新增模型，不依赖 speaker track 或音频定位，不允许 raw attention target fallback 写库。
 11. 确认 pose pointing scoring 的手臂向量、torso center、N-of-M 稳定窗口、归一化阈值、左右臂冲突策略、候选 margin 都在 config defaults 和 report fields 中。
-12. 确认 embedding provenance 持久保存 `source_track_ref`、`source_frame_ref`、`crop_hash`、`crop_path_or_artifact_ref`、`resolver_target_ref`、`resolution_reason`。
+12. 确认 embedding provenance 持久保存 `source_track_ref`、`source_frame_ref`、`crop_hash`、`crop_path_or_artifact_ref`、`resolver_target_ref`、`resolution_reason`、`embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim`；retriever/report 证明查询按 type/model/version/dim 过滤，不混查不同 embedding，person/scene 可有不同 type/dim。
 13. 确认第三人称写库可机器证明写的是 B 不是 A：`stored_embedding_source_track_ref == resolver_target_ref` 且 `stored_embedding_source_track_ref != introducer_ref`，stored crop hash 可从 `stored_crop_frame/path` 重算，并要求有 A/B 标注的 B-positive replay 与 A-only negative replay。
 14. 确认 teach/write embedding 和 bounded multi-person recognition 都走 bounded worker / 线程池或等价非阻塞路径；recognition 对稳定可见 person tracks 限流/限量 retrieval，不只查 attention target，report 包含 `tracks_seen`、`tracks_eligible`、`tracks_queried`、`tracks_skipped_reason`、`attention_target_only=false`。
 15. 确认 duplicate teach strategy：同名/同 external ref 更新 metadata；同脸不同名返回 `conflict` 不新建；anonymous match 走 link/merge path；不自动 duplicate。
-16. 确认 no-write cases 的 `store_delta` 来自 DB/store 前后快照或 transaction observer，覆盖所有 memory-owned tables，除白名单诊断表外 delta 全为 0。
+16. 确认 no-write cases 的 `store_delta` 来自 DB/store 前后快照或 transaction observer，覆盖 store/migration 暴露的 memory-owned table universe；allowed diagnostic whitelist 从同一权威来源读取，runner/assertion 不手写表名；除白名单诊断/临时表外 delta 全为 0，report 列出 universe/whitelist 来源。
 17. 确认 object 是 negative-only；`target.kind=object` 返回 unsupported，不写库，不降级为 scene/region。确认 region 不作为 stable agent-facing GA capability。GA 示例和验收主线不得漂移到 region/object teaching；region/object 只作为 next/辅助测试素材，不作为 0.3/0.4 GA 交付承诺。
 18. 确认 `familiar_unknown_present` 只作为 supporting contract/report gate，不作为 core GA 发布能力宣称。
 19. 确认 CLI 对 memory semantic event 子集只消费 3 类 memory event，做 allowlist、幂等、rate limit 和 Botified projection，同时继续支持既有非 memory 事件。
@@ -674,9 +677,9 @@ supporting contract/report gate：
 21. 在 runner 中列出并 replay `val-data/` 全 15 场景，采集 des.txt request、runner-only envelope、Botified stdout、timeline、report 和 visual evidence；如果 auxiliary scene 加入 `val-data/`，场景数必须为 16+ 并列出。
 22. 手工把 4 个 `des.txt` 内容转换为正式 request；不要调用 LLM 自动解析。
 23. 确认 `pic_teach_person` 或专门多人介绍场景满足 local third-person smoke；local 正例固定 frame/window，不能指定 B，report 记录 A/B 人工标注、期望 arm side、人工确认截图、`debug_test_channel_enabled=false`、`fixture_inputs_consumed=[]`（未消费 target fixture 输入）、`debug_fixture_used_for_target_resolution=false`。
-24. 实现 core GA assertions：self introduction、third-person introduction、known replay、whole-scene、ambiguous/no-write、object negative、nonblocking。
+24. 实现 core GA assertions：self introduction、third-person introduction、known replay、whole-scene、ambiguous/no-write、object negative、nonblocking；小单元矩阵覆盖 `MemoryFrameSnapshotCache` TTL/N-of-M、`active_interaction_target` no-fallback、pose pointing scorer、bounded worker/backpressure、retrieval caps/cooldown、store_delta observer。
 25. 实现 supporting contract/report assertions：familiar、merge、correct、resolve-target response contract、summary、external link、duplicate teach strategy；region 只在启用实验 path 时作为额外 evidence。
-26. 输出 `report.json`、`timeline.jsonl`、`teach_payloads.json`、`api_responses.jsonl`、`botified_frames.jsonl` 和 visual evidence；report 包含 `visual_evidence_index[]`，每张 visual evidence 图和 report 通过 `assertion_id`、track refs、stored crop hash/path、event_id 或 `memory_match_id` 对齐。
+26. 输出 `report.json`、`timeline.jsonl`、`teach_payloads.json`、`api_responses.jsonl`、`botified_frames.jsonl` 和 visual evidence；report 包含 `visual_evidence_index[]`，每张 visual evidence 图和 report 通过 `assertion_id`、`request_snapshot_ref`、`source_frame_ref`、frame timestamp、track refs、stored crop hash/path、event_id 或 `memory_match_id` 对齐。
 27. 分别跑 fake backend 和 local backend；local backend 必须显式传模型路径，且只声称固定样本 smoke。
 28. 检查 `val-data/`、runtime DB、模型、cache、artifacts 没有进入 Git。
 29. 更新 server handoff、test plan、API/schema 文档和 CLI Botified 投影文档中的最小必要说明。
