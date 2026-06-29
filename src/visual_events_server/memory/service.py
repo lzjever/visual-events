@@ -40,6 +40,7 @@ from .target_resolver import (
 _LOGGER = logging.getLogger(__name__)
 
 _PERSON_EMBEDDING_CROP_MARGIN_RATIO = 0.10
+_MAX_PERSON_QUERY_TRACKS = 4
 
 
 class MemoryServiceError(RuntimeError):
@@ -61,8 +62,6 @@ class MemoryServiceError(RuntimeError):
 @dataclass(frozen=True)
 class _QueryPlan:
     cached: CachedFrame
-    tracks: list[TrackSnapshot]
-    attention: AttentionResult | None
 
 
 class AppMemoryService:
@@ -142,8 +141,6 @@ class AppMemoryService:
         self._last_query_frame_timestamp_ms[frame.camera] = frame.timestamp_ms
         plan = _QueryPlan(
             cached=self._cache.get_fresh(frame.camera),
-            tracks=_tracks_from_visual_state(visual_state, frame=frame),
-            attention=_attention_from_visual_state(visual_state),
         )
         loop = asyncio.get_running_loop()
         self._pending_queries_by_camera[frame.camera] = loop.run_in_executor(
@@ -624,32 +621,50 @@ class AppMemoryService:
 
     def _run_query(self, plan: _QueryPlan) -> list[tuple[str, dict[str, Any]]]:
         completed: list[tuple[str, dict[str, Any]]] = []
-        person_target = self._query_person_target(plan)
-        if person_target is not None:
+        for person_target in self._query_person_targets(plan):
             person_event = self._query_person(plan, person_target)
             if person_event is not None:
                 completed.append((plan.cached.frame.camera, person_event))
+                break
         scene_event = self._query_scene(plan)
         if scene_event is not None:
             completed.append((plan.cached.frame.camera, scene_event))
         return completed
 
-    def _query_person_target(
+    def _query_person_targets(
         self,
         plan: _QueryPlan,
-    ) -> ResolvedTarget | None:
-        if plan.attention is None:
-            return None
-        try:
-            return self._resolver.resolve(
-                TargetRequest(mode="attention_target"),
-                image_width=plan.cached.frame.width,
-                image_height=plan.cached.frame.height,
-                tracks=plan.tracks,
-                attention=plan.attention,
+    ) -> list[ResolvedTarget]:
+        snapshot = plan.cached.memory_snapshot
+        if snapshot is None:
+            return []
+
+        targets: list[ResolvedTarget] = []
+        for track in snapshot.tracks:
+            if len(targets) >= _MAX_PERSON_QUERY_TRACKS:
+                break
+            if not _recognition_track_eligible(track):
+                continue
+            try:
+                resolved = self._resolver.resolve(
+                    TargetRequest(mode="track_id", track_id=track.track_id),
+                    image_width=snapshot.image_size[0],
+                    image_height=snapshot.image_size[1],
+                    tracks=snapshot.tracks,
+                    attention=snapshot.attention,
+                )
+            except TargetResolveError:
+                continue
+            targets.append(
+                ResolvedTarget(
+                    source_target_mode="recognition_track",
+                    target_type=resolved.target_type,
+                    bbox_xyxy=resolved.bbox_xyxy,
+                    track_id=resolved.track_id,
+                    quality=resolved.quality,
+                )
             )
-        except TargetResolveError:
-            return None
+        return targets
 
     def _query_person(
         self,
@@ -912,6 +927,14 @@ def _target_ambiguous_error(ambiguity_type: str) -> MemoryServiceError:
         "target requires an active interaction target",
         status_code=409,
         details=_ambiguous_target_response(ambiguity_type),
+    )
+
+
+def _recognition_track_eligible(track: TrackSnapshot) -> bool:
+    return (
+        track.class_name == "person"
+        and track.lost_ms == 0
+        and track.hits > 0
     )
 
 

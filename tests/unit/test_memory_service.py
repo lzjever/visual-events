@@ -45,8 +45,10 @@ class SequencePersonEmbeddingBackend(FakeEmbeddingBackend):
     ) -> None:
         super().__init__(person_dim=len(person_vectors[0]), scene_dim=scene_dim)
         self._person_vectors = list(person_vectors)
+        self.person_inputs: list[bytes] = []
 
     def embed_person(self, image_crop: bytes):
+        self.person_inputs.append(image_crop)
         if not self._person_vectors:
             raise AssertionError("no person embedding vector queued")
         return EmbeddingResult(
@@ -192,6 +194,77 @@ def memory_snapshot(
             "target_track_id": scene_target_track_id,
         },
         semantic_events=[],
+    )
+
+
+def memory_snapshot_with_tracks(
+    tracks: list[TrackSnapshot],
+    *,
+    frame_message: FrameMessage | None = None,
+    attention_track_id: int | None = 7,
+    scene_target_track_id: int | None = 7,
+) -> MemoryFrameSnapshot:
+    source_frame = frame_message or frame()
+    attention = (
+        AttentionResult(
+            target_track_id=attention_track_id,
+            target_uv=(500.0, 160.0),
+            reason="largest_stable_person",
+            confidence=0.9,
+            largest_person_stable=True,
+        )
+        if attention_track_id is not None
+        else None
+    )
+    return MemoryFrameSnapshot(
+        connection_id="ws_1",
+        frame=source_frame,
+        source_frame_ref=f"{source_frame.camera}:{source_frame.frame_id}:{source_frame.timestamp_ms}",
+        snapshot_ref=f"snapshot:{source_frame.camera}:{source_frame.frame_id}",
+        observed_at_ms=10_000,
+        image_size=(source_frame.width, source_frame.height),
+        tracks=tracks,
+        attention=attention,
+        scene_context={
+            "engagement_state": "available",
+            "attention_available": attention is not None,
+            "target_track_id": scene_target_track_id,
+        },
+        semantic_events=[],
+    )
+
+
+def person_track(
+    track_id: int,
+    *,
+    bbox_xyxy: tuple[float, float, float, float] | None = None,
+    class_name: str = "person",
+    lost_ms: int = 0,
+    hits: int = 2,
+    frame_message: FrameMessage | None = None,
+) -> TrackSnapshot:
+    source_frame = frame_message or frame()
+    bbox = bbox_xyxy or (
+        300.0 + float(track_id),
+        100.0,
+        700.0 + float(track_id),
+        650.0,
+    )
+    return TrackSnapshot(
+        track_id=track_id,
+        first_seen_ms=source_frame.timestamp_ms - 800,
+        last_seen_ms=source_frame.timestamp_ms - lost_ms,
+        frame_timestamp_ms=source_frame.timestamp_ms,
+        bbox_xyxy=bbox,
+        confidence=0.92,
+        pose_confidence=0.81,
+        head_uv=((bbox[0] + bbox[2]) / 2.0, bbox[1] + 50.0),
+        velocity_uv_s=(0.0, 0.0),
+        lost_ms=lost_ms,
+        hits=hits,
+        misses=0,
+        class_name=class_name,
+        keypoints=(),
     )
 
 
@@ -814,6 +887,188 @@ async def test_teach_scene_rejects_bbox_target_without_writing_scene(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_memory_query_uses_snapshot_tracks_not_public_visual_state(tmp_path):
+    match_vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(person_vectors=[match_vector])
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_person(subject, backend, vector=match_vector, display_name="Snapshot Person")
+    source_frame = frame(frame_id=2, timestamp_ms=1_500)
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [person_track(8, frame_message=source_frame)],
+            frame_message=source_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    events = await _drain_memory_events(
+        subject,
+        camera="front",
+        connection_id="ws_1",
+        frame_id=2,
+        frame_timestamp_ms=1_500,
+    )
+
+    assert [event["event"] for event in events] == ["known_person_present"]
+    assert events[0]["track_id"] == 8
+    assert events[0]["evidence"]["source_target_mode"] == "recognition_track"
+    assert events[0]["memory_context"]["person"]["display_name"] == "Snapshot Person"
+    assert len(backend.person_inputs) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_query_without_snapshot_does_not_emit_known_person_event(tmp_path):
+    match_vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(person_vectors=[match_vector])
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_person(subject, backend, vector=match_vector, display_name="张三")
+
+    query_frame = frame(frame_id=2, timestamp_ms=1_500)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=query_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+    )
+    events = await _drain_memory_events(
+        subject,
+        camera="front",
+        connection_id="ws_1",
+        frame_id=2,
+        frame_timestamp_ms=1_500,
+    )
+
+    assert events == []
+    assert backend.person_inputs == []
+
+
+@pytest.mark.asyncio
+async def test_memory_query_scans_multiple_eligible_person_tracks_not_attention_only(
+    tmp_path,
+):
+    miss_vector = _unit_vector(1)
+    match_vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[miss_vector, match_vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_person(subject, backend, vector=match_vector, display_name="Track Eight")
+    source_frame = frame(frame_id=2, timestamp_ms=1_500)
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [
+                person_track(7, frame_message=source_frame),
+                person_track(8, frame_message=source_frame),
+            ],
+            frame_message=source_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    events = await _drain_memory_events(
+        subject,
+        camera="front",
+        connection_id="ws_1",
+        frame_id=2,
+        frame_timestamp_ms=1_500,
+    )
+
+    assert [event["event"] for event in events] == ["known_person_present"]
+    assert events[0]["track_id"] == 8
+    assert events[0]["evidence"]["source_target_mode"] == "recognition_track"
+    assert len(backend.person_inputs) == 2
+
+
+@pytest.mark.asyncio
+async def test_memory_query_respects_max_person_tracks_bound(tmp_path):
+    match_vector = _unit_vector(5)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[
+            _unit_vector(0),
+            _unit_vector(1),
+            _unit_vector(2),
+            _unit_vector(3),
+            match_vector,
+        ],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_person(subject, backend, vector=match_vector, display_name="Fifth Person")
+    source_frame = frame(frame_id=2, timestamp_ms=1_500)
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [person_track(track_id, frame_message=source_frame) for track_id in range(1, 6)],
+            frame_message=source_frame,
+            attention_track_id=1,
+            scene_target_track_id=1,
+        ),
+    )
+    events = await _drain_memory_events(
+        subject,
+        camera="front",
+        connection_id="ws_1",
+        frame_id=2,
+        frame_timestamp_ms=1_500,
+    )
+
+    assert events == []
+    assert len(backend.person_inputs) == 4
+
+
+@pytest.mark.asyncio
+async def test_memory_query_skips_ineligible_person_tracks(tmp_path):
+    match_vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(person_vectors=[match_vector])
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_person(subject, backend, vector=match_vector, display_name="Valid Track")
+    source_frame = frame(frame_id=2, timestamp_ms=1_500)
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [
+                person_track(7, lost_ms=100, frame_message=source_frame),
+                person_track(8, class_name="bag", frame_message=source_frame),
+                person_track(9, hits=0, frame_message=source_frame),
+                person_track(
+                    10,
+                    bbox_xyxy=(100.0, 100.0, 105.0, 105.0),
+                    frame_message=source_frame,
+                ),
+                person_track(11, frame_message=source_frame),
+            ],
+            frame_message=source_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    events = await _drain_memory_events(
+        subject,
+        camera="front",
+        connection_id="ws_1",
+        frame_id=2,
+        frame_timestamp_ms=1_500,
+    )
+
+    assert [event["event"] for event in events] == ["known_person_present"]
+    assert events[0]["track_id"] == 11
+    assert events[0]["evidence"]["source_target_mode"] == "recognition_track"
+    assert len(backend.person_inputs) == 1
+
+
+@pytest.mark.asyncio
 async def test_observe_visual_state_does_not_wait_for_blocking_memory_query(tmp_path):
     now = 10_000
     clock = lambda: now
@@ -836,10 +1091,12 @@ async def test_observe_visual_state_does_not_wait_for_blocking_memory_query(tmp_
         clock_ms=clock,
     )
 
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(frame_id=1, timestamp_ms=1_000),
+        frame=first_frame,
         visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=first_frame),
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     person = await subject.teach_person(
@@ -851,11 +1108,13 @@ async def test_observe_visual_state_does_not_wait_for_blocking_memory_query(tmp_
     )
     backend.block_queries = True
 
+    query_frame = frame(frame_id=2, timestamp_ms=1_500)
     started = time.perf_counter()
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(frame_id=2, timestamp_ms=1_500),
+        frame=query_frame,
         visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot(frame_message=query_frame),
     )
     elapsed = time.perf_counter() - started
 
@@ -928,6 +1187,42 @@ def _count_rows(store: MemoryStore, table: str) -> int:
 
 def _assert_allowed_ambiguity(payload: dict) -> None:
     assert payload["ambiguity_type"] in ALLOWED_AMBIGUITY_TYPES
+
+
+def _unit_vector(index: int, *, dim: int = 8) -> tuple[float, ...]:
+    vector = [0.0] * dim
+    vector[index] = 1.0
+    return tuple(vector)
+
+
+def _seed_person(
+    subject: AppMemoryService,
+    backend: FakeEmbeddingBackend,
+    *,
+    vector: tuple[float, ...],
+    display_name: str,
+    person_id: str = "person_seeded",
+    now_ms: int = 10_000,
+) -> None:
+    subject.store.upsert_person_profile(
+        person_id=person_id,
+        display_name=display_name,
+        description="",
+        tags=(),
+        now_ms=now_ms,
+    )
+    subject.store.add_person_embedding(
+        person_id=person_id,
+        result=EmbeddingResult(
+            vector=vector,
+            embedding_type="face",
+            embedding_model=backend.person_model,
+            embedding_version=backend.model_version,
+            quality=1.0,
+        ),
+        source_target_type="test_seed",
+        now_ms=now_ms,
+    )
 
 
 @pytest.mark.asyncio
@@ -1026,10 +1321,12 @@ async def test_teach_summary_link_and_low_frequency_memory_events(tmp_path):
         clock_ms=clock,
     )
 
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(frame_id=1, timestamp_ms=1_000),
+        frame=first_frame,
         visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=first_frame),
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     person = await subject.teach_person(
@@ -1074,10 +1371,12 @@ async def test_teach_summary_link_and_low_frequency_memory_events(tmp_path):
     assert external["conversation_summaries"][0].startswith("上次问过新品尺码")
     assert len(external["conversation_summaries"][0]) <= 240
 
+    query_frame = frame(frame_id=2, timestamp_ms=1_500)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(frame_id=2, timestamp_ms=1_500),
+        frame=query_frame,
         visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot(frame_message=query_frame),
     )
     first = await _drain_memory_events(
         subject,
@@ -1150,10 +1449,12 @@ async def test_unknown_person_becomes_familiar_unknown_then_merge_suppresses_ano
         clock_ms=clock,
     )
 
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(frame_id=1, timestamp_ms=1_000),
+        frame=first_frame,
         visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=first_frame),
     )
     await _wait_for_memory_query_idle(subject, camera="front")
     assert store.search_anonymous_embeddings(backend.embed_person(b"unused"), limit=2)
@@ -1168,10 +1469,12 @@ async def test_unknown_person_becomes_familiar_unknown_then_merge_suppresses_ano
     )
 
     now = 10_600
+    second_frame = frame(frame_id=2, timestamp_ms=1_600)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(frame_id=2, timestamp_ms=1_600),
+        frame=second_frame,
         visual_state=visual_state(frame_id=2, timestamp_ms=1_600),
+        memory_snapshot=memory_snapshot(frame_message=second_frame),
     )
     events = await _drain_memory_events(
         subject,
@@ -1197,10 +1500,12 @@ async def test_unknown_person_becomes_familiar_unknown_then_merge_suppresses_ano
     assert store.get_active_anonymous_profile(anonymous_id) is None
 
     now = 11_200
+    third_frame = frame(frame_id=3, timestamp_ms=2_200)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(frame_id=3, timestamp_ms=2_200),
+        frame=third_frame,
         visual_state=visual_state(frame_id=3, timestamp_ms=2_200),
+        memory_snapshot=memory_snapshot(frame_message=third_frame),
     )
     events = await _drain_memory_events(
         subject,
@@ -1263,10 +1568,12 @@ async def test_correct_identity_blocks_same_wrong_candidate_without_deleting_pro
         now_ms=now,
     )
 
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(frame_id=1, timestamp_ms=1_000),
+        frame=first_frame,
         visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=first_frame),
     )
     events = await _drain_memory_events(
         subject,
@@ -1292,10 +1599,12 @@ async def test_correct_identity_blocks_same_wrong_candidate_without_deleting_pro
     }
     assert store.get_person_profile("person_wrong") is not None
 
+    second_frame = frame(frame_id=2, timestamp_ms=1_600)
     await subject.observe_visual_state(
         connection_id="ws_1",
-        frame=frame(frame_id=2, timestamp_ms=1_600),
+        frame=second_frame,
         visual_state=visual_state(frame_id=2, timestamp_ms=1_600),
+        memory_snapshot=memory_snapshot(frame_message=second_frame),
     )
     events = await _drain_memory_events(
         subject,
