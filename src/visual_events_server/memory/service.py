@@ -33,6 +33,7 @@ from .frame_cache import (
     FrameCache,
     FrameCacheError,
     MemoryFrameSnapshot,
+    MemoryFrameSnapshotWindow,
     RequestInteractionSnapshot,
 )
 from .retriever import MemoryRetriever
@@ -50,6 +51,7 @@ _LOGGER = logging.getLogger(__name__)
 _PERSON_EMBEDDING_CROP_MARGIN_RATIO = 0.10
 _PERSON_EMBEDDING_CONTEXT_MARGIN_RATIO = 0.50
 _MAX_PERSON_QUERY_TRACKS = 4
+_REQUIRED_POSE_SNAPSHOT_COUNT = 2
 _RECOGNITION_ELIGIBILITY_POLICY = (
     "class_name == 'person' and lost_ms == 0 and hits > 0"
 )
@@ -1265,43 +1267,181 @@ class AppMemoryService:
         snapshot = cached.memory_snapshot
         if snapshot is None:
             return None, "no_active_interaction_target", interaction_snapshot, evidence
-        try:
-            preview = self._resolver.preview_pose_pointing_person(
-                introducer_track_id=introducer.track_id,
-                image_width=snapshot.image_size[0],
-                image_height=snapshot.image_size[1],
-                tracks=snapshot.tracks,
-            )
-        except TargetResolveError:
-            return None, "target_unclear", interaction_snapshot, evidence
-
-        preview_evidence = (
-            {**evidence, **preview.evidence} if preview.evidence else evidence
+        return self._stable_third_person_pose_target(
+            camera=camera,
+            interaction_snapshot=interaction_snapshot,
+            introducer_track_id=introducer.track_id,
+            base_evidence=evidence,
         )
-        if preview.status != "resolved" or not preview.candidates:
-            return (
-                None,
-                preview.ambiguity_type or "target_unclear",
-                interaction_snapshot,
-                preview_evidence,
-            )
 
-        candidate = preview.candidates[0]
-        if candidate.track_id is None:
-            return None, "target_unclear", interaction_snapshot, preview_evidence
+    def _stable_third_person_pose_target(
+        self,
+        *,
+        camera: str,
+        interaction_snapshot: RequestInteractionSnapshot,
+        introducer_track_id: int,
+        base_evidence: dict[str, Any],
+    ) -> tuple[
+        ResolvedTarget | None,
+        str,
+        RequestInteractionSnapshot,
+        dict[str, Any],
+    ]:
+        try:
+            window = self._cache.get_snapshot_window(camera)
+        except FrameCacheError:
+            return None, "target_unclear", interaction_snapshot, base_evidence
+
+        (
+            selected_candidate,
+            selected_preview_evidence,
+            ambiguity_type,
+            pose_window,
+        ) = self._third_person_pose_window_decision(
+            window=window,
+            interaction_snapshot=interaction_snapshot,
+            introducer_track_id=introducer_track_id,
+        )
+        evidence = dict(base_evidence)
+        evidence.update(selected_preview_evidence)
+        evidence["pose_stability_window"] = pose_window
+        if selected_candidate is None:
+            return None, ambiguity_type, interaction_snapshot, evidence
+
+        target_evidence = dict(selected_candidate.evidence or selected_preview_evidence)
+        target_evidence["pose_stability_window"] = pose_window
         return (
             ResolvedTarget(
                 source_target_mode="pose_pointing_to_person",
-                target_type=candidate.target_type,
-                bbox_xyxy=candidate.bbox_xyxy,
-                track_id=candidate.track_id,
+                target_type=selected_candidate.target_type,
+                bbox_xyxy=selected_candidate.bbox_xyxy,
+                track_id=selected_candidate.track_id,
                 quality="usable",
-                evidence=candidate.evidence or preview.evidence,
+                evidence=target_evidence,
             ),
             "",
             interaction_snapshot,
-            preview_evidence,
+            evidence,
         )
+
+    def _third_person_pose_window_decision(
+        self,
+        *,
+        window: MemoryFrameSnapshotWindow,
+        interaction_snapshot: RequestInteractionSnapshot,
+        introducer_track_id: int,
+    ) -> tuple[Any | None, dict[str, Any], str, dict[str, Any]]:
+        now_ms = self._clock_ms()
+        fresh_snapshot_count = 0
+        same_introducer_snapshot_count = 0
+        status_counts: Counter[str] = Counter()
+        pair_counts: Counter[tuple[int, str]] = Counter()
+        pair_snapshot_refs: dict[tuple[int, str], list[str]] = {}
+        selected_pair: tuple[int, str] | None = None
+        selected_candidate: Any | None = None
+        selected_target_track_id: int | None = None
+        selected_arm_side: str | None = None
+        selected_preview_evidence: dict[str, Any] = {}
+        selected_ambiguity_type = "target_unclear"
+
+        for cached in window.frames:
+            snapshot = cached.memory_snapshot
+            if snapshot is None:
+                continue
+            if now_ms - snapshot.observed_at_ms > self._cache.max_age_ms:
+                continue
+            fresh_snapshot_count += 1
+            introducer, _ambiguity_type = self._active_interaction_target_from_frame(
+                cached,
+                check_stale=False,
+            )
+            if introducer is None or introducer.track_id != introducer_track_id:
+                continue
+            same_introducer_snapshot_count += 1
+            is_selected = (
+                cached is interaction_snapshot.selected
+                or snapshot.snapshot_ref == interaction_snapshot.request_snapshot_ref
+            )
+            try:
+                preview = self._resolver.preview_pose_pointing_person(
+                    introducer_track_id=introducer_track_id,
+                    image_width=snapshot.image_size[0],
+                    image_height=snapshot.image_size[1],
+                    tracks=snapshot.tracks,
+                )
+            except TargetResolveError:
+                status_counts["resolver_error"] += 1
+                if is_selected:
+                    selected_ambiguity_type = "target_unclear"
+                continue
+
+            status_counts[preview.status] += 1
+            preview_evidence = dict(preview.evidence or {})
+            if is_selected:
+                selected_preview_evidence = preview_evidence
+                selected_arm_side = _pose_preview_arm_side(preview_evidence)
+                selected_ambiguity_type = preview.ambiguity_type or "target_unclear"
+
+            if preview.status != "resolved" or not preview.candidates:
+                continue
+
+            candidate = preview.candidates[0]
+            arm_side = _pose_preview_arm_side(candidate.evidence or preview_evidence)
+            if candidate.track_id is None or arm_side is None:
+                if is_selected:
+                    selected_candidate = candidate
+                    selected_target_track_id = candidate.track_id
+                    selected_arm_side = arm_side
+                continue
+
+            pair = (int(candidate.track_id), arm_side)
+            pair_counts[pair] += 1
+            pair_snapshot_refs.setdefault(pair, []).append(snapshot.snapshot_ref)
+            if is_selected:
+                selected_pair = pair
+                selected_candidate = candidate
+                selected_target_track_id = int(candidate.track_id)
+                selected_arm_side = arm_side
+
+        selected_count = pair_counts[selected_pair] if selected_pair is not None else 0
+        failure_reason: str | None = None
+        if selected_candidate is None:
+            failure_reason = selected_ambiguity_type
+        elif selected_pair is None:
+            failure_reason = "pose_target_unclear"
+            selected_ambiguity_type = "target_unclear"
+        elif selected_count < _REQUIRED_POSE_SNAPSHOT_COUNT:
+            failure_reason = "pose_target_unstable"
+            selected_ambiguity_type = "target_unclear"
+
+        pose_window = {
+            "size": len(window.frames),
+            "fresh_snapshot_count": fresh_snapshot_count,
+            "same_introducer_snapshot_count": same_introducer_snapshot_count,
+            "required_pose_snapshot_count": _REQUIRED_POSE_SNAPSHOT_COUNT,
+            "resolved_pose_snapshot_count": sum(pair_counts.values()),
+            "selected_snapshot_ref": interaction_snapshot.request_snapshot_ref,
+            "selected_target_track_id": selected_target_track_id,
+            "selected_arm_side": selected_arm_side,
+            "selected_count": selected_count,
+            "candidate_arm_counts": [
+                {
+                    "target_track_id": track_id,
+                    "arm_side": arm_side,
+                    "count": count,
+                    "snapshot_refs": pair_snapshot_refs[(track_id, arm_side)],
+                }
+                for (track_id, arm_side), count in sorted(
+                    pair_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1]),
+                )
+            ],
+            "status_counts": dict(sorted(status_counts.items())),
+            "failure_reason": failure_reason,
+        }
+        if failure_reason is not None:
+            return None, selected_preview_evidence, selected_ambiguity_type, pose_window
+        return selected_candidate, selected_preview_evidence, "", pose_window
 
     def _query_due(self, frame: FrameMessage) -> bool:
         last = self._last_query_frame_timestamp_ms.get(frame.camera)
@@ -2335,6 +2475,18 @@ def _candidate_to_dict(candidate: Any) -> dict[str, Any]:
     if evidence:
         result["evidence"] = evidence
     return result
+
+
+def _pose_preview_arm_side(evidence: dict[str, Any] | None) -> str | None:
+    if not isinstance(evidence, dict):
+        return None
+    scoring = evidence.get("pose_pointing_scoring")
+    if not isinstance(scoring, dict):
+        return None
+    arm_side = scoring.get("arm_side")
+    if not isinstance(arm_side, str) or not arm_side:
+        return None
+    return arm_side
 
 
 def _resolved_target_to_candidate_dict(

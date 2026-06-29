@@ -1906,9 +1906,26 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     assert preview_scoring["arm_side"] == "left"
     assert preview_scoring["checks"]["keypoints_ok"] is True
     assert preview_scoring["checks"]["margin_ok"] is True
+    pose_window = preview["evidence"]["pose_stability_window"]
+    assert pose_window["size"] == 2
+    assert pose_window["fresh_snapshot_count"] == 2
+    assert pose_window["required_pose_snapshot_count"] == 2
+    assert pose_window["selected_target_track_id"] == 8
+    assert pose_window["selected_arm_side"] == "left"
+    assert pose_window["selected_count"] == 2
+    assert pose_window["candidate_arm_counts"] == [
+        {
+            "target_track_id": 8,
+            "arm_side": "left",
+            "count": 2,
+            "snapshot_refs": ["snapshot:front:1", "snapshot:front:2"],
+        }
+    ]
+    assert pose_window["failure_reason"] is None
     assert preview["candidates"][0]["evidence"]["pose_pointing_scoring"] == (
         preview_scoring
     )
+    assert preview["candidates"][0]["evidence"]["pose_stability_window"] == pose_window
 
     person = await subject.teach_person(
         {
@@ -1948,11 +1965,100 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     assert person["evidence"]["resolver_target_ref"] == "front:track:8"
     assert person["evidence"]["introducer_ref"] == "front:track:7"
     assert person["evidence"]["pose_pointing_scoring"] == preview_scoring
+    assert person["evidence"]["pose_stability_window"] == pose_window
     row = subject.store.connection.execute(
         "SELECT source_target_type FROM person_embeddings WHERE embedding_id = ?",
         (matches[0].embedding_id,),
     ).fetchone()
     assert row["source_target_type"] == "pose_pointing_to_person"
+
+
+@pytest.mark.asyncio
+async def test_third_person_introduction_requires_pose_target_window_stability(
+    tmp_path,
+):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    for frame_id, timestamp_ms, keypoints in (
+        (1, 1_000, ()),
+        (2, 1_100, ()),
+        (3, 1_200, pointing_right_keypoints()),
+    ):
+        source_frame = frame(frame_id=frame_id, timestamp_ms=timestamp_ms)
+        introducer = person_track(
+            7,
+            bbox_xyxy=(300.0, 100.0, 500.0, 650.0),
+            keypoints=keypoints,
+            frame_message=source_frame,
+        )
+        introduced = person_track(
+            8,
+            bbox_xyxy=(720.0, 190.0, 920.0, 390.0),
+            frame_message=source_frame,
+        )
+        await subject.observe_visual_state(
+            connection_id="ws_1",
+            frame=source_frame,
+            visual_state=visual_state(frame_id=frame_id, timestamp_ms=timestamp_ms),
+            memory_snapshot=memory_snapshot_with_tracks(
+                [introducer, introduced],
+                frame_message=source_frame,
+                attention_track_id=7,
+                scene_target_track_id=7,
+            ),
+        )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    before_counts = _store_counts(subject.store)
+    backend.person_inputs.clear()
+
+    request = {
+        "camera": "front",
+        "target": {
+            "kind": "person",
+            "intent": "third_person_introduction",
+            "referent_text": "他",
+        },
+    }
+    preview = await subject.resolve_target(request)
+
+    assert preview["status"] == "ambiguous"
+    assert preview["ambiguity_type"] == "target_unclear"
+    pose_window = preview["evidence"]["pose_stability_window"]
+    assert pose_window["size"] == 3
+    assert pose_window["fresh_snapshot_count"] == 3
+    assert pose_window["required_pose_snapshot_count"] == 2
+    assert pose_window["selected_target_track_id"] == 8
+    assert pose_window["selected_arm_side"] == "left"
+    assert pose_window["selected_count"] == 1
+    assert pose_window["candidate_arm_counts"] == [
+        {
+            "target_track_id": 8,
+            "arm_side": "left",
+            "count": 1,
+            "snapshot_refs": ["snapshot:front:3"],
+        }
+    ]
+    assert pose_window["failure_reason"] == "pose_target_unstable"
+    assert preview["evidence"]["stability_window"]["active_snapshot_count"] == 3
+    assert preview["evidence"]["pose_pointing_scoring"]["arm_side"] == "left"
+    _assert_zero_store_delta(preview["store_delta"])
+    _assert_allowed_ambiguity(preview)
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                **request,
+                "profile": {"display_name": "李四"},
+            }
+        )
+
+    assert exc.value.code == "target_ambiguous"
+    assert exc.value.details["ambiguity_type"] == "target_unclear"
+    assert exc.value.details["evidence"]["pose_stability_window"] == pose_window
+    _assert_zero_store_delta(exc.value.details["store_delta"])
+    _assert_allowed_ambiguity(exc.value.details)
+    assert backend.person_inputs == []
+    assert _store_counts(subject.store) == before_counts
 
 
 @pytest.mark.asyncio
