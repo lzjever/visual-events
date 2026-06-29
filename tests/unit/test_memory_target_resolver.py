@@ -96,6 +96,26 @@ def test_pose_pointing_resolves_third_person_candidate() -> None:
     assert preview.ambiguity_type == ""
     assert [candidate.track_id for candidate in preview.candidates] == [2]
     assert preview.candidates[0].reason == "pose_pointing_to_person"
+    scoring = preview.candidates[0].evidence["pose_pointing_scoring"]
+    assert scoring["arm_side"] == "left"
+    assert scoring["keypoint_confidences"] == {
+        "left_shoulder": 0.9,
+        "left_elbow": 0.9,
+        "left_wrist": 0.9,
+    }
+    assert scoring["arm_vector"] == [200.0, 40.0]
+    assert scoring["ambiguous_score_margin"] == 0.08
+    assert scoring["checks"]["keypoints_ok"] is True
+    assert scoring["checks"]["margin_ok"] is True
+    candidate_scores = scoring["candidate_scores"]
+    assert candidate_scores[0]["track_id"] == 2
+    assert {
+        "score",
+        "arm_side",
+        "perpendicular_distance",
+        "ray_intersects_bbox",
+    } <= set(candidate_scores[0])
+    assert preview.evidence["pose_pointing_scoring"] == scoring
 
 
 def test_pose_pointing_missing_keypoints_is_pose_unclear() -> None:
@@ -136,6 +156,22 @@ def test_pose_pointing_close_candidates_are_ambiguous() -> None:
         "pose_pointing_to_person",
         "pose_pointing_to_person",
     ]
+    scoring = preview.evidence["pose_pointing_scoring"]
+    assert scoring["checks"]["keypoints_ok"] is True
+    assert scoring["checks"]["margin_ok"] is False
+    assert scoring["score_margin"] <= scoring["ambiguous_score_margin"]
+    assert {item["track_id"] for item in scoring["candidate_scores"][:2]} == {2, 3}
+    assert all(
+        {
+            "track_id",
+            "score",
+            "arm_side",
+            "perpendicular_distance",
+            "ray_intersects_bbox",
+        }
+        <= set(item)
+        for item in scoring["candidate_scores"][:2]
+    )
 
 
 def test_pose_pointing_same_ray_near_and_far_hits_are_ambiguous() -> None:

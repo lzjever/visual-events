@@ -61,6 +61,30 @@ def _records_by_scene(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return {record["scene"]: record for record in records}
 
 
+def _pose_pointing_scoring(*, score_margin: float = 0.5) -> dict[str, Any]:
+    return {
+        "arm_side": "left",
+        "keypoint_confidences": {
+            "left_shoulder": 0.91,
+            "left_elbow": 0.92,
+            "left_wrist": 0.93,
+        },
+        "arm_vector": [200.0, 35.0],
+        "candidate_scores": [
+            {
+                "track_id": 8,
+                "score": 0.95,
+                "arm_side": "left",
+                "perpendicular_distance": 12.0,
+                "ray_intersects_bbox": True,
+            }
+        ],
+        "score_margin": score_margin,
+        "ambiguous_score_margin": 0.08,
+        "checks": {"keypoints_ok": True, "margin_ok": True},
+    }
+
+
 def test_discovers_all_jpeg_scene_dirs_without_manifest_as_authority(
     tmp_path: Path,
 ) -> None:
@@ -461,6 +485,13 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert third_person["stored_crop_hash"]
     assert third_person["stored_crop_path_or_artifact_ref"]
     assert "teach_person" not in third_person
+    assert third_person["pose_pointing_scoring"]["checks"][
+        "keypoints_ok"
+    ] is True
+    assert third_person["pose_pointing_scoring"]["checks"]["margin_ok"] is True
+    assert third_person["debug_test_channel_enabled"] is False
+    assert third_person["fixture_inputs_consumed"] == []
+    assert third_person["debug_fixture_used_for_target_resolution"] is False
     third_person_crop_path = Path(third_person["stored_crop_path_or_artifact_ref"])
     assert third_person_crop_path.is_file()
     assert out / "runtime" / "memory" / "artifacts" in third_person_crop_path.parents
@@ -483,6 +514,8 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert third_person["assertions"][
         "a_only_no_known_person_for_stored_person"
     ] is True
+    assert third_person["assertions"]["pose_pointing_scoring_present"] is True
+    assert third_person["assertions"]["pose_pointing_checks_passed"] is True
     assert third_person["b_positive_replay"]["known_person_present"] is True
     assert third_person["b_positive_replay"][
         "stored_person_known_person_present"
@@ -1001,6 +1034,9 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
                         "resolution_reason": "pose_pointing_to_person",
                         "resolver_target_ref": "front:track:8",
                         "introducer_ref": "front:track:7",
+                        "pose_pointing_scoring": _pose_pointing_scoring(
+                            score_margin=0.4
+                        ),
                     },
                 },
             }
@@ -1018,6 +1054,9 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
                         "crop_hash": "crop-hash-123",
                         "crop_path_or_artifact_ref": (
                             "runtime/memory/artifacts/person_123.jpg"
+                        ),
+                        "pose_pointing_scoring": _pose_pointing_scoring(
+                            score_margin=0.5
                         ),
                     },
                 },
@@ -1075,7 +1114,12 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
         "known_person_present": True,
         "known_person_context": True,
         "target_not_introducer": True,
+        "pose_pointing_scoring_present": True,
+        "pose_pointing_checks_passed": True,
     }
+    assert result["pose_pointing_scoring"] == _pose_pointing_scoring(
+        score_margin=0.5
+    )
     assert result["person_id"] == "person_123"
     assert result["stored_embedding_source_track_ref"] == "front:track:8"
     assert result["stored_crop_hash"] == "crop-hash-123"
@@ -1174,6 +1218,9 @@ def test_local_third_person_probe_scans_until_late_pose_pointing_window(
                         "resolution_reason": "pose_pointing_to_person",
                         "resolver_target_ref": "front:track:8",
                         "introducer_ref": "front:track:7",
+                        "pose_pointing_scoring": _pose_pointing_scoring(
+                            score_margin=0.4
+                        ),
                     },
                 },
             }
@@ -1191,6 +1238,9 @@ def test_local_third_person_probe_scans_until_late_pose_pointing_window(
                         "crop_hash": "crop-hash-late",
                         "crop_path_or_artifact_ref": (
                             "runtime/memory/artifacts/person_late.jpg"
+                        ),
+                        "pose_pointing_scoring": _pose_pointing_scoring(
+                            score_margin=0.5
                         ),
                     },
                 },

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import hypot, isfinite
-from typing import Literal
+from typing import Any, Literal
 
 from visual_events_server.attention import AttentionResult
 from visual_events_server.inference.base import BBoxXYXY, PoseKeypoint, bbox_area, clip_bbox
@@ -24,6 +24,7 @@ class ResolvedTarget:
     bbox_xyxy: BBoxXYXY
     track_id: int | None
     quality: str
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class TargetCandidate:
     bbox_xyxy: BBoxXYXY
     confidence: float
     reason: str
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,24 @@ class TargetPreview:
     status: Literal["resolved", "ambiguous", "not_found"]
     candidates: list[TargetCandidate]
     ambiguity_type: str = ""
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _PointingArm:
+    side: str
+    origin: tuple[float, float]
+    direction: tuple[float, float]
+    keypoint_confidences: dict[str, float]
+
+
+@dataclass(frozen=True)
+class _PoseCandidateScore:
+    track: TrackSnapshot
+    score: float
+    perpendicular_distance: float
+    arm: _PointingArm
+    ray_intersects_bbox: bool
 
 
 class TargetResolveError(ValueError):
@@ -206,13 +226,28 @@ class TargetResolver:
         candidate_tracks = [
             track for track in visible_tracks if track.track_id != introducer_track_id
         ]
-        for origin, direction in arms:
+        for arm in arms:
             ray_hits = [
                 track
                 for track in candidate_tracks
-                if _ray_intersects_bbox(origin, direction, track.bbox_xyxy)
+                if _ray_intersects_bbox(arm.origin, arm.direction, track.bbox_xyxy)
             ]
             if len(ray_hits) > 1:
+                score_entries = _pose_candidate_scores(
+                    candidate_tracks,
+                    arms=[arm],
+                    image_width=image_width,
+                    image_height=image_height,
+                )
+                scoring = _pose_pointing_scoring_evidence(
+                    arm=arm,
+                    score_entries=score_entries,
+                    score_margin=_pose_score_margin(score_entries),
+                    ambiguous_score_margin=self.ambiguous_score_margin,
+                    margin_ok=False,
+                    checks={"multiple_ray_hits": True},
+                )
+                evidence = _pose_pointing_evidence(scoring)
                 candidates = [
                     self._candidate_from_track(
                         track,
@@ -220,6 +255,7 @@ class TargetResolver:
                         reason="pose_pointing_to_person",
                         image_width=image_width,
                         image_height=image_height,
+                        evidence=evidence,
                     )
                     for track in ray_hits
                 ]
@@ -227,56 +263,91 @@ class TargetResolver:
                     status="ambiguous",
                     candidates=candidates[:3],
                     ambiguity_type="multiple_candidates",
+                    evidence=evidence,
                 )
 
-        scored: list[tuple[float, float, TargetCandidate]] = []
-        for candidate_track in candidate_tracks:
-            best_score = 0.0
-            best_perp = 0.0
-            for origin, direction in arms:
-                score, perp = _pose_pointing_score(
-                    origin=origin,
-                    direction=direction,
-                    candidate_bbox=candidate_track.bbox_xyxy,
-                    image_width=image_width,
-                    image_height=image_height,
-                )
-                if score > best_score:
-                    best_score = score
-                    best_perp = perp
-            if best_score <= 0.0:
-                continue
-            scored.append(
-                (
-                    best_score,
-                    best_perp,
-                    self._candidate_from_track(
-                        candidate_track,
-                        confidence=best_score,
-                        reason="pose_pointing_to_person",
-                        image_width=image_width,
-                        image_height=image_height,
-                    ),
-                )
+        score_entries = _pose_candidate_scores(
+            candidate_tracks,
+            arms=arms,
+            image_width=image_width,
+            image_height=image_height,
+        )
+        positive_entries = [entry for entry in score_entries if entry.score > 0.0]
+        if not positive_entries:
+            arm = arms[0]
+            scoring = _pose_pointing_scoring_evidence(
+                arm=arm,
+                score_entries=score_entries,
+                score_margin=None,
+                ambiguous_score_margin=self.ambiguous_score_margin,
+                margin_ok=False,
+                checks={"candidate_found": False},
             )
-
-        scored.sort(key=lambda item: (-item[0], item[1], item[2].track_id or -1))
-        candidates = [candidate for _, _, candidate in scored]
-        if not candidates:
             return TargetPreview(
                 status="not_found",
                 candidates=[],
                 ambiguity_type="target_unclear",
+                evidence=_pose_pointing_evidence(scoring),
             )
-        if len(candidates) > 1:
-            score_margin = candidates[0].confidence - candidates[1].confidence
-            if score_margin <= self.ambiguous_score_margin:
+
+        selected_arm = positive_entries[0].arm
+        score_margin = _pose_score_margin(positive_entries)
+        margin_ok = True
+        if len(positive_entries) > 1:
+            if (
+                score_margin is not None
+                and score_margin <= self.ambiguous_score_margin
+            ):
+                margin_ok = False
+                scoring = _pose_pointing_scoring_evidence(
+                    arm=selected_arm,
+                    score_entries=score_entries,
+                    score_margin=score_margin,
+                    ambiguous_score_margin=self.ambiguous_score_margin,
+                    margin_ok=margin_ok,
+                )
+                evidence = _pose_pointing_evidence(scoring)
+                candidates = [
+                    self._candidate_from_track(
+                        entry.track,
+                        confidence=entry.score,
+                        reason="pose_pointing_to_person",
+                        image_width=image_width,
+                        image_height=image_height,
+                        evidence=evidence,
+                    )
+                    for entry in positive_entries
+                ]
                 return TargetPreview(
                     status="ambiguous",
                     candidates=candidates[:3],
                     ambiguity_type="multiple_candidates",
+                    evidence=evidence,
                 )
-        return TargetPreview(status="resolved", candidates=[candidates[0]])
+
+        scoring = _pose_pointing_scoring_evidence(
+            arm=selected_arm,
+            score_entries=score_entries,
+            score_margin=score_margin,
+            ambiguous_score_margin=self.ambiguous_score_margin,
+            margin_ok=margin_ok,
+        )
+        evidence = _pose_pointing_evidence(scoring)
+        selected = positive_entries[0]
+        return TargetPreview(
+            status="resolved",
+            candidates=[
+                self._candidate_from_track(
+                    selected.track,
+                    confidence=selected.score,
+                    reason="pose_pointing_to_person",
+                    image_width=image_width,
+                    image_height=image_height,
+                    evidence=evidence,
+                )
+            ],
+            evidence=evidence,
+        )
 
     def resolve(
         self,
@@ -405,6 +476,7 @@ class TargetResolver:
         reason: str,
         image_width: int,
         image_height: int,
+        evidence: dict[str, Any] | None = None,
     ) -> TargetCandidate:
         return TargetCandidate(
             target_type="person",
@@ -417,6 +489,7 @@ class TargetResolver:
             ),
             confidence=_clamp_confidence(confidence),
             reason=reason,
+            evidence=evidence or {},
         )
 
     def _preview_point(
@@ -653,9 +726,12 @@ def _point_to_bbox_distance(point_uv: tuple[float, float], bbox: BBoxXYXY) -> fl
 
 def _pointing_arms(
     track: TrackSnapshot,
-) -> list[tuple[tuple[float, float], tuple[float, float]]]:
-    arms: list[tuple[tuple[float, float], tuple[float, float]]] = []
-    min_length = max(24.0, min(_bbox_width(track.bbox_xyxy), _bbox_height(track.bbox_xyxy)) * 0.25)
+) -> list[_PointingArm]:
+    arms: list[_PointingArm] = []
+    min_length = max(
+        24.0,
+        min(_bbox_width(track.bbox_xyxy), _bbox_height(track.bbox_xyxy)) * 0.25,
+    )
     for side in ("left", "right"):
         shoulder = _keypoint_by_name(track.keypoints, f"{side}_shoulder")
         elbow = _keypoint_by_name(track.keypoints, f"{side}_elbow")
@@ -667,12 +743,115 @@ def _pointing_arms(
         ):
             continue
         assert shoulder is not None
+        assert elbow is not None
         assert wrist is not None
-        direction = (float(wrist.x) - float(shoulder.x), float(wrist.y) - float(shoulder.y))
+        direction = (
+            float(wrist.x) - float(shoulder.x),
+            float(wrist.y) - float(shoulder.y),
+        )
         if hypot(direction[0], direction[1]) < min_length:
             continue
-        arms.append(((float(wrist.x), float(wrist.y)), direction))
+        assert shoulder.confidence is not None
+        assert elbow.confidence is not None
+        assert wrist.confidence is not None
+        arms.append(
+            _PointingArm(
+                side=side,
+                origin=(float(wrist.x), float(wrist.y)),
+                direction=direction,
+                keypoint_confidences={
+                    shoulder.name: float(shoulder.confidence),
+                    elbow.name: float(elbow.confidence),
+                    wrist.name: float(wrist.confidence),
+                },
+            )
+        )
     return arms
+
+
+def _pose_candidate_scores(
+    candidate_tracks: list[TrackSnapshot],
+    *,
+    arms: list[_PointingArm],
+    image_width: int,
+    image_height: int,
+) -> list[_PoseCandidateScore]:
+    score_entries: list[_PoseCandidateScore] = []
+    for candidate_track in candidate_tracks:
+        best_entry: _PoseCandidateScore | None = None
+        for arm in arms:
+            score, perp = _pose_pointing_score(
+                origin=arm.origin,
+                direction=arm.direction,
+                candidate_bbox=candidate_track.bbox_xyxy,
+                image_width=image_width,
+                image_height=image_height,
+            )
+            entry = _PoseCandidateScore(
+                track=candidate_track,
+                score=score,
+                perpendicular_distance=perp,
+                arm=arm,
+                ray_intersects_bbox=_ray_intersects_bbox(
+                    arm.origin,
+                    arm.direction,
+                    candidate_track.bbox_xyxy,
+                ),
+            )
+            if best_entry is None or entry.score > best_entry.score:
+                best_entry = entry
+        if best_entry is not None:
+            score_entries.append(best_entry)
+    score_entries.sort(
+        key=lambda entry: (
+            -entry.score,
+            entry.perpendicular_distance,
+            entry.track.track_id or -1,
+        )
+    )
+    return score_entries
+
+
+def _pose_score_margin(score_entries: list[_PoseCandidateScore]) -> float | None:
+    if len(score_entries) < 2:
+        return None
+    return float(score_entries[0].score) - float(score_entries[1].score)
+
+
+def _pose_pointing_evidence(scoring: dict[str, Any]) -> dict[str, Any]:
+    return {"pose_pointing_scoring": scoring}
+
+
+def _pose_pointing_scoring_evidence(
+    *,
+    arm: _PointingArm,
+    score_entries: list[_PoseCandidateScore],
+    score_margin: float | None,
+    ambiguous_score_margin: float,
+    margin_ok: bool,
+    checks: dict[str, bool] | None = None,
+) -> dict[str, Any]:
+    all_checks = {"keypoints_ok": True, "margin_ok": margin_ok}
+    if checks is not None:
+        all_checks.update(checks)
+    return {
+        "arm_side": arm.side,
+        "keypoint_confidences": arm.keypoint_confidences,
+        "arm_vector": [float(arm.direction[0]), float(arm.direction[1])],
+        "candidate_scores": [
+            {
+                "track_id": entry.track.track_id,
+                "score": float(entry.score),
+                "arm_side": entry.arm.side,
+                "perpendicular_distance": float(entry.perpendicular_distance),
+                "ray_intersects_bbox": bool(entry.ray_intersects_bbox),
+            }
+            for entry in score_entries
+        ],
+        "score_margin": None if score_margin is None else float(score_margin),
+        "ambiguous_score_margin": float(ambiguous_score_margin),
+        "checks": all_checks,
+    }
 
 
 def _pose_pointing_score(

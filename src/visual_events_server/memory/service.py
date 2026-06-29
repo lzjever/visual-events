@@ -1080,17 +1080,20 @@ class AppMemoryService:
         except TargetResolveError:
             return None, "target_unclear", interaction_snapshot, evidence
 
+        preview_evidence = (
+            {**evidence, **preview.evidence} if preview.evidence else evidence
+        )
         if preview.status != "resolved" or not preview.candidates:
             return (
                 None,
                 preview.ambiguity_type or "target_unclear",
                 interaction_snapshot,
-                evidence,
+                preview_evidence,
             )
 
         candidate = preview.candidates[0]
         if candidate.track_id is None:
-            return None, "target_unclear", interaction_snapshot, evidence
+            return None, "target_unclear", interaction_snapshot, preview_evidence
         return (
             ResolvedTarget(
                 source_target_mode="pose_pointing_to_person",
@@ -1098,10 +1101,11 @@ class AppMemoryService:
                 bbox_xyxy=candidate.bbox_xyxy,
                 track_id=candidate.track_id,
                 quality="usable",
+                evidence=candidate.evidence or preview.evidence,
             ),
             "",
             interaction_snapshot,
-            evidence,
+            preview_evidence,
         )
 
     def _query_due(self, frame: FrameMessage) -> bool:
@@ -1494,6 +1498,8 @@ class AppMemoryService:
             )
             if introducer_ref is not None:
                 evidence["introducer_ref"] = introducer_ref
+        if target.evidence:
+            evidence.update(target.evidence)
         if crop_hash is not None:
             evidence["crop_hash"] = crop_hash
         if crop_path_or_artifact_ref is not None:
@@ -1524,6 +1530,8 @@ class AppMemoryService:
                 cached,
                 candidate,
             )
+        if getattr(preview, "evidence", None):
+            evidence.update(preview.evidence)
         return evidence
 
 
@@ -1921,13 +1929,17 @@ def _target_crop_box(
 
 
 def _candidate_to_dict(candidate: Any) -> dict[str, Any]:
-    return {
+    result = {
         "target_type": candidate.target_type,
         "track_id": candidate.track_id,
         "bbox_xyxy": [float(value) for value in candidate.bbox_xyxy],
         "confidence": float(candidate.confidence),
         "reason": candidate.reason,
     }
+    evidence = getattr(candidate, "evidence", None)
+    if evidence:
+        result["evidence"] = evidence
+    return result
 
 
 def _resolved_target_to_candidate_dict(
@@ -1935,13 +1947,16 @@ def _resolved_target_to_candidate_dict(
     *,
     reason: str,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "target_type": target.target_type,
         "track_id": target.track_id,
         "bbox_xyxy": [float(value) for value in target.bbox_xyxy],
         "confidence": 1.0 if target.quality == "usable" else 0.0,
         "reason": reason,
     }
+    if target.evidence:
+        result["evidence"] = target.evidence
+    return result
 
 
 def _required_mapping(request: dict[str, Any], key: str) -> dict[str, Any]:

@@ -1471,6 +1471,13 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     assert preview["evidence"]["stability_window"]["active_snapshot_count"] == 2
     assert preview["evidence"]["resolver_target_ref"] == "front:track:8"
     assert preview["evidence"]["introducer_ref"] == "front:track:7"
+    preview_scoring = preview["evidence"]["pose_pointing_scoring"]
+    assert preview_scoring["arm_side"] == "left"
+    assert preview_scoring["checks"]["keypoints_ok"] is True
+    assert preview_scoring["checks"]["margin_ok"] is True
+    assert preview["candidates"][0]["evidence"]["pose_pointing_scoring"] == (
+        preview_scoring
+    )
 
     person = await subject.teach_person(
         {
@@ -1504,6 +1511,7 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     assert person["evidence"]["request_snapshot_ref"] == "snapshot:front:2"
     assert person["evidence"]["resolver_target_ref"] == "front:track:8"
     assert person["evidence"]["introducer_ref"] == "front:track:7"
+    assert person["evidence"]["pose_pointing_scoring"] == preview_scoring
     row = subject.store.connection.execute(
         "SELECT source_target_type FROM person_embeddings WHERE embedding_id = ?",
         (matches[0].embedding_id,),
@@ -1781,6 +1789,10 @@ async def test_third_person_introduction_multiple_pointing_candidates_does_not_w
 
     assert preview["status"] == "ambiguous"
     assert preview["ambiguity_type"] == "multiple_candidates"
+    preview_scoring = preview["evidence"]["pose_pointing_scoring"]
+    assert preview_scoring["checks"]["keypoints_ok"] is True
+    assert preview_scoring["checks"]["margin_ok"] is False
+    assert len(preview_scoring["candidate_scores"]) >= 2
     _assert_allowed_ambiguity(preview)
 
     with pytest.raises(MemoryServiceError) as exc:
@@ -1793,9 +1805,34 @@ async def test_third_person_introduction_multiple_pointing_candidates_does_not_w
 
     assert exc.value.code == "target_ambiguous"
     assert exc.value.details["ambiguity_type"] == "multiple_candidates"
+    assert exc.value.details["evidence"]["pose_pointing_scoring"] == preview_scoring
     _assert_allowed_ambiguity(exc.value.details)
     assert backend.person_inputs == []
     assert _count_rows(subject.store, "person_profiles") == 0
+
+
+@pytest.mark.asyncio
+async def test_non_pose_resolve_target_does_not_emit_pose_pointing_evidence(tmp_path):
+    subject = service(tmp_path)
+    source_frame = frame()
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(frame_message=source_frame),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+
+    preview = await subject.resolve_target(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+        }
+    )
+
+    assert preview["status"] == "resolved"
+    assert "pose_pointing_scoring" not in preview["evidence"]
+    assert "evidence" not in preview["candidates"][0]
 
 
 @pytest.mark.asyncio

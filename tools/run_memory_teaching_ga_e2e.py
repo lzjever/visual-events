@@ -1228,6 +1228,10 @@ def _run_local_third_person_probe(
                 operation="local_teach_person_third_person",
             )
             if teach["status_code"] >= 400 or teach["body"].get("ok") is not True:
+                pose_pointing_scoring = _third_person_pose_pointing_scoring(
+                    teach["body"],
+                    body,
+                )
                 return _with_local_third_person_debug_evidence(
                     {
                         "status": "failed",
@@ -1235,6 +1239,7 @@ def _run_local_third_person_probe(
                         "reason": _response_reason(teach["body"]),
                         "resolve_target": body,
                         "person_id": teach["body"].get("person_id"),
+                        "pose_pointing_scoring": pose_pointing_scoring,
                         "selected_window": _selected_window(scene, source_frame),
                         "events": [],
                         "observations": observations,
@@ -1266,6 +1271,10 @@ def _run_local_third_person_probe(
                 or resolve_evidence.get("introducer_ref")
             )
             stored_embedding_source_track_ref = teach_evidence.get("source_track_ref")
+            pose_pointing_scoring = _third_person_pose_pointing_scoring(
+                teach["body"],
+                body,
+            )
             assertions = {
                 "resolve_target_resolved": body.get("status") == "resolved",
                 "resolve_target_pose_pointing": (
@@ -1287,6 +1296,10 @@ def _run_local_third_person_probe(
                     body,
                     teach["body"],
                 ),
+                "pose_pointing_scoring_present": bool(pose_pointing_scoring),
+                "pose_pointing_checks_passed": _pose_pointing_checks_passed(
+                    pose_pointing_scoring,
+                ),
             }
             if botified_frame_records is not None:
                 _append_botified_frame_records(
@@ -1307,6 +1320,7 @@ def _run_local_third_person_probe(
                     "person_id": person_id,
                     "resolver_target_ref": resolver_target_ref,
                     "introducer_ref": introducer_ref,
+                    "pose_pointing_scoring": pose_pointing_scoring,
                     "stored_embedding_source_track_ref": (
                         stored_embedding_source_track_ref
                     ),
@@ -1327,6 +1341,11 @@ def _run_local_third_person_probe(
             "reason": last_reason,
             "resolve_target": invalid_resolve,
             "person_id": None,
+            "pose_pointing_scoring": (
+                _third_person_pose_pointing_scoring(invalid_resolve)
+                if invalid_resolve is not None
+                else {}
+            ),
             "selected_window": None,
             "events": [],
             "observations": observations,
@@ -1342,13 +1361,14 @@ def _third_person_resolve_has_pose_pointing_evidence(body: dict[str, Any]) -> bo
     candidate_reason = ""
     if candidates and isinstance(candidates[0], dict):
         candidate_reason = str(candidates[0].get("reason") or "")
-    return (
+    has_pose_reason = (
         body.get("status") == "resolved"
         and (
             candidate_reason == "pose_pointing_to_person"
             or evidence.get("resolution_reason") == "pose_pointing_to_person"
         )
     )
+    return has_pose_reason and bool(_third_person_pose_pointing_scoring(body))
 
 
 def _third_person_target_not_introducer(
@@ -1533,6 +1553,24 @@ def _response_reason(body: dict[str, Any]) -> str:
 def _response_evidence(body: dict[str, Any]) -> dict[str, Any]:
     evidence = body.get("evidence")
     return evidence if isinstance(evidence, dict) else {}
+
+
+def _third_person_pose_pointing_scoring(
+    *bodies: dict[str, Any],
+) -> dict[str, Any]:
+    for body in bodies:
+        scoring = _response_evidence(body).get("pose_pointing_scoring")
+        if isinstance(scoring, dict):
+            return scoring
+    return {}
+
+
+def _pose_pointing_checks_passed(scoring: dict[str, Any]) -> bool:
+    checks = scoring.get("checks") if isinstance(scoring, dict) else None
+    if not isinstance(checks, dict):
+        return False
+    bool_values = [value for value in checks.values() if isinstance(value, bool)]
+    return bool(bool_values) and all(bool_values)
 
 
 def _local_third_person_debug_evidence() -> dict[str, Any]:
@@ -2304,6 +2342,10 @@ def _run_actual_third_person_introduction(
     stored_crop_path_or_artifact_ref = teach_evidence.get(
         "crop_path_or_artifact_ref"
     )
+    pose_pointing_scoring = _third_person_pose_pointing_scoring(
+        teach["body"],
+        resolve["body"],
+    )
     b_positive_replay = _known_person_replay_summary(
         b_positive_events,
         stored_person_id,
@@ -2333,14 +2375,20 @@ def _run_actual_third_person_introduction(
         ),
         "b_positive_known_person_present": b_positive_known is not None,
         "a_only_no_known_person_for_stored_person": a_only_known is None,
+        "pose_pointing_scoring_present": bool(pose_pointing_scoring),
+        "pose_pointing_checks_passed": _pose_pointing_checks_passed(
+            pose_pointing_scoring,
+        ),
     }
     return {
+        **_local_third_person_debug_evidence(),
         "passed": all(assertions.values()),
         "assertions": assertions,
         "resolve_target": resolve["body"],
         "person_id": stored_person_id,
         "resolver_target_ref": resolver_target_ref,
         "introducer_ref": introducer_ref,
+        "pose_pointing_scoring": pose_pointing_scoring,
         "stored_person_id": stored_person_id,
         "stored_embedding_source_track_ref": stored_embedding_source_track_ref,
         "stored_crop_hash": stored_crop_hash,
