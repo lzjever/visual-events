@@ -479,6 +479,7 @@ def _memory_service_from_config(config: ServerConfig) -> MemoryService:
         event_cooldown_ms=config.memory.matching.event_cooldown_ms,
         teach_queue_size=config.memory.embedding.teach_queue_size,
         teach_queue_timeout_ms=config.memory.embedding.teach_queue_timeout_ms,
+        artifact_dir=config.runtime_dir / "memory" / "artifacts",
     )
 
 

@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import suppress
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
@@ -430,8 +431,28 @@ def service(
             clock_ms=clock,
             teach_queue_size=teach_queue_size,
             teach_queue_timeout_ms=teach_queue_timeout_ms,
+            artifact_dir=tmp_path / "runtime" / "memory" / "artifacts",
         )
     )
+
+
+def _artifact_path(ref: str) -> Path:
+    path = Path(ref)
+    if path.is_absolute():
+        return path
+    return Path.cwd() / path
+
+
+def _assert_crop_artifact(
+    *,
+    tmp_path,
+    crop_path_or_artifact_ref: str,
+    crop_hash: str,
+) -> None:
+    path = _artifact_path(crop_path_or_artifact_ref)
+    assert path.is_file()
+    assert tmp_path / "runtime" / "memory" / "artifacts" in path.parents
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == crop_hash
 
 
 def _decoded_jpeg(image_bytes: bytes) -> Image.Image:
@@ -746,14 +767,24 @@ async def test_teach_person_persists_embedding_provenance_for_resolved_target(tm
     matches = subject.store.search_person_embeddings(expected_embedding, limit=1)
     assert len(matches) == 1
     assert matches[0].matched_id == person["person_id"]
-    assert subject.store.get_embedding_provenance(matches[0].embedding_id) == {
+    provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
+    assert provenance is not None
+    crop_path_or_artifact_ref = provenance["crop_path_or_artifact_ref"]
+    assert isinstance(crop_path_or_artifact_ref, str)
+    assert person["evidence"]["crop_path_or_artifact_ref"] == crop_path_or_artifact_ref
+    _assert_crop_artifact(
+        tmp_path=tmp_path,
+        crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+        crop_hash=provenance["crop_hash"],
+    )
+    assert provenance == {
         "embedding_id": matches[0].embedding_id,
         "owner_type": "person",
         "owner_id": person["person_id"],
         "source_track_ref": "front:track:7",
         "source_frame_ref": "front:1:1000",
         "crop_hash": hashlib.sha256(backend.person_inputs[0]).hexdigest(),
-        "crop_path_or_artifact_ref": None,
+        "crop_path_or_artifact_ref": crop_path_or_artifact_ref,
         "resolver_target_ref": "front:track:7",
         "resolution_reason": "track_id",
         "embedding_type": "face",
@@ -762,6 +793,49 @@ async def test_teach_person_persists_embedding_provenance_for_resolved_target(tm
         "embedding_dim": 8,
         "created_at_ms": 10000,
     }
+
+
+@pytest.mark.asyncio
+async def test_teach_person_removes_crop_artifact_when_store_create_fails(
+    tmp_path,
+    monkeypatch,
+):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    def fail_create_person_with_embedding(**_kwargs):
+        raise RuntimeError("store create failed")
+
+    monkeypatch.setattr(
+        subject.store,
+        "create_person_with_embedding",
+        fail_create_person_with_embedding,
+    )
+
+    with pytest.raises(RuntimeError, match="store create failed"):
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "张三"},
+            }
+        )
+
+    artifact_dir = tmp_path / "runtime" / "memory" / "artifacts"
+    assert len(backend.person_inputs) == 1
+    assert _count_rows(subject.store, "person_profiles") == 0
+    assert _count_rows(subject.store, "person_embeddings") == 0
+    assert _count_rows(subject.store, "embedding_provenance") == 0
+    if artifact_dir.exists():
+        assert [path for path in artifact_dir.rglob("*") if path.is_file()] == []
 
 
 @pytest.mark.asyncio
@@ -822,6 +896,14 @@ async def test_teach_person_falls_back_to_target_masked_context_on_no_usable_fac
         backend.person_inputs[1],
     ).hexdigest()
     assert person["evidence"]["crop_hash"] == provenance["crop_hash"]
+    assert person["evidence"]["crop_path_or_artifact_ref"] == provenance[
+        "crop_path_or_artifact_ref"
+    ]
+    _assert_crop_artifact(
+        tmp_path=tmp_path,
+        crop_path_or_artifact_ref=provenance["crop_path_or_artifact_ref"],
+        crop_hash=provenance["crop_hash"],
+    )
     assert _count_rows(subject.store, "person_profiles") == 1
     assert _count_rows(subject.store, "person_embeddings") == 1
     assert _count_rows(subject.store, "embedding_provenance") == 1
@@ -1086,6 +1168,14 @@ async def test_self_introduction_uses_active_interaction_target_for_write(tmp_pa
     assert person["evidence"]["resolver_target_ref"] == provenance["resolver_target_ref"]
     assert person["evidence"]["resolution_reason"] == provenance["resolution_reason"]
     assert person["evidence"]["crop_hash"] == provenance["crop_hash"]
+    assert person["evidence"]["crop_path_or_artifact_ref"] == provenance[
+        "crop_path_or_artifact_ref"
+    ]
+    _assert_crop_artifact(
+        tmp_path=tmp_path,
+        crop_path_or_artifact_ref=provenance["crop_path_or_artifact_ref"],
+        crop_hash=provenance["crop_hash"],
+    )
     assert provenance["source_track_ref"] == "front:track:7"
     assert provenance["resolver_target_ref"] == "front:track:7"
     assert provenance["source_frame_ref"] == "front:2:1100"
@@ -1401,6 +1491,16 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     assert provenance["resolver_target_ref"] == "front:track:8"
     assert provenance["source_frame_ref"] == "front:2:1100"
     assert provenance["resolution_reason"] == "pose_pointing_to_person"
+    assert provenance["crop_hash"] == hashlib.sha256(backend.person_inputs[0]).hexdigest()
+    assert person["evidence"]["crop_hash"] == provenance["crop_hash"]
+    assert person["evidence"]["crop_path_or_artifact_ref"] == provenance[
+        "crop_path_or_artifact_ref"
+    ]
+    _assert_crop_artifact(
+        tmp_path=tmp_path,
+        crop_path_or_artifact_ref=provenance["crop_path_or_artifact_ref"],
+        crop_hash=provenance["crop_hash"],
+    )
     assert person["evidence"]["request_snapshot_ref"] == "snapshot:front:2"
     assert person["evidence"]["resolver_target_ref"] == "front:track:8"
     assert person["evidence"]["introducer_ref"] == "front:track:7"
@@ -1507,6 +1607,16 @@ async def test_third_person_fallback_keeps_introduced_person_evidence(tmp_path):
     assert provenance["source_track_ref"] == "front:track:8"
     assert provenance["resolver_target_ref"] == "front:track:8"
     assert provenance["source_frame_ref"] == "front:2:1100"
+    assert provenance["crop_hash"] == hashlib.sha256(backend.person_inputs[1]).hexdigest()
+    assert person["evidence"]["crop_hash"] == provenance["crop_hash"]
+    assert person["evidence"]["crop_path_or_artifact_ref"] == provenance[
+        "crop_path_or_artifact_ref"
+    ]
+    _assert_crop_artifact(
+        tmp_path=tmp_path,
+        crop_path_or_artifact_ref=provenance["crop_path_or_artifact_ref"],
+        crop_hash=provenance["crop_hash"],
+    )
     assert person["evidence"]["resolver_target_ref"] == "front:track:8"
     assert person["evidence"]["introducer_ref"] == "front:track:7"
 
@@ -1906,14 +2016,24 @@ async def test_teach_scene_persists_embedding_provenance_for_full_frame(tmp_path
     matches = subject.store.search_scene_embeddings(expected_embedding, limit=1)
     assert len(matches) == 1
     assert matches[0].matched_id == scene["scene_id"]
-    assert subject.store.get_embedding_provenance(matches[0].embedding_id) == {
+    provenance = subject.store.get_embedding_provenance(matches[0].embedding_id)
+    assert provenance is not None
+    crop_path_or_artifact_ref = provenance["crop_path_or_artifact_ref"]
+    assert isinstance(crop_path_or_artifact_ref, str)
+    assert scene["evidence"]["crop_path_or_artifact_ref"] == crop_path_or_artifact_ref
+    _assert_crop_artifact(
+        tmp_path=tmp_path,
+        crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+        crop_hash=provenance["crop_hash"],
+    )
+    assert provenance == {
         "embedding_id": matches[0].embedding_id,
         "owner_type": "scene",
         "owner_id": scene["scene_id"],
         "source_track_ref": None,
         "source_frame_ref": "front:1:1000",
         "crop_hash": hashlib.sha256(JPEG_1280X720).hexdigest(),
-        "crop_path_or_artifact_ref": None,
+        "crop_path_or_artifact_ref": crop_path_or_artifact_ref,
         "resolver_target_ref": "scene",
         "resolution_reason": "scene",
         "embedding_type": "scene",
@@ -1922,6 +2042,49 @@ async def test_teach_scene_persists_embedding_provenance_for_full_frame(tmp_path
         "embedding_dim": 8,
         "created_at_ms": 10000,
     }
+
+
+@pytest.mark.asyncio
+async def test_teach_scene_removes_crop_artifact_when_store_create_fails(
+    tmp_path,
+    monkeypatch,
+):
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    backend.scene_inputs.clear()
+
+    def fail_create_scene_with_embedding(**_kwargs):
+        raise RuntimeError("store create failed")
+
+    monkeypatch.setattr(
+        subject.store,
+        "create_scene_with_embedding",
+        fail_create_scene_with_embedding,
+    )
+
+    with pytest.raises(RuntimeError, match="store create failed"):
+        await subject.teach_scene(
+            {
+                "camera": "front",
+                "target": {"mode": "scene"},
+                "memory": {"title": "新品展示区"},
+            }
+        )
+
+    artifact_dir = tmp_path / "runtime" / "memory" / "artifacts"
+    assert backend.scene_inputs == [JPEG_1280X720]
+    assert _count_rows(subject.store, "scene_memories") == 0
+    assert _count_rows(subject.store, "scene_embeddings") == 0
+    assert _count_rows(subject.store, "embedding_provenance") == 0
+    if artifact_dir.exists():
+        assert [path for path in artifact_dir.rglob("*") if path.is_file()] == []
 
 
 @pytest.mark.asyncio

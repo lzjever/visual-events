@@ -664,6 +664,7 @@ def run_local_smoke(
     third_person_result = dict(
         execution.get("third_person_probe") or _not_run_result(status="insufficient_sample")
     )
+    third_person_result = _with_local_third_person_debug_evidence(third_person_result)
 
     _write_json(
         teach_payloads_path,
@@ -927,9 +928,11 @@ def _execute_local_smoke(
     third_scene = _find_scene(scenes, "pic_teach_person")
     third_record = payloads_by_scene.get("pic_teach_person")
     if third_scene is None or third_record is None:
-        third_result = _insufficient_sample_result(
-            reason="required_teaching_scene_missing",
-            scene="pic_teach_person",
+        third_result = _with_local_third_person_debug_evidence(
+            _insufficient_sample_result(
+                reason="required_teaching_scene_missing",
+                scene="pic_teach_person",
+            )
         )
     else:
         third_result = _run_local_third_person_probe(
@@ -1059,6 +1062,10 @@ def _run_local_self_smoke(
         "reason": "" if passed else "known_person_present_not_replayed",
         "assertions": assertions,
         "person_id": teach["body"].get("person_id"),
+        "teach_crop_hash": _teach_crop_hash(teach["body"]),
+        "teach_crop_path_or_artifact_ref": _teach_crop_path_or_artifact_ref(
+            teach["body"],
+        ),
         "selected_window": _selected_window(scene, selected_frame),
         "last_probe": last_probe,
         "events": memory_e2e.compact_events(events),
@@ -1143,6 +1150,10 @@ def _run_local_scene_smoke(
         "reason": "" if passed else "scene_activated_not_replayed",
         "assertions": assertions,
         "scene_id": teach["body"].get("scene_id"),
+        "teach_crop_hash": _teach_crop_hash(teach["body"]),
+        "teach_crop_path_or_artifact_ref": _teach_crop_path_or_artifact_ref(
+            teach["body"],
+        ),
         "selected_window": _selected_window(scene, source_frame),
         "events": memory_e2e.compact_events(events),
     }
@@ -1217,16 +1228,18 @@ def _run_local_third_person_probe(
                 operation="local_teach_person_third_person",
             )
             if teach["status_code"] >= 400 or teach["body"].get("ok") is not True:
-                return {
-                    "status": "failed",
-                    "passed": False,
-                    "reason": _response_reason(teach["body"]),
-                    "resolve_target": body,
-                    "person_id": teach["body"].get("person_id"),
-                    "selected_window": _selected_window(scene, source_frame),
-                    "events": [],
-                    "observations": observations,
-                }
+                return _with_local_third_person_debug_evidence(
+                    {
+                        "status": "failed",
+                        "passed": False,
+                        "reason": _response_reason(teach["body"]),
+                        "resolve_target": body,
+                        "person_id": teach["body"].get("person_id"),
+                        "selected_window": _selected_window(scene, source_frame),
+                        "events": [],
+                        "observations": observations,
+                    }
+                )
             events = _send_stable_query_and_drain_local(
                 runner,
                 websocket,
@@ -1242,12 +1255,32 @@ def _run_local_third_person_probe(
                 if known
                 else None
             )
+            resolve_evidence = _response_evidence(body)
+            teach_evidence = _response_evidence(teach["body"])
+            resolver_target_ref = (
+                teach_evidence.get("resolver_target_ref")
+                or resolve_evidence.get("resolver_target_ref")
+            )
+            introducer_ref = (
+                teach_evidence.get("introducer_ref")
+                or resolve_evidence.get("introducer_ref")
+            )
+            stored_embedding_source_track_ref = teach_evidence.get("source_track_ref")
             assertions = {
                 "resolve_target_resolved": body.get("status") == "resolved",
                 "resolve_target_pose_pointing": (
                     _third_person_resolve_has_pose_pointing_evidence(body)
                 ),
                 "teach_person_ok": teach["body"].get("ok") is True,
+                "stored_embedding_source_is_target": bool(
+                    stored_embedding_source_track_ref
+                    and stored_embedding_source_track_ref == resolver_target_ref
+                ),
+                "stored_embedding_source_not_introducer": bool(
+                    stored_embedding_source_track_ref
+                    and introducer_ref
+                    and stored_embedding_source_track_ref != introducer_ref
+                ),
                 "known_person_present": known is not None,
                 "known_person_context": known_person_id == person_id,
                 "target_not_introducer": _third_person_target_not_introducer(
@@ -1264,28 +1297,41 @@ def _run_local_third_person_probe(
                     events=events,
                 )
             passed = all(assertions.values())
-            return {
-                "status": "passed" if passed else "failed",
-                "passed": passed,
-                "reason": "" if passed else _first_failed_assertion(assertions),
-                "assertions": assertions,
-                "resolve_target": body,
-                "person_id": person_id,
-                "selected_window": _selected_window(scene, source_frame),
-                "events": memory_e2e.compact_events(events),
-                "observations": observations,
-            }
+            return _with_local_third_person_debug_evidence(
+                {
+                    "status": "passed" if passed else "failed",
+                    "passed": passed,
+                    "reason": "" if passed else _first_failed_assertion(assertions),
+                    "assertions": assertions,
+                    "resolve_target": body,
+                    "person_id": person_id,
+                    "resolver_target_ref": resolver_target_ref,
+                    "introducer_ref": introducer_ref,
+                    "stored_embedding_source_track_ref": (
+                        stored_embedding_source_track_ref
+                    ),
+                    "stored_crop_hash": teach_evidence.get("crop_hash"),
+                    "stored_crop_path_or_artifact_ref": teach_evidence.get(
+                        "crop_path_or_artifact_ref"
+                    ),
+                    "selected_window": _selected_window(scene, source_frame),
+                    "events": memory_e2e.compact_events(events),
+                    "observations": observations,
+                }
+            )
 
-    return {
-        "status": "failed" if invalid_resolve is not None else "insufficient_sample",
-        "passed": False,
-        "reason": last_reason,
-        "resolve_target": invalid_resolve,
-        "person_id": None,
-        "selected_window": None,
-        "events": [],
-        "observations": observations,
-    }
+    return _with_local_third_person_debug_evidence(
+        {
+            "status": "failed" if invalid_resolve is not None else "insufficient_sample",
+            "passed": False,
+            "reason": last_reason,
+            "resolve_target": invalid_resolve,
+            "person_id": None,
+            "selected_window": None,
+            "events": [],
+            "observations": observations,
+        }
+    )
 
 
 def _third_person_resolve_has_pose_pointing_evidence(body: dict[str, Any]) -> bool:
@@ -1484,6 +1530,33 @@ def _response_reason(body: dict[str, Any]) -> str:
     )
 
 
+def _response_evidence(body: dict[str, Any]) -> dict[str, Any]:
+    evidence = body.get("evidence")
+    return evidence if isinstance(evidence, dict) else {}
+
+
+def _local_third_person_debug_evidence() -> dict[str, Any]:
+    return {
+        "debug_test_channel_enabled": False,
+        "fixture_inputs_consumed": [],
+        "debug_fixture_used_for_target_resolution": False,
+    }
+
+
+def _with_local_third_person_debug_evidence(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    return {**result, **_local_third_person_debug_evidence()}
+
+
+def _teach_crop_hash(body: dict[str, Any]) -> Any:
+    return _response_evidence(body).get("crop_hash")
+
+
+def _teach_crop_path_or_artifact_ref(body: dict[str, Any]) -> Any:
+    return _response_evidence(body).get("crop_path_or_artifact_ref")
+
+
 def _local_smoke_preflight(
     *,
     embedding_backend: str,
@@ -1547,7 +1620,9 @@ def _local_smoke_preflight_failed_report(
         "forbidden_agent_payload_fields": {},
         "self_smoke": _not_run_result(),
         "scene_smoke": _not_run_result(),
-        "third_person_probe": _not_run_result(status="insufficient_sample"),
+        "third_person_probe": _with_local_third_person_debug_evidence(
+            _not_run_result(status="insufficient_sample"),
+        ),
         "artifacts": {"report_json": str(report_path.relative_to(out))},
         "checks": [preflight],
         "notes": [
@@ -2127,6 +2202,10 @@ def _run_actual_self_introduction(
         "passed": all(assertions.values()),
         "assertions": assertions,
         "person_id": teach["body"].get("person_id"),
+        "teach_crop_hash": _teach_crop_hash(teach["body"]),
+        "teach_crop_path_or_artifact_ref": _teach_crop_path_or_artifact_ref(
+            teach["body"],
+        ),
         "events": memory_e2e.compact_events(events),
     }
 
@@ -2221,6 +2300,10 @@ def _run_actual_third_person_introduction(
         teach_evidence.get("introducer_ref") or resolve_evidence.get("introducer_ref")
     )
     stored_embedding_source_track_ref = teach_evidence.get("source_track_ref")
+    stored_crop_hash = teach_evidence.get("crop_hash")
+    stored_crop_path_or_artifact_ref = teach_evidence.get(
+        "crop_path_or_artifact_ref"
+    )
     b_positive_replay = _known_person_replay_summary(
         b_positive_events,
         stored_person_id,
@@ -2260,6 +2343,8 @@ def _run_actual_third_person_introduction(
         "introducer_ref": introducer_ref,
         "stored_person_id": stored_person_id,
         "stored_embedding_source_track_ref": stored_embedding_source_track_ref,
+        "stored_crop_hash": stored_crop_hash,
+        "stored_crop_path_or_artifact_ref": stored_crop_path_or_artifact_ref,
         "b_positive_replay": b_positive_replay,
         "a_only_negative_replay": a_only_negative_replay,
         "events": b_positive_replay["events"],
@@ -2372,6 +2457,10 @@ def _run_actual_teach_scene(
         "passed": all(assertions.values()),
         "assertions": assertions,
         "scene_id": teach["body"].get("scene_id"),
+        "teach_crop_hash": _teach_crop_hash(teach["body"]),
+        "teach_crop_path_or_artifact_ref": _teach_crop_path_or_artifact_ref(
+            teach["body"],
+        ),
         "events": memory_e2e.compact_events(events),
     }
 

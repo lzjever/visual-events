@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
@@ -376,6 +377,8 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert report["post_teach_scene_replay"]["runner_case"] == (
         "ga-post-teach-scene-replay"
     )
+    assert "self_introduction" not in report
+    assert "teach_scene" not in report
     assert report["post_teach_scene_replay"]["replayed_scene_count"] == 6
     assert report["post_teach_scene_replay"]["replayed_scene_names"] == (
         expected_scene_names
@@ -455,6 +458,16 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert third_person["introducer_ref"] == "front:track:7"
     assert third_person["stored_person_id"] == third_person["person_id"]
     assert third_person["stored_embedding_source_track_ref"] == "front:track:8"
+    assert third_person["stored_crop_hash"]
+    assert third_person["stored_crop_path_or_artifact_ref"]
+    assert "teach_person" not in third_person
+    third_person_crop_path = Path(third_person["stored_crop_path_or_artifact_ref"])
+    assert third_person_crop_path.is_file()
+    assert out / "runtime" / "memory" / "artifacts" in third_person_crop_path.parents
+    assert (
+        hashlib.sha256(third_person_crop_path.read_bytes()).hexdigest()
+        == third_person["stored_crop_hash"]
+    )
     stability_window = third_person["resolve_target"]["evidence"]["stability_window"]
     assert stability_window["active_snapshot_count"] >= 2
     assert stability_window["active_target_track_id"] == 7
@@ -885,6 +898,12 @@ def test_local_smoke_report_fails_insufficient_third_person_without_models(
     assert report["self_smoke"]["status"] == "passed"
     assert report["scene_smoke"]["status"] == "passed"
     assert report["third_person_probe"]["status"] == "insufficient_sample"
+    assert report["third_person_probe"]["debug_test_channel_enabled"] is False
+    assert report["third_person_probe"]["fixture_inputs_consumed"] == []
+    assert (
+        report["third_person_probe"]["debug_fixture_used_for_target_resolution"]
+        is False
+    )
     assert all(
         fields == [] for fields in report["forbidden_agent_payload_fields"].values()
     )
@@ -898,6 +917,13 @@ def test_local_smoke_report_fails_insufficient_third_person_without_models(
     assert checks["scene_local_smoke"]["passed"] is True
     assert checks["third_person_local_probe"]["passed"] is False
     assert checks["third_person_local_probe"]["details"]["status"] == "insufficient_sample"
+    assert checks["third_person_local_probe"]["details"][
+        "debug_test_channel_enabled"
+    ] is False
+    assert checks["third_person_local_probe"]["details"]["fixture_inputs_consumed"] == []
+    assert checks["third_person_local_probe"]["details"][
+        "debug_fixture_used_for_target_resolution"
+    ] is False
 
 
 def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
@@ -986,8 +1012,13 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
                     "person_id": "person_123",
                     "evidence": {
                         "resolution_reason": "pose_pointing_to_person",
+                        "source_track_ref": "front:track:8",
                         "resolver_target_ref": "front:track:8",
                         "introducer_ref": "front:track:7",
+                        "crop_hash": "crop-hash-123",
+                        "crop_path_or_artifact_ref": (
+                            "runtime/memory/artifacts/person_123.jpg"
+                        ),
                     },
                 },
             }
@@ -1006,7 +1037,7 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
     monkeypatch.setattr(module, "LocalMemorySmokeRunner", FakeRunner)
     monkeypatch.setattr(
         module,
-        "_local_smoke_source_frames",
+        "_local_third_person_source_frames",
         lambda _scene: [source_frame],
     )
     monkeypatch.setattr(
@@ -1039,11 +1070,22 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
         "resolve_target_resolved": True,
         "resolve_target_pose_pointing": True,
         "teach_person_ok": True,
+        "stored_embedding_source_is_target": True,
+        "stored_embedding_source_not_introducer": True,
         "known_person_present": True,
         "known_person_context": True,
         "target_not_introducer": True,
     }
     assert result["person_id"] == "person_123"
+    assert result["stored_embedding_source_track_ref"] == "front:track:8"
+    assert result["stored_crop_hash"] == "crop-hash-123"
+    assert (
+        result["stored_crop_path_or_artifact_ref"]
+        == "runtime/memory/artifacts/person_123.jpg"
+    )
+    assert result["debug_test_channel_enabled"] is False
+    assert result["fixture_inputs_consumed"] == []
+    assert result["debug_fixture_used_for_target_resolution"] is False
     assert result["resolve_target"]["evidence"]["introducer_ref"] == "front:track:7"
     assert result["selected_window"]["scene"] == "pic_teach_person"
 
@@ -1143,8 +1185,13 @@ def test_local_third_person_probe_scans_until_late_pose_pointing_window(
                     "person_id": "person_late",
                     "evidence": {
                         "resolution_reason": "pose_pointing_to_person",
+                        "source_track_ref": "front:track:8",
                         "resolver_target_ref": "front:track:8",
                         "introducer_ref": "front:track:7",
+                        "crop_hash": "crop-hash-late",
+                        "crop_path_or_artifact_ref": (
+                            "runtime/memory/artifacts/person_late.jpg"
+                        ),
                     },
                 },
             }
@@ -1294,3 +1341,116 @@ def test_local_third_person_probe_does_not_teach_or_replay_without_resolved_wind
     assert result["reason"] == "target_unclear"
     assert result["selected_window"] is None
     assert result["events"] == []
+    assert result["debug_test_channel_enabled"] is False
+    assert result["fixture_inputs_consumed"] == []
+    assert result["debug_fixture_used_for_target_resolution"] is False
+
+
+def test_local_third_person_probe_failed_result_keeps_debug_fixture_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    frame_path = tmp_path / "img_000.jpeg"
+    frame_path.write_bytes(_valid_jpeg_bytes())
+    scene = module.SceneDir(
+        name="pic_teach_person",
+        path=tmp_path,
+        jpeg_paths=(frame_path,),
+        des_text="这是彭刚，请你记住",
+    )
+    source_frame = memory_e2e.SourceFrame(
+        path=frame_path,
+        jpeg_bytes=frame_path.read_bytes(),
+        width=1280,
+        height=720,
+    )
+    record = {
+        "scene": "pic_teach_person",
+        "endpoint": "/v1/memory/teach/person",
+        "payload": {
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "third_person_introduction",
+                "referent_text": "这位/彭刚",
+            },
+            "profile": {"display_name": "彭刚"},
+        },
+    }
+
+    class FakeRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.session_factory = SimpleNamespace(last_snapshot=None)
+            self.client = object()
+
+        def open_stream(self):
+            return self
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def send(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "frame_id": 1,
+                "tracks": [
+                    {"track_id": 7, "class": "person", "lost_ms": 0},
+                    {"track_id": 8, "class": "person", "lost_ms": 0},
+                ],
+                "attention": {"target_track_id": 7},
+                "scene_context": {"engagement_state": "available"},
+            }
+
+    def fake_post_and_record_api_response(**kwargs: Any) -> dict[str, Any]:
+        if kwargs["operation"] == "local_teach_person_third_person":
+            raise AssertionError("teach_person should not be called")
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "status": "resolved",
+                "candidates": [{"track_id": 8, "reason": "active_interaction_target"}],
+                "evidence": {
+                    "resolution_reason": "active_interaction_target",
+                    "resolver_target_ref": "front:track:8",
+                    "introducer_ref": "front:track:7",
+                },
+            },
+        }
+
+    def fake_replay(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("replay should not be called")
+
+    monkeypatch.setattr(module, "LocalMemorySmokeRunner", FakeRunner)
+    monkeypatch.setattr(
+        module,
+        "_local_smoke_source_frames",
+        lambda _scene: [source_frame],
+    )
+    monkeypatch.setattr(
+        module,
+        "_post_and_record_api_response",
+        fake_post_and_record_api_response,
+    )
+    monkeypatch.setattr(module, "_send_stable_query_and_drain_local", fake_replay)
+
+    states_path = tmp_path / "visual_states.jsonl"
+    with states_path.open("w", encoding="utf-8") as states_file:
+        result = module._run_local_third_person_probe(
+            out=tmp_path,
+            scene=scene,
+            record=record,
+            camera="front",
+            config=SimpleNamespace(),
+            states_file=states_file,
+            api_response_records=[],
+        )
+
+    assert result["status"] == "failed"
+    assert result["passed"] is False
+    assert result["reason"] == "resolved_without_pose_pointing_evidence"
+    assert result["debug_test_channel_enabled"] is False
+    assert result["fixture_inputs_consumed"] == []
+    assert result["debug_fixture_used_for_target_resolution"] is False

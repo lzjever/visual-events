@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 from visual_events_server.attention import AttentionResult
@@ -93,6 +94,7 @@ class AppMemoryService:
         target_resolver: TargetResolver | None = None,
         teach_queue_size: int = 2,
         teach_queue_timeout_ms: int = 500,
+        artifact_dir: str | Path | None = None,
     ) -> None:
         if query_interval_ms <= 0:
             raise ValueError("query_interval_ms must be positive")
@@ -120,6 +122,11 @@ class AppMemoryService:
         self._resolver = target_resolver or TargetResolver()
         self._retriever = MemoryRetriever(store)
         self._gate = MemoryEventGate(cooldown_ms=event_cooldown_ms)
+        self._artifact_dir = (
+            Path(artifact_dir)
+            if artifact_dir is not None
+            else Path("runtime") / "memory" / "artifacts"
+        )
         self._completed_by_camera: dict[str, deque[dict[str, Any]]] = {}
         self._queue_size = int(queue_size)
         self._last_query_frame_timestamp_ms: dict[str, int] = {}
@@ -285,21 +292,31 @@ class AppMemoryService:
             now_ms = self._clock_ms()
             crop_hash = _sha256_hex(embedding_bytes)
             person_id = _public_id("person")
-            created = self.store.create_person_with_embedding(
-                person_id=person_id,
-                display_name=display_name,
-                description=description,
-                tags=tags,
-                embedding=embedding,
-                source_target_type=target.source_target_mode,
-                source_track_ref=_source_track_ref(cached, target),
-                source_frame_ref=_source_frame_ref(cached),
+            crop_path_or_artifact_ref = self._write_embedding_artifact(
+                owner_type="person",
+                owner_id=person_id,
                 crop_hash=crop_hash,
-                crop_path_or_artifact_ref=None,
-                resolver_target_ref=_resolver_target_ref(cached, target),
-                resolution_reason=target.source_target_mode,
-                now_ms=now_ms,
+                payload=embedding_bytes,
             )
+            try:
+                created = self.store.create_person_with_embedding(
+                    person_id=person_id,
+                    display_name=display_name,
+                    description=description,
+                    tags=tags,
+                    embedding=embedding,
+                    source_target_type=target.source_target_mode,
+                    source_track_ref=_source_track_ref(cached, target),
+                    source_frame_ref=_source_frame_ref(cached),
+                    crop_hash=crop_hash,
+                    crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                    resolver_target_ref=_resolver_target_ref(cached, target),
+                    resolution_reason=target.source_target_mode,
+                    now_ms=now_ms,
+                )
+            except Exception:
+                self._delete_embedding_artifact(crop_path_or_artifact_ref)
+                raise
             return {
                 "ok": True,
                 "person_id": created["person_id"],
@@ -310,6 +327,7 @@ class AppMemoryService:
                     cached,
                     target,
                     crop_hash=crop_hash,
+                    crop_path_or_artifact_ref=crop_path_or_artifact_ref,
                     interaction_snapshot=interaction_snapshot,
                 ),
             }
@@ -342,23 +360,33 @@ class AppMemoryService:
             now_ms = self._clock_ms()
             crop_hash = _sha256_hex(embedding_bytes)
             scene_id = _public_id("scene")
-            created = self.store.create_scene_with_embedding(
-                scene_id=scene_id,
-                title=title,
-                description=description,
-                activation_hint=activation_hint,
-                target_type=target.target_type,
-                region_id=region_id,
-                embedding=embedding,
-                source_target_type=target.source_target_mode,
-                source_track_ref=_source_track_ref(cached, target),
-                source_frame_ref=_source_frame_ref(cached),
+            crop_path_or_artifact_ref = self._write_embedding_artifact(
+                owner_type="scene",
+                owner_id=scene_id,
                 crop_hash=crop_hash,
-                crop_path_or_artifact_ref=None,
-                resolver_target_ref=_resolver_target_ref(cached, target),
-                resolution_reason=target.source_target_mode,
-                now_ms=now_ms,
+                payload=embedding_bytes,
             )
+            try:
+                created = self.store.create_scene_with_embedding(
+                    scene_id=scene_id,
+                    title=title,
+                    description=description,
+                    activation_hint=activation_hint,
+                    target_type=target.target_type,
+                    region_id=region_id,
+                    embedding=embedding,
+                    source_target_type=target.source_target_mode,
+                    source_track_ref=_source_track_ref(cached, target),
+                    source_frame_ref=_source_frame_ref(cached),
+                    crop_hash=crop_hash,
+                    crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                    resolver_target_ref=_resolver_target_ref(cached, target),
+                    resolution_reason=target.source_target_mode,
+                    now_ms=now_ms,
+                )
+            except Exception:
+                self._delete_embedding_artifact(crop_path_or_artifact_ref)
+                raise
             return {
                 "ok": True,
                 "scene_id": created["scene_id"],
@@ -369,6 +397,7 @@ class AppMemoryService:
                     cached,
                     target,
                     crop_hash=crop_hash,
+                    crop_path_or_artifact_ref=crop_path_or_artifact_ref,
                 ),
             }
         finally:
@@ -636,6 +665,37 @@ class AppMemoryService:
             return await asyncio.wrap_future(future)
         except EmbeddingUnavailable as exc:
             raise MemoryServiceError(exc.code, exc.message, status_code=503) from exc
+
+    def _write_embedding_artifact(
+        self,
+        *,
+        owner_type: str,
+        owner_id: str,
+        crop_hash: str,
+        payload: bytes,
+    ) -> str:
+        self._artifact_dir.mkdir(parents=True, exist_ok=True)
+        path = self._artifact_dir / f"{owner_type}-{owner_id}-{crop_hash[:16]}.jpg"
+        path.write_bytes(payload)
+        return _readable_artifact_ref(path)
+
+    def _delete_embedding_artifact(self, crop_path_or_artifact_ref: str) -> None:
+        path = Path(crop_path_or_artifact_ref)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        try:
+            resolved = path.resolve()
+            artifact_root = self._artifact_dir.resolve()
+            if resolved != artifact_root and artifact_root not in resolved.parents:
+                return
+            resolved.unlink()
+        except FileNotFoundError:
+            return
+        except OSError:
+            _LOGGER.warning(
+                "failed to delete memory embedding artifact after store write failure",
+                exc_info=True,
+            )
 
     def _track_teach_embedding_future(
         self,
@@ -1413,6 +1473,7 @@ class AppMemoryService:
         target: ResolvedTarget,
         *,
         crop_hash: str | None = None,
+        crop_path_or_artifact_ref: str | None = None,
         interaction_snapshot: RequestInteractionSnapshot | None = None,
     ) -> dict[str, Any]:
         evidence = self._request_evidence(
@@ -1435,6 +1496,8 @@ class AppMemoryService:
                 evidence["introducer_ref"] = introducer_ref
         if crop_hash is not None:
             evidence["crop_hash"] = crop_hash
+        if crop_path_or_artifact_ref is not None:
+            evidence["crop_path_or_artifact_ref"] = crop_path_or_artifact_ref
         return evidence
 
     def _pose_pointing_introducer_ref(self, cached: CachedFrame) -> str | None:
@@ -1602,6 +1665,14 @@ def _candidate_resolver_target_ref(cached: CachedFrame, candidate: Any) -> str:
 
 def _sha256_hex(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _readable_artifact_ref(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(path)
 
 
 def _short_float(value: float) -> str:

@@ -210,8 +210,10 @@ class MemoryE2ERunner:
         self.frame_id = 0
 
     def _config(self) -> ServerConfig:
+        runtime_dir = self.out / "runtime"
         db_path = self.out / "runtime" / f"{self.case}.sqlite3"
         return ServerConfig(
+            runtime_dir=runtime_dir,
             memory=MemoryConfig(
                 enabled=True,
                 db_path=db_path,
