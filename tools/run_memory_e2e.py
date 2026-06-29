@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from visual_events_server.attention import AttentionResult
 from visual_events_server.app import create_app
 from visual_events_server.config import (
     MemoryConfig,
@@ -18,6 +19,8 @@ from visual_events_server.config import (
     MemoryMatchingConfig,
     ServerConfig,
 )
+from visual_events_server.inference.base import PoseKeypoint
+from visual_events_server.memory.frame_cache import MemoryFrameSnapshot
 from visual_events_server.processor import VisualFrameProcessor
 from visual_events_server.protocol import (
     SCHEMA_VERSION,
@@ -25,6 +28,7 @@ from visual_events_server.protocol import (
     encode_frame_message,
 )
 from visual_events_server.protocol import _parse_jpeg_dimensions
+from visual_events_server.tracking import TrackSnapshot
 
 
 DEFAULT_DATA_DIR = Path("val-data")
@@ -38,6 +42,7 @@ PRIMARY_TRACK_ID = 7
 AMBIGUOUS_TRACK_ID = 8
 PRIMARY_PERSON_BBOX_XYXY = (580.0, 60.0, 805.0, 650.0)
 AMBIGUOUS_PERSON_BBOX_XYXY = (650.0, 70.0, 875.0, 650.0)
+THIRD_PERSON_BBOX_XYXY = (880.0, 170.0, 1080.0, 420.0)
 PRIMARY_ATTENTION_UV = (692.5, 160.0)
 AMBIGUOUS_POINT_UV = PRIMARY_ATTENTION_UV
 
@@ -53,9 +58,11 @@ class SourceFrame:
 class MemoryScenarioProcessor(VisualFrameProcessor):
     def __init__(self) -> None:
         self.mode = "single"
+        self._last_snapshot: MemoryFrameSnapshot | None = None
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
         tracks = self._tracks(frame)
+        self._last_snapshot = self._memory_snapshot(frame)
         return {
             "type": "visual_state",
             "schema_version": SCHEMA_VERSION,
@@ -72,7 +79,7 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
                 "confidence": 0.96,
             },
             "scene_context": {
-                "engagement_state": "engaged",
+                "engagement_state": "available",
                 "attention_available": True,
                 "target_track_id": PRIMARY_TRACK_ID,
                 "no_engage_reasons": [],
@@ -87,12 +94,27 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
             "semantic_events": [],
         }
 
+    def take_memory_frame_snapshot(self) -> MemoryFrameSnapshot | None:
+        snapshot = self._last_snapshot
+        self._last_snapshot = None
+        return snapshot
+
     def _tracks(self, frame: FrameMessage) -> list[dict[str, Any]]:
         primary = _track(
             track_id=PRIMARY_TRACK_ID,
             bbox_xyxy=list(PRIMARY_PERSON_BBOX_XYXY),
             timestamp_ms=frame.timestamp_ms,
         )
+        if self.mode == "third_person":
+            return [
+                primary,
+                _track(
+                    track_id=AMBIGUOUS_TRACK_ID,
+                    bbox_xyxy=list(THIRD_PERSON_BBOX_XYXY),
+                    timestamp_ms=frame.timestamp_ms,
+                    confidence=0.91,
+                ),
+            ]
         if self.mode != "ambiguous":
             return [primary]
         return [
@@ -104,6 +126,66 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
                 confidence=0.9,
             ),
         ]
+
+    def _memory_snapshot(self, frame: FrameMessage) -> MemoryFrameSnapshot:
+        return MemoryFrameSnapshot(
+            connection_id="",
+            frame=frame,
+            source_frame_ref=f"{frame.camera}:{frame.frame_id}:{frame.timestamp_ms}",
+            snapshot_ref=f"memory-e2e:{frame.camera}:{frame.frame_id}",
+            observed_at_ms=int(time.time() * 1000),
+            image_size=(frame.width, frame.height),
+            tracks=self._snapshot_tracks(frame),
+            attention=AttentionResult(
+                target_track_id=PRIMARY_TRACK_ID,
+                target_uv=PRIMARY_ATTENTION_UV,
+                reason="memory_e2e_stable_target",
+                confidence=0.96,
+                largest_person_stable=True,
+            ),
+            scene_context={
+                "engagement_state": "available",
+                "attention_available": True,
+                "target_track_id": PRIMARY_TRACK_ID,
+            },
+            semantic_events=[],
+        )
+
+    def _snapshot_tracks(self, frame: FrameMessage) -> list[TrackSnapshot]:
+        primary_keypoints: tuple[PoseKeypoint, ...] = ()
+        if self.mode == "third_person":
+            primary_keypoints = (
+                PoseKeypoint("left_shoulder", 670.0, 250.0, 0.9),
+                PoseKeypoint("left_elbow", 780.0, 270.0, 0.9),
+                PoseKeypoint("left_wrist", 860.0, 285.0, 0.9),
+            )
+        tracks = [
+            _snapshot_track(
+                track_id=PRIMARY_TRACK_ID,
+                bbox_xyxy=PRIMARY_PERSON_BBOX_XYXY,
+                timestamp_ms=frame.timestamp_ms,
+                keypoints=primary_keypoints,
+            )
+        ]
+        if self.mode == "third_person":
+            tracks.append(
+                _snapshot_track(
+                    track_id=AMBIGUOUS_TRACK_ID,
+                    bbox_xyxy=THIRD_PERSON_BBOX_XYXY,
+                    timestamp_ms=frame.timestamp_ms,
+                    confidence=0.91,
+                )
+            )
+        elif self.mode == "ambiguous":
+            tracks.append(
+                _snapshot_track(
+                    track_id=AMBIGUOUS_TRACK_ID,
+                    bbox_xyxy=AMBIGUOUS_PERSON_BBOX_XYXY,
+                    timestamp_ms=frame.timestamp_ms,
+                    confidence=0.9,
+                )
+            )
+        return tracks
 
 
 class MemoryE2ERunner:
@@ -297,6 +379,80 @@ def build_embedding_config(args: argparse.Namespace) -> MemoryEmbeddingConfig:
     )
 
 
+def self_introduction_payload(
+    *,
+    camera: str,
+    display_name: str,
+    description: str | None = None,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    profile: dict[str, Any] = {"display_name": display_name}
+    if description:
+        profile["description"] = description
+    if tags:
+        profile["tags"] = tags
+    return {
+        "camera": camera,
+        "target": {
+            "kind": "person",
+            "intent": "self_introduction",
+            "referent_text": "我",
+        },
+        "profile": profile,
+    }
+
+
+def third_person_introduction_payload(
+    *,
+    camera: str,
+    display_name: str,
+    referent_text: str = "这位",
+) -> dict[str, Any]:
+    return {
+        "camera": camera,
+        "target": {
+            "kind": "person",
+            "intent": "third_person_introduction",
+            "referent_text": referent_text,
+        },
+        "profile": {"display_name": display_name},
+    }
+
+
+def teach_scene_payload(
+    *,
+    camera: str,
+    title: str,
+    description: str | None = None,
+    activation_hint: str | None = None,
+) -> dict[str, Any]:
+    memory: dict[str, Any] = {"title": title}
+    if description:
+        memory["description"] = description
+    if activation_hint:
+        memory["activation_hint"] = activation_hint
+    return {
+        "camera": camera,
+        "target": {
+            "kind": "scene",
+            "intent": "teach_scene",
+            "referent_text": "这里",
+        },
+        "memory": memory,
+    }
+
+
+def object_resolve_payload(*, camera: str, referent_text: str) -> dict[str, Any]:
+    return {
+        "camera": camera,
+        "target": {
+            "kind": "object",
+            "intent": "teach_object",
+            "referent_text": referent_text,
+        },
+    }
+
+
 def embedding_report(args: argparse.Namespace) -> dict[str, Any]:
     report: dict[str, Any] = {
         "embedding_backend": args.embedding_backend,
@@ -394,8 +550,19 @@ def main(argv: list[str] | None = None) -> int:
     with states_path.open("w", encoding="utf-8") as states_file:
         run_check(
             checks,
-            "v0.3 teach person replay known_person_present and scene_activated",
+            "public self_introduction replay known_person_present and scene_activated",
             lambda: check_teach_person_scene_summary_link(
+                out=out,
+                source_frame=source_frame,
+                camera=args.camera,
+                embedding_config=embedding_config,
+                states_file=states_file,
+            ),
+        )
+        run_check(
+            checks,
+            "public third_person_introduction resolves B writes B and replays known_person_present",
+            lambda: check_third_person_introduction(
                 out=out,
                 source_frame=source_frame,
                 camera=args.camera,
@@ -427,8 +594,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         run_check(
             checks,
-            "resolve-target ambiguous refuses point teach write",
-            lambda: check_ambiguous_resolve_refuses_teach(
+            "public object resolve-target returns unsupported no-write",
+            lambda: check_object_resolve_unsupported_no_write(
                 out=out,
                 source_frame=source_frame,
                 camera=args.camera,
@@ -479,27 +646,21 @@ def check_teach_person_scene_summary_link(
         )
         person = runner.post(
             "/v1/memory/teach/person",
-            {
-                "camera": camera,
-                "target": {"mode": "track_id", "track_id": PRIMARY_TRACK_ID},
-                "profile": {
-                    "display_name": "Memory E2E Person",
-                    "description": "stable synthetic target over val-data JPEG",
-                    "tags": ["memory-e2e"],
-                },
-            },
+            self_introduction_payload(
+                camera=camera,
+                display_name="Memory E2E Person",
+                description="stable synthetic target over val-data JPEG",
+                tags=["memory-e2e"],
+            ),
         )
         scene = runner.post(
             "/v1/memory/teach/scene",
-            {
-                "camera": camera,
-                "target": {"mode": "scene"},
-                "memory": {
-                    "title": "Memory E2E Scene",
-                    "description": "scene taught from the selected val-data JPEG",
-                    "activation_hint": "use remembered scene context",
-                },
-            },
+            teach_scene_payload(
+                camera=camera,
+                title="Memory E2E Scene",
+                description="scene taught from the selected val-data JPEG",
+                activation_hint="use remembered scene context",
+            ),
         )
         summary = runner.post(
             f"/v1/memory/person/{person['person_id']}/conversation-summary",
@@ -569,6 +730,81 @@ def check_teach_person_scene_summary_link(
         "link": link,
         "events": compact_events(events),
         "external_lookup": external,
+    }
+
+
+def check_third_person_introduction(
+    *,
+    out: Path,
+    source_frame: SourceFrame,
+    camera: str,
+    embedding_config: MemoryEmbeddingConfig,
+    states_file: Any,
+) -> dict[str, Any]:
+    runner = MemoryE2ERunner(
+        case="third-person-introduction",
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+        embedding_config=embedding_config,
+    )
+    runner.processor.mode = "third_person"
+    with runner.open_stream() as websocket:
+        runner.send(
+            websocket,
+            timestamp_ms=1_000,
+            states_file=states_file,
+            phase="third-person-seed",
+        )
+        resolve = runner.post(
+            "/v1/memory/resolve-target",
+            {
+                "camera": camera,
+                "target": {
+                    "kind": "person",
+                    "intent": "third_person_introduction",
+                    "referent_text": "这位",
+                },
+            },
+        )
+        person = runner.post(
+            "/v1/memory/teach/person",
+            third_person_introduction_payload(
+                camera=camera,
+                display_name="Introduced Memory E2E Person",
+                referent_text="这位",
+            ),
+        )
+        events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=2_000,
+            states_file=states_file,
+            phase="third-person-replay",
+        )
+
+    known = first_event(events, "known_person_present")
+    candidates = resolve.get("candidates") or []
+    resolved_track_id = candidates[0].get("track_id") if candidates else None
+    known_track_id = known.get("track_id") if known else None
+    assertions = {
+        "resolve_target_ok": resolve.get("ok") is True,
+        "resolve_target_resolved": resolve.get("status") == "resolved",
+        "resolver_selected_b": resolved_track_id == AMBIGUOUS_TRACK_ID,
+        "teach_person_ok": person.get("ok") is True,
+        "known_person_present": known is not None,
+        "known_person_is_b": known_track_id == AMBIGUOUS_TRACK_ID,
+        "known_person_context": bool(
+            known
+            and known.get("memory_context", {}).get("person", {}).get("person_id")
+            == person.get("person_id")
+        ),
+    }
+    return {
+        "passed": all(assertions.values()),
+        "assertions": assertions,
+        "resolve_target": resolve,
+        "person_id": person.get("person_id"),
+        "events": compact_events(events),
     }
 
 
@@ -677,11 +913,10 @@ def check_correct_identity(
         )
         wrong = runner.post(
             "/v1/memory/teach/person",
-            {
-                "camera": camera,
-                "target": {"mode": "track_id", "track_id": PRIMARY_TRACK_ID},
-                "profile": {"display_name": "Wrong Memory E2E Person"},
-            },
+            self_introduction_payload(
+                camera=camera,
+                display_name="Wrong Memory E2E Person",
+            ),
         )
         before_events = runner.start_query_and_drain(
             websocket,
@@ -736,7 +971,7 @@ def check_correct_identity(
     }
 
 
-def check_ambiguous_resolve_refuses_teach(
+def check_object_resolve_unsupported_no_write(
     *,
     out: Path,
     source_frame: SourceFrame,
@@ -745,51 +980,33 @@ def check_ambiguous_resolve_refuses_teach(
     states_file: Any,
 ) -> dict[str, Any]:
     runner = MemoryE2ERunner(
-        case="ambiguous-target",
+        case="object-negative",
         out=out,
         source_frame=source_frame,
         camera=camera,
         embedding_config=embedding_config,
     )
-    runner.processor.mode = "ambiguous"
-    with runner.open_stream() as websocket:
-        runner.send(
-            websocket,
-            timestamp_ms=1_000,
-            states_file=states_file,
-            phase="seed-ambiguous",
-        )
-        preview_response = runner.client.post(
-            "/v1/memory/resolve-target",
-            json={
-                "camera": camera,
-                "target": {"mode": "point_uv", "point_uv": list(AMBIGUOUS_POINT_UV)},
-            },
-        )
-        preview = preview_response.json()
-        teach_response = runner.client.post(
-            "/v1/memory/teach/person",
-            json={
-                "camera": camera,
-                "target": {"mode": "point_uv", "point_uv": list(AMBIGUOUS_POINT_UV)},
-                "profile": {"display_name": "Should Not Be Written"},
-            },
-        )
-        teach_body = teach_response.json()
+    store = runner.client.app.state.memory_service.store
+    before_counts = _memory_write_counts(store)
+    response = runner.client.post(
+        "/v1/memory/resolve-target",
+        json=object_resolve_payload(camera=camera, referent_text="手机"),
+    )
+    body = response.json()
+    after_counts = _memory_write_counts(store)
     assertions = {
-        "resolve_status_ambiguous": preview_response.status_code == 200
-        and preview.get("status") == "ambiguous",
-        "ambiguous_candidates_include_two_people": len(preview.get("candidates") or [])
-        >= 2,
-        "teach_point_rejected": teach_response.status_code == 400
-        and teach_body.get("detail", {}).get("code") == "target_ambiguous",
+        "status_code_200": response.status_code == 200,
+        "status_not_found": body.get("status") == "not_found",
+        "unsupported_target_kind": body.get("error_code") == "unsupported_target_kind",
+        "no_candidates": body.get("candidates") == [],
+        "no_memory_write": before_counts == after_counts,
     }
     return {
         "passed": all(assertions.values()),
         "assertions": assertions,
-        "resolve_target": preview,
-        "teach_status_code": teach_response.status_code,
-        "teach_body": teach_body,
+        "resolve_target": body,
+        "before_counts": before_counts,
+        "after_counts": after_counts,
     }
 
 
@@ -814,6 +1031,52 @@ def _track(
         "lost_ms": 0,
         "confidence": confidence,
         "pose_confidence": 0.86,
+    }
+
+
+def _snapshot_track(
+    *,
+    track_id: int,
+    bbox_xyxy: tuple[float, float, float, float],
+    timestamp_ms: int,
+    confidence: float = 0.93,
+    keypoints: tuple[PoseKeypoint, ...] = (),
+) -> TrackSnapshot:
+    x1, y1, x2, y2 = bbox_xyxy
+    center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+    return TrackSnapshot(
+        track_id=track_id,
+        first_seen_ms=timestamp_ms - 800,
+        last_seen_ms=timestamp_ms,
+        frame_timestamp_ms=timestamp_ms,
+        bbox_xyxy=bbox_xyxy,
+        confidence=confidence,
+        pose_confidence=0.86,
+        head_uv=(center[0], y1 + ((y2 - y1) * 0.12)),
+        velocity_uv_s=(0.0, 0.0),
+        lost_ms=0,
+        hits=2,
+        misses=0,
+        keypoints=keypoints,
+    )
+
+
+def _memory_write_counts(store: Any) -> dict[str, int]:
+    tables = (
+        "person_profiles",
+        "person_embeddings",
+        "scene_memories",
+        "scene_embeddings",
+        "anonymous_profiles",
+        "anonymous_embeddings",
+    )
+    return {
+        table: int(
+            store.connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()[
+                "count"
+            ]
+        )
+        for table in tables
     }
 
 

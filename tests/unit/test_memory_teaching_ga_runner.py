@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,9 @@ from visual_events_server.memory.api_contract import (
     TeachPersonRequest,
     TeachSceneRequest,
 )
+from visual_events_server.protocol import FrameMessage
 
+from tools import run_memory_e2e as memory_e2e
 from tools import run_memory_teaching_ga_e2e as module
 
 
@@ -167,6 +170,83 @@ def test_generated_payloads_parse_with_public_memory_api_contract(
             ResolveTargetRequest.model_validate(record["payload"])
         else:
             raise AssertionError(f"unexpected endpoint: {record['endpoint']}")
+
+
+def test_memory_e2e_runner_generates_public_rest_payloads_without_low_level_fields() -> None:
+    payloads = [
+        memory_e2e.self_introduction_payload(
+            camera="front",
+            display_name="小李飞刀",
+            description="public self introduction",
+            tags=["memory-e2e"],
+        ),
+        memory_e2e.third_person_introduction_payload(
+            camera="front",
+            display_name="彭刚",
+            referent_text="这位/彭刚",
+        ),
+        memory_e2e.teach_scene_payload(
+            camera="front",
+            title="银河通用办公室",
+            description="public whole-scene teaching",
+            activation_hint="office",
+        ),
+        memory_e2e.object_resolve_payload(camera="front", referent_text="手机"),
+    ]
+
+    TeachPersonRequest.model_validate(payloads[0])
+    TeachPersonRequest.model_validate(payloads[1])
+    TeachSceneRequest.model_validate(payloads[2])
+    ResolveTargetRequest.model_validate(payloads[3])
+
+    assert payloads[0]["target"] == {
+        "kind": "person",
+        "intent": "self_introduction",
+        "referent_text": "我",
+    }
+    assert payloads[1]["target"] == {
+        "kind": "person",
+        "intent": "third_person_introduction",
+        "referent_text": "这位/彭刚",
+    }
+    assert payloads[2]["target"] == {
+        "kind": "scene",
+        "intent": "teach_scene",
+        "referent_text": "这里",
+    }
+    assert payloads[3]["target"] == {
+        "kind": "object",
+        "intent": "teach_object",
+        "referent_text": "手机",
+    }
+    for payload in payloads:
+        assert module.find_forbidden_agent_payload_fields(payload) == []
+
+
+def test_memory_e2e_processor_keeps_keypoints_in_snapshot_side_channel_only() -> None:
+    processor = memory_e2e.MemoryScenarioProcessor()
+    processor.mode = "third_person"
+    frame = FrameMessage(
+        camera="front",
+        frame_id=1,
+        timestamp_ms=1_000,
+        width=1280,
+        height=720,
+        jpeg_bytes=b"jpeg",
+        head_motion_state="stationary",
+    )
+
+    visual_state = asyncio.run(processor.process_frame(frame))
+    snapshot = processor.take_memory_frame_snapshot()
+
+    assert visual_state["scene_context"]["engagement_state"] == "available"
+    assert all("keypoints" not in track for track in visual_state["tracks"])
+    assert snapshot is not None
+    assert snapshot.attention is not None
+    assert snapshot.attention.largest_person_stable is True
+    assert snapshot.tracks[0].track_id == memory_e2e.PRIMARY_TRACK_ID
+    assert snapshot.tracks[0].keypoints
+    assert snapshot.tracks[1].track_id == memory_e2e.AMBIGUOUS_TRACK_ID
 
 
 def test_dry_run_writes_minimal_artifact_skeleton_and_evidence_index(
