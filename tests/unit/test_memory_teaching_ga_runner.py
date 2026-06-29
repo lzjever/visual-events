@@ -407,6 +407,7 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     checks = {check["name"]: check for check in report["checks"]}
     assert checks["all_scenes_replayed"]["passed"] is True
     assert checks["actual_api_responses"]["passed"] is True
+    assert checks["cli_projection_botified_frames"]["passed"] is True
     assert checks["self_introduction_known_person_present"]["passed"] is True
     assert checks["third_person_known_person_present"]["passed"] is True
     assert checks["teach_scene_scene_activated"]["passed"] is True
@@ -518,11 +519,20 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
         json.loads(line)
         for line in (out / "botified_frames.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    event_names = {
-        frame["semantic_event"]["event"]
+    assert botified_frames
+    assert all(
+        frame["source"] == "cli_frame_pump_stdout" for frame in botified_frames
+    )
+    assert all(
+        frame["botified_frame"].startswith("<botified>")
+        and frame["botified_frame"].endswith("</botified>")
         for frame in botified_frames
-        if frame.get("semantic_event")
-    }
+    )
+    assert all("semantic_event" not in frame for frame in botified_frames)
+    assert any(
+        "visual_context=" in frame["payload"]["request"] for frame in botified_frames
+    )
+    event_names = {frame["event"] for frame in botified_frames}
     assert {"known_person_present", "scene_activated"} <= event_names
 
 

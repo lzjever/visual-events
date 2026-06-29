@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import html
 import json
 import re
@@ -8,7 +9,9 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterator
 
 from fastapi.testclient import TestClient
@@ -17,6 +20,13 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import run_memory_e2e as memory_e2e
+from visual_events_cli.botified_output import BotifiedStdoutWriter
+from visual_events_cli.frame_pump import (
+    FramePump,
+    HeadMotion,
+    InputFrame,
+    LatestFrameSlot,
+)
 from visual_events_server.app import create_app, create_processor_from_config
 from visual_events_server.config import (
     InferenceConfig,
@@ -50,6 +60,9 @@ TEACH_SCENE_ORDER = (
     "pic_teach_item_phone",
 )
 POST_TEACH_SCENE_REPLAY_CASE = "ga-post-teach-scene-replay"
+CLI_BOTIFIED_FRAME_SOURCE = "cli_frame_pump_stdout"
+BOTIFIED_OPEN = "<botified>"
+BOTIFIED_CLOSE = "</botified>"
 
 
 @dataclass(frozen=True)
@@ -525,6 +538,7 @@ def run_actual(
         scene_result=scene_result,
         post_teach_scene_replay_result=post_teach_scene_replay_result,
         object_result=object_result,
+        botified_frame_records=botified_frame_records,
     )
     warnings = list(manifest.get("risks") or [])
     report = {
@@ -1607,6 +1621,162 @@ def _insufficient_sample_result(*, reason: str, scene: str) -> dict[str, Any]:
     }
 
 
+class _StaticVisualStateServiceClient:
+    def __init__(self) -> None:
+        self.visual_state: dict[str, Any] = {}
+
+    async def request_frame(self, _header: dict[str, Any], _jpeg: bytes) -> Any:
+        return SimpleNamespace(visual_state=self.visual_state)
+
+
+class _NoopGazePublisher:
+    def publish(self, _payload: dict[str, Any]) -> None:
+        return None
+
+
+class _CliBotifiedProjectionRecorder:
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self._records = records
+        self._stream = StringIO()
+        self._writer = BotifiedStdoutWriter(stream=self._stream, max_queue_size=64)
+        self._slot = LatestFrameSlot()
+        self._service_client = _StaticVisualStateServiceClient()
+        self._pump = FramePump(
+            latest_frame_slot=self._slot,
+            service_client=self._service_client,
+            gaze_publisher=_NoopGazePublisher(),
+            head_motion_provider=lambda: HeadMotion(state="stationary"),
+            botified_writer=self._writer,
+        )
+
+    def record_visual_state(
+        self,
+        *,
+        case: str,
+        scene: str,
+        phase: str,
+        visual_state: dict[str, Any],
+    ) -> None:
+        semantic_events = visual_state.get("semantic_events")
+        if not isinstance(semantic_events, list) or not semantic_events:
+            return
+
+        self._service_client.visual_state = visual_state
+        self._slot.push(_input_frame_from_visual_state(visual_state))
+        stream_position = self._stream.tell()
+        asyncio.run(
+            self._pump.process_one(
+                now_ms=_int_value(visual_state.get("frame_timestamp_ms"), 0)
+            )
+        )
+        self._writer.drain_available()
+
+        self._stream.seek(stream_position)
+        raw_frames = [
+            line.strip() for line in self._stream.read().splitlines() if line.strip()
+        ]
+        self._stream.seek(0, 2)
+        for raw_frame in raw_frames:
+            payload = _payload_from_botified_frame(raw_frame)
+            self._records.append(
+                {
+                    "case": case,
+                    "scene": scene,
+                    "phase": phase,
+                    "dry_run": False,
+                    "source": CLI_BOTIFIED_FRAME_SOURCE,
+                    "botified_frame": raw_frame,
+                    "payload": payload,
+                    "event": _request_field(payload.get("request"), "event"),
+                    "event_id": _event_id_from_payload(payload),
+                }
+            )
+
+
+def _attach_cli_botified_projection_recorder(
+    runner: Any,
+    records: list[dict[str, Any]],
+) -> None:
+    recorder = _CliBotifiedProjectionRecorder(records)
+    original_send = runner.send
+
+    def send_with_cli_projection_recording(
+        websocket: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        visual_state = original_send(websocket, *args, **kwargs)
+        if isinstance(visual_state, dict):
+            recorder.record_visual_state(
+                case=str(getattr(runner, "case", "")),
+                scene=_runner_source_scene(runner),
+                phase=str(kwargs.get("phase") or ""),
+                visual_state=visual_state,
+            )
+        return visual_state
+
+    runner.send = send_with_cli_projection_recording
+
+
+def _runner_source_scene(runner: Any) -> str:
+    source_frame = getattr(runner, "source_frame", None)
+    path = getattr(source_frame, "path", None)
+    return path.parent.name if isinstance(path, Path) else ""
+
+
+def _input_frame_from_visual_state(visual_state: dict[str, Any]) -> InputFrame:
+    width, height = _image_size_from_visual_state(visual_state)
+    return InputFrame(
+        camera=str(visual_state.get("camera") or DEFAULT_CAMERA),
+        timestamp_ms=_int_value(visual_state.get("frame_timestamp_ms"), 0),
+        width=width,
+        height=height,
+        jpeg=b"",
+    )
+
+
+def _image_size_from_visual_state(visual_state: dict[str, Any]) -> tuple[int, int]:
+    image_size = visual_state.get("image_size")
+    if isinstance(image_size, (list, tuple)) and len(image_size) == 2:
+        return _int_value(image_size[0], 0), _int_value(image_size[1], 0)
+    return 0, 0
+
+
+def _payload_from_botified_frame(raw_frame: str) -> dict[str, Any]:
+    if not raw_frame.startswith(BOTIFIED_OPEN) or not raw_frame.endswith(BOTIFIED_CLOSE):
+        return {}
+    inner = raw_frame[len(BOTIFIED_OPEN) : -len(BOTIFIED_CLOSE)]
+    try:
+        payload = json.loads(inner)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _event_id_from_payload(payload: dict[str, Any]) -> str | None:
+    payload_id = payload.get("id")
+    if isinstance(payload_id, str) and payload_id.startswith("visual:"):
+        return payload_id.removeprefix("visual:")
+    return None
+
+
+def _request_field(request: Any, field: str) -> str | None:
+    if not isinstance(request, str):
+        return None
+    marker = f"{field}="
+    for part in request.split(" "):
+        if part.startswith(marker):
+            return part[len(marker) :]
+    return None
+
+
+def _int_value(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _run_actual_scene_replay(
     *,
     scenes: list[SceneDir],
@@ -1622,6 +1792,7 @@ def _run_actual_scene_replay(
         source_frame=_load_source_frame_from_scene(scenes[0]),
         camera=camera,
     )
+    _attach_cli_botified_projection_recorder(runner, botified_frame_records)
     replayed_scene_names: list[str] = []
     with runner.open_stream() as websocket:
         for index, scene in enumerate(scenes):
@@ -1647,13 +1818,6 @@ def _run_actual_scene_replay(
                     "frame_id": runner.frame_id,
                     "semantic_event_count": len(events),
                 }
-            )
-            _append_botified_frame_records(
-                botified_frame_records,
-                case="all-scene-replay",
-                scene=scene.name,
-                phase="scene-replay",
-                events=events,
             )
     return {
         "passed": len(replayed_scene_names) == len(scenes),
@@ -1692,6 +1856,7 @@ def _run_actual_post_teach_scene_replay(
         source_frame=_load_source_frame_from_scene(scenes_by_name["pic_teach_me"]),
         camera=camera,
     )
+    _attach_cli_botified_projection_recorder(runner, botified_frame_records)
     timestamp_ms = memory_e2e.QUERY_INTERVAL_MS
     timestamp_step_ms = memory_e2e.QUERY_INTERVAL_MS * 2
 
@@ -1801,13 +1966,6 @@ def _run_actual_post_teach_scene_replay(
                     "events": memory_e2e.compact_events(events),
                     "flags": flags,
                 }
-            )
-            _append_botified_frame_records(
-                botified_frame_records,
-                case=POST_TEACH_SCENE_REPLAY_CASE,
-                scene=scene.name,
-                phase="post-teach-scene-replay",
-                events=events,
             )
             timestamp_ms += timestamp_step_ms
 
@@ -1932,6 +2090,7 @@ def _run_actual_self_introduction(
         source_frame=_load_source_frame_from_scene(scene),
         camera=camera,
     )
+    _attach_cli_botified_projection_recorder(runner, botified_frame_records)
     with runner.open_stream() as websocket:
         runner.start_query_and_drain(
             websocket,
@@ -1964,13 +2123,6 @@ def _run_actual_self_introduction(
             == teach["body"].get("person_id")
         ),
     }
-    _append_botified_frame_records(
-        botified_frame_records,
-        case="ga-self-introduction",
-        scene=scene.name,
-        phase="self-replay",
-        events=events,
-    )
     return {
         "passed": all(assertions.values()),
         "assertions": assertions,
@@ -1995,6 +2147,7 @@ def _run_actual_third_person_introduction(
         source_frame=_load_source_frame_from_scene(scene),
         camera=camera,
     )
+    _attach_cli_botified_projection_recorder(runner, botified_frame_records)
     runner.processor.mode = "third_person"
     resolve_payload = {
         "camera": camera,
@@ -2098,20 +2251,6 @@ def _run_actual_third_person_introduction(
         "b_positive_known_person_present": b_positive_known is not None,
         "a_only_no_known_person_for_stored_person": a_only_known is None,
     }
-    _append_botified_frame_records(
-        botified_frame_records,
-        case="ga-third-person-introduction",
-        scene=scene.name,
-        phase="third-person-b-positive-replay",
-        events=b_positive_events,
-    )
-    _append_botified_frame_records(
-        botified_frame_records,
-        case="ga-third-person-introduction",
-        scene=scene.name,
-        phase="third-person-a-only-negative-replay",
-        events=a_only_events,
-    )
     return {
         "passed": all(assertions.values()),
         "assertions": assertions,
@@ -2196,6 +2335,7 @@ def _run_actual_teach_scene(
         source_frame=_load_source_frame_from_scene(scene),
         camera=camera,
     )
+    _attach_cli_botified_projection_recorder(runner, botified_frame_records)
     with runner.open_stream() as websocket:
         runner.start_query_and_drain(
             websocket,
@@ -2228,13 +2368,6 @@ def _run_actual_teach_scene(
             == teach["body"].get("scene_id")
         ),
     }
-    _append_botified_frame_records(
-        botified_frame_records,
-        case="ga-teach-scene",
-        scene=scene.name,
-        phase="scene-replay",
-        events=events,
-    )
     return {
         "passed": all(assertions.values()),
         "assertions": assertions,
@@ -2744,6 +2877,7 @@ def _build_actual_checks(
     scene_result: dict[str, Any],
     post_teach_scene_replay_result: dict[str, Any],
     object_result: dict[str, Any],
+    botified_frame_records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     expected_teach_scenes = set(TEACH_SCENE_ORDER)
     actual_teach_scenes = {record["scene"] for record in payload_records}
@@ -2767,6 +2901,28 @@ def _build_actual_checks(
         "status_codes_ok": all(
             int(record.get("status_code") or 0) < 400
             for record in api_response_records
+        ),
+    }
+    botified_event_counts: dict[str, int] = {}
+    for record in botified_frame_records:
+        event = record.get("event")
+        if isinstance(event, str):
+            botified_event_counts[event] = botified_event_counts.get(event, 0) + 1
+    botified_projection_assertions = {
+        "known_person_present": botified_event_counts.get("known_person_present", 0)
+        >= 1,
+        "scene_activated": botified_event_counts.get("scene_activated", 0) >= 1,
+        "all_from_cli_frame_pump_stdout": bool(botified_frame_records)
+        and all(
+            record.get("source") == CLI_BOTIFIED_FRAME_SOURCE
+            for record in botified_frame_records
+        ),
+        "all_raw_frames_wrapped": bool(botified_frame_records)
+        and all(
+            isinstance(record.get("botified_frame"), str)
+            and record["botified_frame"].startswith(BOTIFIED_OPEN)
+            and record["botified_frame"].endswith(BOTIFIED_CLOSE)
+            for record in botified_frame_records
         ),
     }
     return [
@@ -2800,6 +2956,15 @@ def _build_actual_checks(
             "details": {
                 "assertions": actual_response_assertions,
                 "response_count": len(api_response_records),
+            },
+        },
+        {
+            "name": "cli_projection_botified_frames",
+            "passed": all(botified_projection_assertions.values()),
+            "details": {
+                "assertions": botified_projection_assertions,
+                "frame_count": len(botified_frame_records),
+                "event_counts": dict(sorted(botified_event_counts.items())),
             },
         },
         {
