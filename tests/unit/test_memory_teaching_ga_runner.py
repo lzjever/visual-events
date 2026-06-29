@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 import json
 from pathlib import Path
 from typing import Any
@@ -22,11 +23,12 @@ def _make_scene(
     *,
     frames: int = 1,
     des_text: str | None = None,
+    jpeg_bytes: bytes = b"jpeg",
 ) -> Path:
     scene_dir = data_dir / name
     scene_dir.mkdir(parents=True)
     for index in range(frames):
-        (scene_dir / f"img_{index:03d}.jpeg").write_bytes(b"jpeg")
+        (scene_dir / f"img_{index:03d}.jpeg").write_bytes(jpeg_bytes)
     if des_text is not None:
         (scene_dir / "des.txt").write_text(des_text, encoding="utf-8")
     return scene_dir
@@ -43,6 +45,14 @@ def _write_manifest(data_dir: Path, scene_names: list[str]) -> None:
         json.dumps(manifest, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def _valid_jpeg_bytes() -> bytes:
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (1280, 720), color=(128, 128, 128)).save(buffer, format="JPEG")
+    return buffer.getvalue()
 
 
 def _records_by_scene(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -310,3 +320,147 @@ def test_dry_run_writes_minimal_artifact_skeleton_and_evidence_index(
     assert object_response["dry_run"] is True
     assert object_response["response"]["status"] == "not_found"
     assert object_response["response"]["error_code"] == "unsupported_target_kind"
+
+
+def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    jpeg_bytes = _valid_jpeg_bytes()
+    for name in ["pci_stand", "pic_hello"]:
+        _make_scene(data_dir, name, frames=2, jpeg_bytes=jpeg_bytes)
+    _make_scene(
+        data_dir,
+        "pic_teach_me",
+        des_text="请你记住我，我是小李飞刀",
+        jpeg_bytes=jpeg_bytes,
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_person",
+        des_text="这是彭刚，请你记住",
+        jpeg_bytes=jpeg_bytes,
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        des_text="这是银河通用的办公室，请你记住",
+        jpeg_bytes=jpeg_bytes,
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_item_phone",
+        des_text="这是手机，请你记住",
+        jpeg_bytes=jpeg_bytes,
+    )
+    out = tmp_path / "artifacts" / "memory-teaching-ga"
+
+    exit_code = module.main(["--data-dir", str(data_dir), "--out", str(out)])
+
+    assert exit_code == 0
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert report["mode"] == "actual"
+    assert report["backend"] == "fake"
+    assert report["scene_count"] == 6
+    assert report["replayed_scene_count"] == 6
+    assert all(
+        fields == [] for fields in report["forbidden_agent_payload_fields"].values()
+    )
+    assert report["object_no_write"]["assertions"]["no_memory_write"] is True
+
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["all_scenes_replayed"]["passed"] is True
+    assert checks["actual_api_responses"]["passed"] is True
+    assert checks["self_introduction_known_person_present"]["passed"] is True
+    assert checks["third_person_known_person_present"]["passed"] is True
+    assert checks["teach_scene_scene_activated"]["passed"] is True
+    assert checks["object_resolve_unsupported_no_write"]["passed"] is True
+
+    payloads = json.loads((out / "teach_payloads.json").read_text(encoding="utf-8"))
+    assert payloads["mode"] == "actual"
+    for record in payloads["payloads"]:
+        assert module.find_forbidden_agent_payload_fields(record["payload"]) == []
+
+    responses = [
+        json.loads(line)
+        for line in (out / "api_responses.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert responses
+    assert all(response["dry_run"] is False for response in responses)
+    assert all(
+        response["response"].get("status") != "stubbed" for response in responses
+    )
+    object_response = next(
+        response
+        for response in responses
+        if response["scene"] == "pic_teach_item_phone"
+    )
+    assert object_response["response"]["status"] == "not_found"
+    assert object_response["response"]["error_code"] == "unsupported_target_kind"
+
+    botified_frames = [
+        json.loads(line)
+        for line in (out / "botified_frames.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    event_names = {
+        frame["semantic_event"]["event"]
+        for frame in botified_frames
+        if frame.get("semantic_event")
+    }
+    assert {"known_person_present", "scene_activated"} <= event_names
+
+
+def test_actual_fake_runner_writes_failed_report_when_teaching_scene_missing(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    jpeg_bytes = _valid_jpeg_bytes()
+    _make_scene(data_dir, "pci_stand", jpeg_bytes=jpeg_bytes)
+    _make_scene(
+        data_dir,
+        "pic_teach_me",
+        des_text="请你记住我，我是小李飞刀",
+        jpeg_bytes=jpeg_bytes,
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        des_text="这是银河通用的办公室，请你记住",
+        jpeg_bytes=jpeg_bytes,
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_item_phone",
+        des_text="这是手机，请你记住",
+        jpeg_bytes=jpeg_bytes,
+    )
+    out = tmp_path / "artifacts" / "memory-teaching-ga"
+
+    exit_code = module.main(["--data-dir", str(data_dir), "--out", str(out)])
+
+    assert exit_code != 0
+    report_path = out / "report.json"
+    assert report_path.is_file()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["ok"] is False
+    assert report["mode"] == "actual"
+    assert report["backend"] == "fake"
+
+    checks = {check["name"]: check for check in report["checks"]}
+    payload_check = checks["expected_teach_des_payloads"]
+    assert payload_check["passed"] is False
+    assert payload_check["details"]["missing"] == ["pic_teach_person"]
+    assert checks["third_person_known_person_present"]["passed"] is False
+    assert checks["third_person_known_person_present"]["details"]["error"] == (
+        "required_teaching_scene_missing"
+    )
+
+    for relative_path in [
+        "timeline.jsonl",
+        "teach_payloads.json",
+        "api_responses.jsonl",
+        "botified_frames.jsonl",
+        "visual-evidence/index.html",
+    ]:
+        assert (out / relative_path).is_file()

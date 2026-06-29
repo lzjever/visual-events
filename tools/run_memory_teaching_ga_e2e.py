@@ -4,9 +4,18 @@ import argparse
 import html
 import json
 import re
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools import run_memory_e2e as memory_e2e
+from visual_events_server.config import MemoryEmbeddingConfig
+from visual_events_server.protocol import _parse_jpeg_dimensions
 
 
 DEFAULT_DATA_DIR = Path("val-data")
@@ -57,8 +66,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        default=True,
-        help="Write stub API responses without calling a server. Currently required.",
+        default=False,
+        help="Write stub API responses without calling a server.",
     )
     return parser.parse_args(argv)
 
@@ -232,6 +241,7 @@ def run_dry_run(
         scenes=scenes,
         payload_records=payload_records,
         manifest=manifest,
+        mode="dry-run",
     )
 
     visual_evidence_index = [
@@ -287,13 +297,625 @@ def run_dry_run(
     return report
 
 
+def run_actual(
+    *,
+    data_dir: Path,
+    out: Path,
+    camera: str = DEFAULT_CAMERA,
+) -> dict[str, Any]:
+    scenes = discover_scene_dirs(data_dir)
+    manifest = manifest_risk_report(data_dir, scenes)
+    payload_records = _build_teach_payload_records_from_scenes(
+        scenes,
+        camera=camera,
+    )
+    payload_records_by_scene = {record["scene"]: record for record in payload_records}
+    forbidden_payload_fields = {
+        record["scene"]: find_forbidden_agent_payload_fields(record["payload"])
+        for record in payload_records
+    }
+
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    runtime_dir = out / "runtime"
+    if runtime_dir.exists():
+        shutil.rmtree(runtime_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    visual_evidence_dir = out / "visual-evidence"
+    visual_evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    timeline_path = out / "timeline.jsonl"
+    teach_payloads_path = out / "teach_payloads.json"
+    api_responses_path = out / "api_responses.jsonl"
+    botified_frames_path = out / "botified_frames.jsonl"
+    visual_states_path = out / "visual_states.jsonl"
+    evidence_index_path = visual_evidence_dir / "index.html"
+    report_path = out / "report.json"
+
+    timeline_records = _timeline_records(
+        scenes,
+        payload_records,
+        dry_run=False,
+    )
+    api_response_records: list[dict[str, Any]] = []
+    botified_frame_records: list[dict[str, Any]] = []
+    replay_result: dict[str, Any] = {
+        "replayed_scene_names": [],
+        "replayed_scene_count": 0,
+    }
+    self_result: dict[str, Any] = {"passed": False, "error": "not_run"}
+    third_person_result: dict[str, Any] = {"passed": False, "error": "not_run"}
+    scene_result: dict[str, Any] = {"passed": False, "error": "not_run"}
+    object_result: dict[str, Any] = {"passed": False, "error": "not_run"}
+
+    with visual_states_path.open("w", encoding="utf-8") as states_file:
+        replay_result = _run_actual_scene_replay(
+            scenes=scenes,
+            out=out,
+            camera=camera,
+            states_file=states_file,
+            timeline_records=timeline_records,
+            botified_frame_records=botified_frame_records,
+        )
+        self_scene = _find_scene(scenes, "pic_teach_me")
+        self_record = payload_records_by_scene.get("pic_teach_me")
+        if self_scene is None or self_record is None:
+            self_result = _missing_teaching_scene_result("pic_teach_me")
+        else:
+            self_result = _run_actual_self_introduction(
+                out=out,
+                scene=self_scene,
+                record=self_record,
+                camera=camera,
+                states_file=states_file,
+                api_response_records=api_response_records,
+                botified_frame_records=botified_frame_records,
+            )
+
+        third_person_scene = _find_scene(scenes, "pic_teach_person")
+        third_person_record = payload_records_by_scene.get("pic_teach_person")
+        if third_person_scene is None or third_person_record is None:
+            third_person_result = _missing_teaching_scene_result("pic_teach_person")
+        else:
+            third_person_result = _run_actual_third_person_introduction(
+                out=out,
+                scene=third_person_scene,
+                record=third_person_record,
+                camera=camera,
+                states_file=states_file,
+                api_response_records=api_response_records,
+                botified_frame_records=botified_frame_records,
+            )
+
+        scene_scene = _find_scene(scenes, "pic_teach_scene_galbot")
+        scene_record = payload_records_by_scene.get("pic_teach_scene_galbot")
+        if scene_scene is None or scene_record is None:
+            scene_result = _missing_teaching_scene_result("pic_teach_scene_galbot")
+        else:
+            scene_result = _run_actual_teach_scene(
+                out=out,
+                scene=scene_scene,
+                record=scene_record,
+                camera=camera,
+                states_file=states_file,
+                api_response_records=api_response_records,
+                botified_frame_records=botified_frame_records,
+            )
+
+        object_scene = _find_scene(scenes, "pic_teach_item_phone")
+        object_record = payload_records_by_scene.get("pic_teach_item_phone")
+        if object_scene is None or object_record is None:
+            object_result = _missing_teaching_scene_result("pic_teach_item_phone")
+        else:
+            object_result = _run_actual_object_negative(
+                out=out,
+                scene=object_scene,
+                record=object_record,
+                camera=camera,
+                api_response_records=api_response_records,
+            )
+
+    _write_json(
+        teach_payloads_path,
+        {
+            "schema_version": 1,
+            "mode": "actual",
+            "backend": "fake",
+            "payloads": payload_records,
+        },
+    )
+    _write_jsonl(api_responses_path, api_response_records)
+    _write_jsonl(botified_frames_path, botified_frame_records)
+    _write_visual_evidence_index(
+        evidence_index_path,
+        scenes=scenes,
+        payload_records=payload_records,
+        manifest=manifest,
+        mode="actual",
+    )
+
+    visual_evidence_index = [
+        {
+            "assertion_id": "memory_teaching_ga_actual_fake",
+            "kind": "html_index",
+            "path": "visual-evidence/index.html",
+        }
+    ]
+    artifact_paths = {
+        "report_json": "report.json",
+        "timeline_jsonl": "timeline.jsonl",
+        "teach_payloads_json": "teach_payloads.json",
+        "api_responses_jsonl": "api_responses.jsonl",
+        "botified_frames_jsonl": "botified_frames.jsonl",
+        "visual_states_jsonl": "visual_states.jsonl",
+        "visual_evidence_index_html": "visual-evidence/index.html",
+        "runtime_dir": "runtime",
+    }
+    _write_jsonl(timeline_path, timeline_records)
+    checks = _build_actual_checks(
+        scenes=scenes,
+        payload_records=payload_records,
+        forbidden_payload_fields=forbidden_payload_fields,
+        out=out,
+        artifact_paths=artifact_paths,
+        visual_evidence_index=visual_evidence_index,
+        replay_result=replay_result,
+        api_response_records=api_response_records,
+        self_result=self_result,
+        third_person_result=third_person_result,
+        scene_result=scene_result,
+        object_result=object_result,
+    )
+    warnings = list(manifest.get("risks") or [])
+    report = {
+        "ok": all(check["passed"] for check in checks),
+        "gate": "memory_teaching_ga_runner_actual_fake",
+        "mode": "actual",
+        "backend": "fake",
+        "real_model_evidence": False,
+        "data_dir": str(data_dir),
+        "out": str(out),
+        "camera": camera,
+        "scene_count": len(scenes),
+        "replayed_scene_count": replay_result["replayed_scene_count"],
+        "replayed_scene_names": replay_result["replayed_scene_names"],
+        "scenes": [_scene_report(scene) for scene in scenes],
+        "manifest": manifest,
+        "warnings": warnings,
+        "teach_requests": [_teach_request_summary(record) for record in payload_records],
+        "forbidden_agent_payload_fields": forbidden_payload_fields,
+        "api_responses": api_response_records,
+        "object_no_write": object_result,
+        "debug_test_channel_enabled": False,
+        "artifacts": artifact_paths,
+        "visual_evidence_index": visual_evidence_index,
+        "checks": checks,
+        "notes": [
+            "Actual fake mode: in-process FastAPI/TestClient server with deterministic fake memory embeddings.",
+            "No local model backend, CLI subprocess, visual overlay, or schema changes are used.",
+            "Real val-data JPEG bytes are streamed once per discovered scene directory.",
+        ],
+    }
+    _write_json(report_path, report)
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    report = run_dry_run(data_dir=args.data_dir, out=args.out, camera=args.camera)
-    print(f"memory teaching GA runner dry-run {'passed' if report['ok'] else 'failed'}")
+    if args.dry_run:
+        report = run_dry_run(data_dir=args.data_dir, out=args.out, camera=args.camera)
+    else:
+        report = run_actual(data_dir=args.data_dir, out=args.out, camera=args.camera)
+    print(
+        "memory teaching GA runner "
+        f"{report['mode']} {'passed' if report['ok'] else 'failed'}"
+    )
     print(f"scenes: {report['scene_count']}")
+    if report["mode"] == "actual":
+        print(f"replayed scenes: {report['replayed_scene_count']}")
     print(f"report: {Path(args.out) / 'report.json'}")
     return 0 if report["ok"] else 1
+
+
+def _run_actual_scene_replay(
+    *,
+    scenes: list[SceneDir],
+    out: Path,
+    camera: str,
+    states_file: Any,
+    timeline_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="all-scene-replay",
+        out=out,
+        source_frame=_load_source_frame_from_scene(scenes[0]),
+        camera=camera,
+    )
+    replayed_scene_names: list[str] = []
+    with runner.open_stream() as websocket:
+        for index, scene in enumerate(scenes):
+            runner.source_frame = _load_source_frame_from_scene(scene)
+            runner.processor.mode = (
+                "third_person" if scene.name == "pic_teach_person" else "single"
+            )
+            state = runner.send(
+                websocket,
+                timestamp_ms=(index + 1) * 1_000,
+                states_file=states_file,
+                phase=f"scene-replay:{scene.name}",
+            )
+            events = list(state.get("semantic_events") or [])
+            replayed_scene_names.append(scene.name)
+            timeline_records.append(
+                {
+                    "type": "scene_replayed",
+                    "mode": "actual",
+                    "backend": "fake",
+                    "scene": scene.name,
+                    "frame": str(runner.source_frame.path),
+                    "frame_id": runner.frame_id,
+                    "semantic_event_count": len(events),
+                }
+            )
+            _append_botified_frame_records(
+                botified_frame_records,
+                case="all-scene-replay",
+                scene=scene.name,
+                phase="scene-replay",
+                events=events,
+            )
+    return {
+        "passed": len(replayed_scene_names) == len(scenes),
+        "replayed_scene_names": replayed_scene_names,
+        "replayed_scene_count": len(replayed_scene_names),
+    }
+
+
+def _run_actual_self_introduction(
+    *,
+    out: Path,
+    scene: SceneDir,
+    record: dict[str, Any],
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="ga-self-introduction",
+        out=out,
+        source_frame=_load_source_frame_from_scene(scene),
+        camera=camera,
+    )
+    with runner.open_stream() as websocket:
+        runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=1_000,
+            states_file=states_file,
+            phase="self-seed",
+        )
+        teach = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index=_payload_index(record),
+            scene=record["scene"],
+            endpoint=record["endpoint"],
+            payload=record["payload"],
+            operation="teach_person_self",
+        )
+        events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=2_000,
+            states_file=states_file,
+            phase="self-replay",
+        )
+    known = memory_e2e.first_event(events, "known_person_present")
+    assertions = {
+        "teach_person_ok": teach["body"].get("ok") is True,
+        "known_person_present": known is not None,
+        "known_person_context": bool(
+            known
+            and known.get("memory_context", {}).get("person", {}).get("person_id")
+            == teach["body"].get("person_id")
+        ),
+    }
+    _append_botified_frame_records(
+        botified_frame_records,
+        case="ga-self-introduction",
+        scene=scene.name,
+        phase="self-replay",
+        events=events,
+    )
+    return {
+        "passed": all(assertions.values()),
+        "assertions": assertions,
+        "person_id": teach["body"].get("person_id"),
+        "events": memory_e2e.compact_events(events),
+    }
+
+
+def _run_actual_third_person_introduction(
+    *,
+    out: Path,
+    scene: SceneDir,
+    record: dict[str, Any],
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="ga-third-person-introduction",
+        out=out,
+        source_frame=_load_source_frame_from_scene(scene),
+        camera=camera,
+    )
+    runner.processor.mode = "third_person"
+    resolve_payload = {
+        "camera": camera,
+        "target": record["payload"]["target"],
+    }
+    with runner.open_stream() as websocket:
+        runner.send(
+            websocket,
+            timestamp_ms=1_000,
+            states_file=states_file,
+            phase="third-person-seed",
+        )
+        resolve = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index=f"{_payload_index(record)}:resolve",
+            scene=record["scene"],
+            endpoint="/v1/memory/resolve-target",
+            payload=resolve_payload,
+            operation="resolve_third_person_target",
+        )
+        teach = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index=_payload_index(record),
+            scene=record["scene"],
+            endpoint=record["endpoint"],
+            payload=record["payload"],
+            operation="teach_person_third_person",
+        )
+        events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=2_000,
+            states_file=states_file,
+            phase="third-person-replay",
+        )
+    known = memory_e2e.first_event(events, "known_person_present")
+    candidates = resolve["body"].get("candidates") or []
+    resolved_track_id = candidates[0].get("track_id") if candidates else None
+    assertions = {
+        "resolve_target_ok": resolve["body"].get("ok") is True,
+        "resolve_target_resolved": resolve["body"].get("status") == "resolved",
+        "resolver_selected_b": resolved_track_id == memory_e2e.AMBIGUOUS_TRACK_ID,
+        "teach_person_ok": teach["body"].get("ok") is True,
+        "known_person_present": known is not None,
+        "known_person_is_b": bool(
+            known and known.get("track_id") == memory_e2e.AMBIGUOUS_TRACK_ID
+        ),
+    }
+    _append_botified_frame_records(
+        botified_frame_records,
+        case="ga-third-person-introduction",
+        scene=scene.name,
+        phase="third-person-replay",
+        events=events,
+    )
+    return {
+        "passed": all(assertions.values()),
+        "assertions": assertions,
+        "resolve_target": resolve["body"],
+        "person_id": teach["body"].get("person_id"),
+        "events": memory_e2e.compact_events(events),
+    }
+
+
+def _run_actual_teach_scene(
+    *,
+    out: Path,
+    scene: SceneDir,
+    record: dict[str, Any],
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="ga-teach-scene",
+        out=out,
+        source_frame=_load_source_frame_from_scene(scene),
+        camera=camera,
+    )
+    with runner.open_stream() as websocket:
+        runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=1_000,
+            states_file=states_file,
+            phase="scene-seed",
+        )
+        teach = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index=_payload_index(record),
+            scene=record["scene"],
+            endpoint=record["endpoint"],
+            payload=record["payload"],
+            operation="teach_scene",
+        )
+        events = runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=2_000,
+            states_file=states_file,
+            phase="scene-replay",
+        )
+    scene_event = memory_e2e.first_event(events, "scene_activated")
+    assertions = {
+        "teach_scene_ok": teach["body"].get("ok") is True,
+        "scene_activated": scene_event is not None,
+        "scene_context": bool(
+            scene_event
+            and scene_event.get("memory_context", {}).get("scene", {}).get("scene_id")
+            == teach["body"].get("scene_id")
+        ),
+    }
+    _append_botified_frame_records(
+        botified_frame_records,
+        case="ga-teach-scene",
+        scene=scene.name,
+        phase="scene-replay",
+        events=events,
+    )
+    return {
+        "passed": all(assertions.values()),
+        "assertions": assertions,
+        "scene_id": teach["body"].get("scene_id"),
+        "events": memory_e2e.compact_events(events),
+    }
+
+
+def _run_actual_object_negative(
+    *,
+    out: Path,
+    scene: SceneDir,
+    record: dict[str, Any],
+    camera: str,
+    api_response_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="ga-object-negative",
+        out=out,
+        source_frame=_load_source_frame_from_scene(scene),
+        camera=camera,
+    )
+    store = runner.client.app.state.memory_service.store
+    before_counts = memory_e2e._memory_write_counts(store)
+    response = _post_and_record_api_response(
+        runner=runner,
+        api_response_records=api_response_records,
+        payload_index=_payload_index(record),
+        scene=record["scene"],
+        endpoint=record["endpoint"],
+        payload=record["payload"],
+        operation="resolve_object_unsupported",
+    )
+    after_counts = memory_e2e._memory_write_counts(store)
+    body = response["body"]
+    assertions = {
+        "status_code_200": response["status_code"] == 200,
+        "status_not_found": body.get("status") == "not_found",
+        "unsupported_target_kind": body.get("error_code") == "unsupported_target_kind",
+        "no_candidates": body.get("candidates") == [],
+        "no_memory_write": before_counts == after_counts,
+    }
+    return {
+        "passed": all(assertions.values()),
+        "assertions": assertions,
+        "resolve_target": body,
+        "before_counts": before_counts,
+        "after_counts": after_counts,
+    }
+
+
+def _actual_runner(
+    *,
+    case: str,
+    out: Path,
+    source_frame: memory_e2e.SourceFrame,
+    camera: str,
+) -> memory_e2e.MemoryE2ERunner:
+    return memory_e2e.MemoryE2ERunner(
+        case=case,
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+        embedding_config=MemoryEmbeddingConfig(backend="fake"),
+    )
+
+
+def _load_source_frame_from_scene(scene: SceneDir) -> memory_e2e.SourceFrame:
+    if not scene.jpeg_paths:
+        raise FileNotFoundError(f"no JPEG frames found in {scene.path}")
+    path = scene.jpeg_paths[0]
+    jpeg_bytes = path.read_bytes()
+    width, height = _parse_jpeg_dimensions(jpeg_bytes, frame_id=None)
+    return memory_e2e.SourceFrame(
+        path=path,
+        jpeg_bytes=jpeg_bytes,
+        width=width,
+        height=height,
+    )
+
+
+def _post_and_record_api_response(
+    *,
+    runner: memory_e2e.MemoryE2ERunner,
+    api_response_records: list[dict[str, Any]],
+    payload_index: int | str,
+    scene: str,
+    endpoint: str,
+    payload: dict[str, Any],
+    operation: str,
+) -> dict[str, Any]:
+    response = runner.client.post(endpoint, json=payload)
+    body = response.json()
+    record = {
+        "payload_index": payload_index,
+        "scene": scene,
+        "endpoint": endpoint,
+        "operation": operation,
+        "dry_run": False,
+        "status_code": response.status_code,
+        "payload": payload,
+        "response": body,
+    }
+    api_response_records.append(record)
+    return {"status_code": response.status_code, "body": body}
+
+
+def _append_botified_frame_records(
+    records: list[dict[str, Any]],
+    *,
+    case: str,
+    scene: str,
+    phase: str,
+    events: list[dict[str, Any]],
+) -> None:
+    for event in memory_e2e.compact_events(events):
+        records.append(
+            {
+                "case": case,
+                "scene": scene,
+                "phase": phase,
+                "dry_run": False,
+                "semantic_event": event,
+            }
+        )
+
+
+def _find_scene(scenes: list[SceneDir], name: str) -> SceneDir | None:
+    for scene in scenes:
+        if scene.name == name:
+            return scene
+    return None
+
+
+def _missing_teaching_scene_result(scene_name: str) -> dict[str, Any]:
+    return {
+        "passed": False,
+        "error": "required_teaching_scene_missing",
+        "scene": scene_name,
+        "message": f"required teaching scene was not discovered: {scene_name}",
+    }
+
+
+def _payload_index(record: dict[str, Any]) -> int:
+    return TEACH_SCENE_ORDER.index(record["scene"])
 
 
 def _scene_dir_from_path(path: Path) -> SceneDir:
@@ -456,6 +1078,8 @@ def _extract_object_referent(text: str) -> str:
 def _timeline_records(
     scenes: list[SceneDir],
     payload_records: list[dict[str, Any]],
+    *,
+    dry_run: bool = True,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for scene in scenes:
@@ -477,7 +1101,7 @@ def _timeline_records(
                 "scene": record["scene"],
                 "endpoint": record["endpoint"],
                 "target": record["payload"]["target"],
-                "dry_run": True,
+                "dry_run": dry_run,
             }
         )
     return records
@@ -538,6 +1162,7 @@ def _write_visual_evidence_index(
     scenes: list[SceneDir],
     payload_records: list[dict[str, Any]],
     manifest: dict[str, Any],
+    mode: str = "dry-run",
 ) -> None:
     scene_items = "\n".join(
         (
@@ -564,7 +1189,7 @@ def _write_visual_evidence_index(
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Memory Teaching GA Dry Run Evidence</title>
+  <title>Memory Teaching GA {html.escape(mode)} Evidence</title>
   <style>
     body {{ font-family: sans-serif; margin: 24px; line-height: 1.4; }}
     code, pre {{ background: #f5f5f5; }}
@@ -572,7 +1197,7 @@ def _write_visual_evidence_index(
   </style>
 </head>
 <body>
-  <h1>Memory Teaching GA Dry Run Evidence</h1>
+  <h1>Memory Teaching GA {html.escape(mode)} Evidence</h1>
   <p>This minimal index records discovered JPEG scenes and stable teach payloads.</p>
   <p>Manifest: {manifest_note}</p>
   <h2>Scenes</h2>
@@ -627,6 +1252,109 @@ def _build_checks(
             "name": "agent_payload_forbidden_fields_absent",
             "passed": all(not fields for fields in forbidden_payload_fields.values()),
             "details": forbidden_payload_fields,
+        },
+        {
+            "name": "artifact_skeleton",
+            "passed": all(artifact_exists.values()) and all(evidence_exists.values()),
+            "details": {
+                "artifacts": artifact_exists,
+                "visual_evidence": evidence_exists,
+            },
+        },
+    ]
+
+
+def _build_actual_checks(
+    *,
+    scenes: list[SceneDir],
+    payload_records: list[dict[str, Any]],
+    forbidden_payload_fields: dict[str, list[str]],
+    out: Path,
+    artifact_paths: dict[str, str],
+    visual_evidence_index: list[dict[str, Any]],
+    replay_result: dict[str, Any],
+    api_response_records: list[dict[str, Any]],
+    self_result: dict[str, Any],
+    third_person_result: dict[str, Any],
+    scene_result: dict[str, Any],
+    object_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    expected_teach_scenes = set(TEACH_SCENE_ORDER)
+    actual_teach_scenes = {record["scene"] for record in payload_records}
+    artifact_exists = {
+        key: (out / relative_path).exists()
+        for key, relative_path in artifact_paths.items()
+        if key != "report_json"
+    }
+    evidence_exists = {
+        item["path"]: (out / item["path"]).is_file() for item in visual_evidence_index
+    }
+    actual_response_assertions = {
+        "has_api_responses": bool(api_response_records),
+        "all_actual": all(
+            record.get("dry_run") is False for record in api_response_records
+        ),
+        "no_stubbed_status": all(
+            record.get("response", {}).get("status") != "stubbed"
+            for record in api_response_records
+        ),
+        "status_codes_ok": all(
+            int(record.get("status_code") or 0) < 400
+            for record in api_response_records
+        ),
+    }
+    return [
+        {
+            "name": "discover_jpeg_scene_dirs",
+            "passed": bool(scenes),
+            "details": {"scene_count": len(scenes)},
+        },
+        {
+            "name": "expected_teach_des_payloads",
+            "passed": expected_teach_scenes <= actual_teach_scenes,
+            "details": {
+                "expected": sorted(expected_teach_scenes),
+                "actual": sorted(actual_teach_scenes),
+                "missing": sorted(expected_teach_scenes - actual_teach_scenes),
+            },
+        },
+        {
+            "name": "agent_payload_forbidden_fields_absent",
+            "passed": all(not fields for fields in forbidden_payload_fields.values()),
+            "details": forbidden_payload_fields,
+        },
+        {
+            "name": "all_scenes_replayed",
+            "passed": replay_result.get("replayed_scene_count") == len(scenes),
+            "details": replay_result,
+        },
+        {
+            "name": "actual_api_responses",
+            "passed": all(actual_response_assertions.values()),
+            "details": {
+                "assertions": actual_response_assertions,
+                "response_count": len(api_response_records),
+            },
+        },
+        {
+            "name": "self_introduction_known_person_present",
+            "passed": bool(self_result.get("passed")),
+            "details": self_result,
+        },
+        {
+            "name": "third_person_known_person_present",
+            "passed": bool(third_person_result.get("passed")),
+            "details": third_person_result,
+        },
+        {
+            "name": "teach_scene_scene_activated",
+            "passed": bool(scene_result.get("passed")),
+            "details": scene_result,
+        },
+        {
+            "name": "object_resolve_unsupported_no_write",
+            "passed": bool(object_result.get("passed")),
+            "details": object_result,
         },
         {
             "name": "artifact_skeleton",
