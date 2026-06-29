@@ -2293,6 +2293,75 @@ async def test_memory_query_scans_multiple_eligible_person_tracks_not_attention_
     assert events[0]["track_id"] == 8
     assert events[0]["evidence"]["source_target_mode"] == "recognition_track"
     assert len(backend.person_inputs) == 2
+    assert subject.latest_recognition_report("front") == {
+        "camera": "front",
+        "frame_id": 2,
+        "frame_timestamp_ms": 1_500,
+        "source_frame_ref": "front:2:1500",
+        "tracks_seen": 2,
+        "tracks_eligible": 2,
+        "tracks_candidates": 2,
+        "candidate_track_ids": [7, 8],
+        "tracks_queried": 2,
+        "tracks_skipped_reason": {},
+        "queried_track_ids": [7, 8],
+        "attention_target_track_id": 7,
+        "attention_target_only": False,
+        "max_tracks_per_tick": 4,
+        "query_interval_ms": 500,
+        "event_cooldown_ms": 5_000,
+        "recognition_runs_in_executor": True,
+        "eligibility_policy": "class_name == 'person' and lost_ms == 0 and hits > 0",
+    }
+
+
+@pytest.mark.asyncio
+async def test_memory_query_report_counts_only_targets_actually_queried_before_event(
+    tmp_path,
+):
+    match_vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[match_vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_person(subject, backend, vector=match_vector, display_name="Track Seven")
+    source_frame = frame(frame_id=2, timestamp_ms=1_500)
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [
+                person_track(7, frame_message=source_frame),
+                person_track(8, frame_message=source_frame),
+            ],
+            frame_message=source_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    events = await _drain_memory_events(
+        subject,
+        camera="front",
+        connection_id="ws_1",
+        frame_id=2,
+        frame_timestamp_ms=1_500,
+    )
+
+    assert [event["event"] for event in events] == ["known_person_present"]
+    assert events[0]["track_id"] == 7
+    assert len(backend.person_inputs) == 1
+    report = subject.latest_recognition_report("front")
+    assert report is not None
+    assert report["tracks_seen"] == 2
+    assert report["tracks_eligible"] == 2
+    assert report["tracks_candidates"] == 2
+    assert report["candidate_track_ids"] == [7, 8]
+    assert report["tracks_queried"] == 1
+    assert report["queried_track_ids"] == [7]
+    assert report["attention_target_track_id"] == 7
+    assert report["attention_target_only"] is False
 
 
 @pytest.mark.asyncio
@@ -2332,6 +2401,26 @@ async def test_memory_query_respects_max_person_tracks_bound(tmp_path):
 
     assert events == []
     assert len(backend.person_inputs) == 4
+    assert subject.latest_recognition_report("front") == {
+        "camera": "front",
+        "frame_id": 2,
+        "frame_timestamp_ms": 1_500,
+        "source_frame_ref": "front:2:1500",
+        "tracks_seen": 5,
+        "tracks_eligible": 5,
+        "tracks_candidates": 4,
+        "candidate_track_ids": [1, 2, 3, 4],
+        "tracks_queried": 4,
+        "tracks_skipped_reason": {"max_tracks_per_tick": 1},
+        "queried_track_ids": [1, 2, 3, 4],
+        "attention_target_track_id": 1,
+        "attention_target_only": False,
+        "max_tracks_per_tick": 4,
+        "query_interval_ms": 500,
+        "event_cooldown_ms": 5_000,
+        "recognition_runs_in_executor": True,
+        "eligibility_policy": "class_name == 'person' and lost_ms == 0 and hits > 0",
+    }
 
 
 @pytest.mark.asyncio
@@ -2375,6 +2464,31 @@ async def test_memory_query_skips_ineligible_person_tracks(tmp_path):
     assert events[0]["track_id"] == 11
     assert events[0]["evidence"]["source_target_mode"] == "recognition_track"
     assert len(backend.person_inputs) == 1
+    assert subject.latest_recognition_report("front") == {
+        "camera": "front",
+        "frame_id": 2,
+        "frame_timestamp_ms": 1_500,
+        "source_frame_ref": "front:2:1500",
+        "tracks_seen": 5,
+        "tracks_eligible": 2,
+        "tracks_candidates": 1,
+        "candidate_track_ids": [11],
+        "tracks_queried": 1,
+        "tracks_skipped_reason": {
+            "lost": 1,
+            "not_person": 1,
+            "no_hits": 1,
+            "target_resolve_failed": 1,
+        },
+        "queried_track_ids": [11],
+        "attention_target_track_id": 7,
+        "attention_target_only": False,
+        "max_tracks_per_tick": 4,
+        "query_interval_ms": 500,
+        "event_cooldown_ms": 5_000,
+        "recognition_runs_in_executor": True,
+        "eligibility_policy": "class_name == 'person' and lost_ms == 0 and hits > 0",
+    }
 
 
 @pytest.mark.asyncio
@@ -2440,6 +2554,16 @@ async def test_observe_visual_state_does_not_wait_for_blocking_memory_query(tmp_
         )
         == []
     )
+    pending_report = subject.latest_recognition_report("front")
+    assert pending_report is not None
+    assert pending_report["frame_id"] == 2
+    assert pending_report["tracks_seen"] == 1
+    assert pending_report["tracks_candidates"] == 1
+    assert pending_report["candidate_track_ids"] == [7]
+    assert pending_report["tracks_queried"] == 1
+    assert pending_report["queried_track_ids"] == [7]
+    assert pending_report["attention_target_only"] is False
+    assert pending_report["recognition_runs_in_executor"] is True
 
     backend.release.set()
     events = await _drain_memory_events(

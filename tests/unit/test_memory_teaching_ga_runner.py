@@ -440,6 +440,22 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert checks["teach_scene_scene_activated"]["passed"] is True
     assert checks["post_teach_all_scenes_memory_behavior"]["passed"] is True
     assert checks["object_resolve_unsupported_no_write"]["passed"] is True
+    assert checks["bounded_multi_person_recognition"]["passed"] is True
+
+    bounded_recognition = report["bounded_multi_person_recognition"]
+    assert bounded_recognition == checks["bounded_multi_person_recognition"]["details"]
+    assert bounded_recognition["attention_target_only"] is False
+    assert bounded_recognition["tracks_seen"] == 2
+    assert bounded_recognition["tracks_eligible"] == 2
+    assert bounded_recognition["tracks_candidates"] == 2
+    assert bounded_recognition["candidate_track_ids"] == [7, 8]
+    assert bounded_recognition["tracks_queried"] == 2
+    assert bounded_recognition["tracks_queried"] <= bounded_recognition[
+        "max_tracks_per_tick"
+    ]
+    assert bounded_recognition["attention_target_track_id"] == 7
+    assert bounded_recognition["queried_track_ids"] == [7, 8]
+    assert bounded_recognition["recognition_runs_in_executor"] is True
 
     post_teach = report["post_teach_scene_replay"]
     assert post_teach == checks["post_teach_all_scenes_memory_behavior"]["details"]
@@ -492,6 +508,7 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert third_person["debug_test_channel_enabled"] is False
     assert third_person["fixture_inputs_consumed"] == []
     assert third_person["debug_fixture_used_for_target_resolution"] is False
+    assert third_person["bounded_multi_person_recognition"] == bounded_recognition
     third_person_crop_path = Path(third_person["stored_crop_path_or_artifact_ref"])
     assert third_person_crop_path.is_file()
     assert out / "runtime" / "memory" / "artifacts" in third_person_crop_path.parents
@@ -580,6 +597,69 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     )
     event_names = {frame["event"] for frame in botified_frames}
     assert {"known_person_present", "scene_activated"} <= event_names
+
+
+def test_bounded_recognition_projection_reads_service_report_without_recomputing() -> None:
+    service_report = {
+        "camera": "front",
+        "frame_id": 44,
+        "frame_timestamp_ms": 12_345,
+        "source_frame_ref": "front:44:12345",
+        "tracks_seen": 99,
+        "tracks_eligible": 88,
+        "tracks_candidates": 2,
+        "candidate_track_ids": [7, 8],
+        "tracks_queried": 2,
+        "tracks_skipped_reason": {"max_tracks_per_tick": 86},
+        "queried_track_ids": [7, 8],
+        "attention_target_track_id": 7,
+        "attention_target_only": False,
+        "max_tracks_per_tick": 4,
+        "query_interval_ms": 1_000,
+        "event_cooldown_ms": 1_000,
+        "recognition_runs_in_executor": True,
+        "eligibility_policy": "service-owned-policy",
+    }
+
+    class FakeMemoryService:
+        def __init__(self) -> None:
+            self.calls: list[str | None] = []
+
+        def latest_recognition_report(self, camera: str | None = None) -> dict[str, Any]:
+            self.calls.append(camera)
+            return dict(service_report)
+
+    memory_service = FakeMemoryService()
+    runner = SimpleNamespace(
+        client=SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(memory_service=memory_service),
+            ),
+        ),
+        session_factory=SimpleNamespace(
+            last_snapshot=SimpleNamespace(
+                tracks=[{"track_id": 7}],
+                attention={"target_track_id": 7},
+            ),
+        ),
+    )
+
+    projected = module._latest_bounded_recognition_report_from_runner(
+        runner,
+        camera="front",
+    )
+    check = module._bounded_multi_person_recognition_check(
+        projected,
+        require_non_attention_query=True,
+    )
+
+    assert memory_service.calls == ["front"]
+    assert projected == service_report
+    assert check == {
+        "name": "bounded_multi_person_recognition",
+        "passed": True,
+        "details": service_report,
+    }
 
 
 def test_actual_fake_runner_writes_failed_report_when_teaching_scene_missing(
@@ -992,11 +1072,43 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
     }
     posted_operations: list[str] = []
     replay_calls: list[dict[str, Any]] = []
+    recognition_report = {
+        "camera": "front",
+        "frame_id": 12,
+        "frame_timestamp_ms": 4_200,
+        "source_frame_ref": "front:12:4200",
+        "tracks_seen": 2,
+        "tracks_eligible": 2,
+        "tracks_candidates": 2,
+        "candidate_track_ids": [7, 8],
+        "tracks_queried": 2,
+        "tracks_skipped_reason": {},
+        "queried_track_ids": [7, 8],
+        "attention_target_track_id": 7,
+        "attention_target_only": False,
+        "max_tracks_per_tick": 4,
+        "query_interval_ms": 1_000,
+        "event_cooldown_ms": 1_000,
+        "recognition_runs_in_executor": True,
+        "eligibility_policy": "class_name == 'person' and lost_ms == 0 and hits > 0",
+    }
+
+    class FakeMemoryService:
+        def latest_recognition_report(
+            self,
+            camera: str | None = None,
+        ) -> dict[str, Any]:
+            assert camera == "front"
+            return dict(recognition_report)
 
     class FakeRunner:
         def __init__(self, **_kwargs: Any) -> None:
             self.session_factory = SimpleNamespace(last_snapshot=None)
-            self.client = object()
+            self.client = SimpleNamespace(
+                app=SimpleNamespace(
+                    state=SimpleNamespace(memory_service=FakeMemoryService()),
+                ),
+            )
 
         def open_stream(self):
             return self
@@ -1130,6 +1242,7 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
     assert result["debug_test_channel_enabled"] is False
     assert result["fixture_inputs_consumed"] == []
     assert result["debug_fixture_used_for_target_resolution"] is False
+    assert result["bounded_multi_person_recognition"] == recognition_report
     assert result["resolve_target"]["evidence"]["introducer_ref"] == "front:track:7"
     assert result["selected_window"]["scene"] == "pic_teach_person"
 

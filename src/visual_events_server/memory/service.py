@@ -10,7 +10,7 @@ import uuid
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -50,6 +50,9 @@ _LOGGER = logging.getLogger(__name__)
 _PERSON_EMBEDDING_CROP_MARGIN_RATIO = 0.10
 _PERSON_EMBEDDING_CONTEXT_MARGIN_RATIO = 0.50
 _MAX_PERSON_QUERY_TRACKS = 4
+_RECOGNITION_ELIGIBILITY_POLICY = (
+    "class_name == 'person' and lost_ms == 0 and hits > 0"
+)
 
 
 class MemoryServiceError(RuntimeError):
@@ -71,6 +74,50 @@ class MemoryServiceError(RuntimeError):
 @dataclass(frozen=True)
 class _QueryPlan:
     cached: CachedFrame
+
+
+@dataclass(frozen=True)
+class _RecognitionTickReport:
+    camera: str
+    frame_id: int
+    frame_timestamp_ms: int
+    source_frame_ref: str
+    tracks_seen: int
+    tracks_eligible: int
+    tracks_candidates: int
+    candidate_track_ids: tuple[int, ...]
+    tracks_queried: int
+    tracks_skipped_reason: dict[str, int]
+    queried_track_ids: tuple[int, ...]
+    attention_target_track_id: int | None
+    attention_target_only: bool
+    max_tracks_per_tick: int
+    query_interval_ms: int
+    event_cooldown_ms: int
+    recognition_runs_in_executor: bool
+    eligibility_policy: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "camera": self.camera,
+            "frame_id": self.frame_id,
+            "frame_timestamp_ms": self.frame_timestamp_ms,
+            "source_frame_ref": self.source_frame_ref,
+            "tracks_seen": self.tracks_seen,
+            "tracks_eligible": self.tracks_eligible,
+            "tracks_candidates": self.tracks_candidates,
+            "candidate_track_ids": list(self.candidate_track_ids),
+            "tracks_queried": self.tracks_queried,
+            "tracks_skipped_reason": dict(self.tracks_skipped_reason),
+            "queried_track_ids": list(self.queried_track_ids),
+            "attention_target_track_id": self.attention_target_track_id,
+            "attention_target_only": self.attention_target_only,
+            "max_tracks_per_tick": self.max_tracks_per_tick,
+            "query_interval_ms": self.query_interval_ms,
+            "event_cooldown_ms": self.event_cooldown_ms,
+            "recognition_runs_in_executor": self.recognition_runs_in_executor,
+            "eligibility_policy": self.eligibility_policy,
+        }
 
 
 class AppMemoryService:
@@ -114,6 +161,7 @@ class AppMemoryService:
         self.familiar_seen_count = int(familiar_seen_count)
         self.familiar_threshold = float(familiar_threshold)
         self.scene_threshold = float(scene_threshold)
+        self.event_cooldown_ms = int(event_cooldown_ms)
         self._clock_ms = clock_ms or _system_time_ms
         self._cache = FrameCache(
             max_age_ms=int(frame_cache_seconds) * 1000,
@@ -121,7 +169,7 @@ class AppMemoryService:
         )
         self._resolver = target_resolver or TargetResolver()
         self._retriever = MemoryRetriever(store)
-        self._gate = MemoryEventGate(cooldown_ms=event_cooldown_ms)
+        self._gate = MemoryEventGate(cooldown_ms=self.event_cooldown_ms)
         self._artifact_dir = (
             Path(artifact_dir)
             if artifact_dir is not None
@@ -136,6 +184,12 @@ class AppMemoryService:
             asyncio.Future[list[tuple[str, dict[str, Any]]]],
         ] = {}
         self._query_state_lock = threading.Lock()
+        self._recognition_report_lock = threading.Lock()
+        self._latest_recognition_report: _RecognitionTickReport | None = None
+        self._latest_recognition_reports_by_camera: dict[
+            str,
+            _RecognitionTickReport,
+        ] = {}
         self._teach_embedding_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="memory-teach-embedding",
@@ -218,6 +272,18 @@ class AppMemoryService:
         events = list(queue)
         queue.clear()
         return events
+
+    def latest_recognition_report(
+        self,
+        camera: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._recognition_report_lock:
+            report = (
+                self._latest_recognition_report
+                if camera is None
+                else self._latest_recognition_reports_by_camera.get(camera)
+            )
+        return None if report is None else report.to_dict()
 
     async def teach_person(self, request: dict[str, Any]) -> dict[str, Any]:
         await self._enter_teach_request()
@@ -1132,7 +1198,10 @@ class AppMemoryService:
 
     def _run_query(self, plan: _QueryPlan) -> list[tuple[str, dict[str, Any]]]:
         completed: list[tuple[str, dict[str, Any]]] = []
+        queried_person_targets: list[ResolvedTarget] = []
         for person_target in self._query_person_targets(plan):
+            queried_person_targets.append(person_target)
+            self._record_recognition_queried_targets(plan, queried_person_targets)
             person_event = self._query_person(plan, person_target)
             if person_event is not None:
                 completed.append((plan.cached.frame.camera, person_event))
@@ -1148,13 +1217,41 @@ class AppMemoryService:
     ) -> list[ResolvedTarget]:
         snapshot = plan.cached.memory_snapshot
         if snapshot is None:
+            self._record_recognition_report(
+                _RecognitionTickReport(
+                    camera=plan.cached.frame.camera,
+                    frame_id=plan.cached.frame.frame_id,
+                    frame_timestamp_ms=plan.cached.frame.timestamp_ms,
+                    source_frame_ref=_source_frame_ref(plan.cached),
+                    tracks_seen=0,
+                    tracks_eligible=0,
+                    tracks_candidates=0,
+                    candidate_track_ids=(),
+                    tracks_queried=0,
+                    tracks_skipped_reason={},
+                    queried_track_ids=(),
+                    attention_target_track_id=None,
+                    attention_target_only=False,
+                    max_tracks_per_tick=_MAX_PERSON_QUERY_TRACKS,
+                    query_interval_ms=self.query_interval_ms,
+                    event_cooldown_ms=self.event_cooldown_ms,
+                    recognition_runs_in_executor=True,
+                    eligibility_policy=_RECOGNITION_ELIGIBILITY_POLICY,
+                )
+            )
             return []
 
         targets: list[ResolvedTarget] = []
+        skipped_reason: Counter[str] = Counter()
+        tracks_eligible = 0
         for track in snapshot.tracks:
+            skip_reason = _recognition_track_skip_reason(track)
+            if skip_reason:
+                skipped_reason[skip_reason] += 1
+                continue
+            tracks_eligible += 1
             if len(targets) >= _MAX_PERSON_QUERY_TRACKS:
-                break
-            if not _recognition_track_eligible(track):
+                skipped_reason["max_tracks_per_tick"] += 1
                 continue
             try:
                 resolved = self._resolver.resolve(
@@ -1165,6 +1262,7 @@ class AppMemoryService:
                     attention=snapshot.attention,
                 )
             except TargetResolveError:
+                skipped_reason["target_resolve_failed"] += 1
                 continue
             targets.append(
                 ResolvedTarget(
@@ -1175,7 +1273,69 @@ class AppMemoryService:
                     quality=resolved.quality,
                 )
             )
+        self._record_recognition_report(
+            _RecognitionTickReport(
+                camera=plan.cached.frame.camera,
+                frame_id=plan.cached.frame.frame_id,
+                frame_timestamp_ms=plan.cached.frame.timestamp_ms,
+                source_frame_ref=_source_frame_ref(plan.cached),
+                tracks_seen=len(snapshot.tracks),
+                tracks_eligible=tracks_eligible,
+                tracks_candidates=len(targets),
+                candidate_track_ids=tuple(
+                    int(target.track_id)
+                    for target in targets
+                    if target.track_id is not None
+                ),
+                tracks_queried=0,
+                tracks_skipped_reason=dict(sorted(skipped_reason.items())),
+                queried_track_ids=(),
+                attention_target_track_id=(
+                    int(snapshot.attention.target_track_id)
+                    if snapshot.attention is not None
+                    and snapshot.attention.target_track_id is not None
+                    else None
+                ),
+                attention_target_only=False,
+                max_tracks_per_tick=_MAX_PERSON_QUERY_TRACKS,
+                query_interval_ms=self.query_interval_ms,
+                event_cooldown_ms=self.event_cooldown_ms,
+                recognition_runs_in_executor=True,
+                eligibility_policy=_RECOGNITION_ELIGIBILITY_POLICY,
+            )
+        )
         return targets
+
+    def _record_recognition_report(self, report: _RecognitionTickReport) -> None:
+        with self._recognition_report_lock:
+            self._latest_recognition_report = report
+            self._latest_recognition_reports_by_camera[report.camera] = report
+
+    def _record_recognition_queried_targets(
+        self,
+        plan: _QueryPlan,
+        targets: list[ResolvedTarget],
+    ) -> None:
+        camera = plan.cached.frame.camera
+        queried_track_ids = tuple(
+            int(target.track_id) for target in targets if target.track_id is not None
+        )
+        with self._recognition_report_lock:
+            report = self._latest_recognition_reports_by_camera.get(camera)
+            if (
+                report is None
+                or report.frame_id != plan.cached.frame.frame_id
+                or report.frame_timestamp_ms != plan.cached.frame.timestamp_ms
+            ):
+                return
+            updated = replace(
+                report,
+                tracks_queried=len(queried_track_ids),
+                queried_track_ids=queried_track_ids,
+            )
+            self._latest_recognition_reports_by_camera[camera] = updated
+            if self._latest_recognition_report is report:
+                self._latest_recognition_report = updated
 
     def _query_person(
         self,
@@ -1612,11 +1772,17 @@ def _attach_store_delta_to_error(
 
 
 def _recognition_track_eligible(track: TrackSnapshot) -> bool:
-    return (
-        track.class_name == "person"
-        and track.lost_ms == 0
-        and track.hits > 0
-    )
+    return _recognition_track_skip_reason(track) is None
+
+
+def _recognition_track_skip_reason(track: TrackSnapshot) -> str | None:
+    if track.class_name != "person":
+        return "not_person"
+    if track.lost_ms != 0:
+        return "lost"
+    if track.hits <= 0:
+        return "no_hits"
+    return None
 
 
 def _visible_person_track(

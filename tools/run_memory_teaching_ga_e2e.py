@@ -63,6 +63,19 @@ POST_TEACH_SCENE_REPLAY_CASE = "ga-post-teach-scene-replay"
 CLI_BOTIFIED_FRAME_SOURCE = "cli_frame_pump_stdout"
 BOTIFIED_OPEN = "<botified>"
 BOTIFIED_CLOSE = "</botified>"
+BOUNDED_MULTI_PERSON_RECOGNITION_FIELDS = (
+    "tracks_seen",
+    "tracks_eligible",
+    "tracks_queried",
+    "tracks_skipped_reason",
+    "queried_track_ids",
+    "attention_target_track_id",
+    "attention_target_only",
+    "max_tracks_per_tick",
+    "query_interval_ms",
+    "event_cooldown_ms",
+    "recognition_runs_in_executor",
+)
 
 
 @dataclass(frozen=True)
@@ -524,6 +537,10 @@ def run_actual(
         "runtime_dir": "runtime",
     }
     _write_jsonl(timeline_path, timeline_records)
+    bounded_multi_person_recognition = _bounded_multi_person_recognition_from_results(
+        third_person_result,
+        post_teach_scene_replay_result,
+    )
     checks = _build_actual_checks(
         scenes=scenes,
         payload_records=payload_records,
@@ -539,6 +556,7 @@ def run_actual(
         post_teach_scene_replay_result=post_teach_scene_replay_result,
         object_result=object_result,
         botified_frame_records=botified_frame_records,
+        bounded_multi_person_recognition=bounded_multi_person_recognition,
     )
     warnings = list(manifest.get("risks") or [])
     report = {
@@ -561,6 +579,7 @@ def run_actual(
         "api_responses": api_response_records,
         "third_person_introduction": third_person_result,
         "post_teach_scene_replay": post_teach_scene_replay_result,
+        "bounded_multi_person_recognition": bounded_multi_person_recognition,
         "object_no_write": object_result,
         "debug_test_channel_enabled": False,
         "artifacts": artifact_paths,
@@ -702,6 +721,9 @@ def run_local_smoke(
         "runtime_dir": "runtime",
     }
     _write_jsonl(timeline_path, timeline_records)
+    bounded_multi_person_recognition = _bounded_multi_person_recognition_from_results(
+        third_person_result,
+    )
     checks = _build_local_smoke_checks(
         scenes=scenes,
         payload_records=payload_records,
@@ -713,6 +735,7 @@ def run_local_smoke(
         self_result=self_result,
         scene_result=scene_result,
         third_person_result=third_person_result,
+        bounded_multi_person_recognition=bounded_multi_person_recognition,
     )
     ok = all(check["passed"] for check in checks)
     warnings = list(manifest.get("risks") or [])
@@ -736,6 +759,7 @@ def run_local_smoke(
         "self_smoke": self_result,
         "scene_smoke": scene_result,
         "third_person_probe": third_person_result,
+        "bounded_multi_person_recognition": bounded_multi_person_recognition,
         "api_responses": api_response_records,
         "debug_test_channel_enabled": False,
         "artifacts": artifact_paths,
@@ -1253,6 +1277,12 @@ def _run_local_third_person_probe(
                 states_file=states_file,
                 phase="third-person-replay",
             )
+            bounded_multi_person_recognition = (
+                _latest_bounded_recognition_report_from_runner(
+                    runner,
+                    camera=camera,
+                )
+            )
             known = memory_e2e.first_event(events, "known_person_present")
             person_id = teach["body"].get("person_id")
             known_person_id = (
@@ -1327,6 +1357,9 @@ def _run_local_third_person_probe(
                     "stored_crop_hash": teach_evidence.get("crop_hash"),
                     "stored_crop_path_or_artifact_ref": teach_evidence.get(
                         "crop_path_or_artifact_ref"
+                    ),
+                    "bounded_multi_person_recognition": (
+                        bounded_multi_person_recognition
                     ),
                     "selected_window": _selected_window(scene, source_frame),
                     "events": memory_e2e.compact_events(events),
@@ -1661,6 +1694,7 @@ def _local_smoke_preflight_failed_report(
         "third_person_probe": _with_local_third_person_debug_evidence(
             _not_run_result(status="insufficient_sample"),
         ),
+        "bounded_multi_person_recognition": {},
         "artifacts": {"report_json": str(report_path.relative_to(out))},
         "checks": [preflight],
         "notes": [
@@ -1722,6 +1756,96 @@ def _config_for_local_smoke_case(config: ServerConfig, runtime_dir: Path) -> Ser
 
 def _not_run_result(*, status: str = "failed") -> dict[str, Any]:
     return {"status": status, "passed": False, "reason": "not_run"}
+
+
+def _latest_bounded_recognition_report_from_runner(
+    runner: Any,
+    *,
+    camera: str,
+) -> dict[str, Any]:
+    client = getattr(runner, "client", None)
+    app = getattr(client, "app", None)
+    state_obj = getattr(app, "state", None)
+    memory_service = getattr(state_obj, "memory_service", None)
+    latest_report = getattr(memory_service, "latest_recognition_report", None)
+    if not callable(latest_report):
+        return {}
+    report = latest_report(camera)
+    if not isinstance(report, dict):
+        return {}
+    return _bounded_multi_person_recognition_copy(report)
+
+
+def _bounded_multi_person_recognition_from_results(
+    *results: dict[str, Any],
+) -> dict[str, Any]:
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        report = result.get("bounded_multi_person_recognition")
+        if isinstance(report, dict) and report:
+            return _bounded_multi_person_recognition_copy(report)
+    return {}
+
+
+def _bounded_multi_person_recognition_copy(report: dict[str, Any]) -> dict[str, Any]:
+    copied = dict(report)
+    skipped = copied.get("tracks_skipped_reason")
+    copied["tracks_skipped_reason"] = dict(skipped) if isinstance(skipped, dict) else {}
+    candidate_track_ids = copied.get("candidate_track_ids")
+    if isinstance(candidate_track_ids, (list, tuple)):
+        copied["candidate_track_ids"] = list(candidate_track_ids)
+    else:
+        copied["candidate_track_ids"] = []
+    queried_track_ids = copied.get("queried_track_ids")
+    if isinstance(queried_track_ids, (list, tuple)):
+        copied["queried_track_ids"] = list(queried_track_ids)
+    else:
+        copied["queried_track_ids"] = []
+    return copied
+
+
+def _bounded_multi_person_recognition_check(
+    report: dict[str, Any],
+    *,
+    require_non_attention_query: bool,
+) -> dict[str, Any]:
+    details = (
+        _bounded_multi_person_recognition_copy(report)
+        if isinstance(report, dict)
+        else {}
+    )
+    missing_fields = [
+        field
+        for field in BOUNDED_MULTI_PERSON_RECOGNITION_FIELDS
+        if field not in details
+    ]
+    tracks_queried = _int_value(details.get("tracks_queried"), -1)
+    max_tracks_per_tick = _int_value(details.get("max_tracks_per_tick"), -1)
+    tracks_eligible = _int_value(details.get("tracks_eligible"), 0)
+    queried_track_ids = details.get("queried_track_ids")
+    if not isinstance(queried_track_ids, list):
+        queried_track_ids = []
+    attention_target_track_id = details.get("attention_target_track_id")
+    non_attention_queried = any(
+        track_id != attention_target_track_id for track_id in queried_track_ids
+    )
+    passed = (
+        not missing_fields
+        and details.get("attention_target_only") is False
+        and details.get("recognition_runs_in_executor") is True
+        and tracks_queried >= 1
+        and tracks_eligible >= 1
+        and max_tracks_per_tick >= 1
+        and tracks_queried <= max_tracks_per_tick
+        and bool(queried_track_ids)
+        and (non_attention_queried or not require_non_attention_query)
+    )
+    return {
+        "name": "bounded_multi_person_recognition",
+        "passed": passed,
+        "details": details,
+    }
 
 
 def _insufficient_sample_result(*, reason: str, scene: str) -> dict[str, Any]:
@@ -2302,6 +2426,12 @@ def _run_actual_third_person_introduction(
             states_file=states_file,
             phase="third-person-b-positive-replay",
         )
+        bounded_multi_person_recognition = (
+            _latest_bounded_recognition_report_from_runner(
+                runner,
+                camera=camera,
+            )
+        )
         runner.processor.mode = "single"
         a_only_events = runner.start_query_and_drain(
             websocket,
@@ -2393,6 +2523,7 @@ def _run_actual_third_person_introduction(
         "stored_embedding_source_track_ref": stored_embedding_source_track_ref,
         "stored_crop_hash": stored_crop_hash,
         "stored_crop_path_or_artifact_ref": stored_crop_path_or_artifact_ref,
+        "bounded_multi_person_recognition": bounded_multi_person_recognition,
         "b_positive_replay": b_positive_replay,
         "a_only_negative_replay": a_only_negative_replay,
         "events": b_positive_replay["events"],
@@ -3015,6 +3146,7 @@ def _build_actual_checks(
     post_teach_scene_replay_result: dict[str, Any],
     object_result: dict[str, Any],
     botified_frame_records: list[dict[str, Any]],
+    bounded_multi_person_recognition: dict[str, Any],
 ) -> list[dict[str, Any]]:
     expected_teach_scenes = set(TEACH_SCENE_ORDER)
     actual_teach_scenes = {record["scene"] for record in payload_records}
@@ -3114,6 +3246,10 @@ def _build_actual_checks(
             "passed": bool(third_person_result.get("passed")),
             "details": third_person_result,
         },
+        _bounded_multi_person_recognition_check(
+            bounded_multi_person_recognition,
+            require_non_attention_query=True,
+        ),
         {
             "name": "teach_scene_scene_activated",
             "passed": bool(scene_result.get("passed")),
@@ -3152,6 +3288,7 @@ def _build_local_smoke_checks(
     self_result: dict[str, Any],
     scene_result: dict[str, Any],
     third_person_result: dict[str, Any],
+    bounded_multi_person_recognition: dict[str, Any],
 ) -> list[dict[str, Any]]:
     expected_teach_scenes = {
         "pic_teach_me",
@@ -3206,6 +3343,10 @@ def _build_local_smoke_checks(
             ),
             "details": third_person_result,
         },
+        _bounded_multi_person_recognition_check(
+            bounded_multi_person_recognition,
+            require_non_attention_query=False,
+        ),
         {
             "name": "artifact_skeleton",
             "passed": all(artifact_exists.values()) and all(evidence_exists.values()),
