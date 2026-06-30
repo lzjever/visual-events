@@ -1043,7 +1043,7 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert {"known_person_present", "scene_activated"} <= event_names
 
 
-def test_actual_api_response_gate_ignores_identify_current_evidence_only_failure(
+def test_actual_api_response_gate_fails_identify_current_failure(
     tmp_path: Path,
 ) -> None:
     api_response_records = [
@@ -1081,10 +1081,34 @@ def test_actual_api_response_gate_ignores_identify_current_evidence_only_failure
     )
 
     actual_api = next(check for check in checks if check["name"] == "actual_api_responses")
-    assert actual_api["passed"] is True
-    assert actual_api["details"]["assertions"]["status_codes_ok"] is True
-    assert actual_api["details"]["gate_response_count"] == 1
-    assert actual_api["details"]["evidence_only_response_count"] == 1
+    assert actual_api["passed"] is False
+    assert actual_api["details"]["assertions"]["status_codes_ok"] is False
+    assert actual_api["details"]["gate_response_count"] == 2
+    assert actual_api["details"]["evidence_only_response_count"] == 0
+
+
+def test_identify_current_summary_includes_familiar_unknown_anonymous_id() -> None:
+    summary = module._identify_current_summary(  # noqa: SLF001
+        {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "status": "identified",
+                "people": [
+                    {
+                        "target_ref": "track:7",
+                        "identity_context": {
+                            "status": "familiar_unknown",
+                            "anonymous_person": {"anonymous_id": "anon_1"},
+                        },
+                    }
+                ],
+            },
+        }
+    )
+
+    assert summary["identity_status"] == "familiar_unknown"
+    assert summary["anonymous_id"] == "anon_1"
 
 
 def test_current_visual_snapshot_artifact_prefers_richer_identity_state(
@@ -1221,6 +1245,14 @@ def test_actual_fake_runner_report_includes_supporting_contracts(
     assert supporting["assertions"]["event_identity_context_present"] is True
     assert supporting["assertions"]["event_identity_context_person_waving"] is True
     assert supporting["assertions"]["event_identity_context_known_person"] is True
+    assert supporting["assertions"]["identify_current_ok"] is True
+    assert supporting["assertions"]["identify_current_identified"] is True
+    assert supporting["assertions"]["identify_current_identity_present"] is True
+    assert supporting["identify_current"]["status_code"] == 200
+    assert supporting["identify_current"]["ok"] is True
+    assert supporting["identify_current"]["status"] == "identified"
+    assert supporting["identify_current"]["identity_status"] == "known_person"
+    assert "people" not in supporting["identify_current"]
     assert supporting["event_identity_context"]["event"]["event"] == "person_waving"
     assert (
         supporting["event_identity_context"]["identity_context"]["status"]

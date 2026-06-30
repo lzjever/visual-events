@@ -68,7 +68,7 @@ TEACH_SCENE_ORDER = (
 POST_TEACH_SCENE_REPLAY_CASE = "ga-post-teach-scene-replay"
 CLI_BOTIFIED_FRAME_SOURCE = "cli_frame_pump_stdout"
 EVIDENCE_ONLY_ARTIFACT_KEYS = {"current_visual_snapshot_json"}
-EVIDENCE_ONLY_API_OPERATIONS = {"supporting_identify_current"}
+EVIDENCE_ONLY_API_OPERATIONS: set[str] = set()
 BOTIFIED_OPEN = "<botified>"
 BOTIFIED_CLOSE = "</botified>"
 BOUNDED_MULTI_PERSON_RECOGNITION_FIELDS = (
@@ -2980,6 +2980,15 @@ def _run_actual_supporting_contracts(
         "event_identity_context_known_person": bool(
             event_identity_context["assertions"].get("identity_status_known_person")
         ),
+        "identify_current_ok": bool(
+            summary_link["assertions"].get("identify_current_ok")
+        ),
+        "identify_current_identified": bool(
+            summary_link["assertions"].get("identify_current_identified")
+        ),
+        "identify_current_identity_present": bool(
+            summary_link["assertions"].get("identify_current_identity_present")
+        ),
         "resolve_target_resolved": resolve_states["resolved"].get("status") == "resolved",
         "resolve_target_ambiguous": resolve_states["ambiguous"].get("status") == "ambiguous",
         "resolve_target_ambiguous_no_write": bool(
@@ -3010,6 +3019,7 @@ def _run_actual_supporting_contracts(
         "teach_auto_merge_anonymous": familiar_merge["teach_auto_merge_anonymous"],
         "correct_identity": correct_identity["correct_identity"],
         "event_identity_context": event_identity_context["event_identity_context"],
+        "identify_current": summary_link["identify_current"],
         "resolve_target_states": {
             "resolved": resolve_states["resolved"],
             "ambiguous": resolve_states["ambiguous"],
@@ -3131,6 +3141,7 @@ def _run_actual_supporting_summary_link(
     lookup_conversation_summaries = lookup["body"].get("conversation_summaries")
     if not isinstance(lookup_conversation_summaries, list):
         lookup_conversation_summaries = []
+    identify_current_summary = _identify_current_summary(identify_current)
     assertions = {
         "teach_person_ok": teach["body"].get("ok") is True,
         "summary_ok": summary["body"].get("ok") is True,
@@ -3141,6 +3152,17 @@ def _run_actual_supporting_summary_link(
         "external_lookup_summary_present": bool(lookup_conversation_summaries),
         "known_person_present": known is not None,
         "summary_context_present": bool(event_conversation_summaries),
+        "identify_current_ok": (
+            identify_current_summary["status_code"] == 200
+            and identify_current_summary["ok"] is True
+        ),
+        "identify_current_identified": (
+            identify_current_summary["status"] == "identified"
+        ),
+        "identify_current_identity_present": (
+            identify_current_summary["identity_status"]
+            in {"known_person", "familiar_unknown"}
+        ),
     }
     return {
         "runner_case": runner.case,
@@ -3158,7 +3180,36 @@ def _run_actual_supporting_summary_link(
             "lookup": lookup["body"],
             "lookup_conversation_summaries": lookup_conversation_summaries,
         },
-        "identify_current": identify_current["body"],
+        "identify_current": identify_current_summary,
+    }
+
+
+def _identify_current_summary(result: dict[str, Any]) -> dict[str, Any]:
+    body = result.get("body")
+    if not isinstance(body, dict):
+        body = {}
+    people = body.get("people")
+    first_person = people[0] if isinstance(people, list) and people else {}
+    if not isinstance(first_person, dict):
+        first_person = {}
+    identity_context = first_person.get("identity_context")
+    if not isinstance(identity_context, dict):
+        identity_context = {}
+    person = identity_context.get("person")
+    if not isinstance(person, dict):
+        person = {}
+    anonymous = identity_context.get("anonymous_person")
+    if not isinstance(anonymous, dict):
+        anonymous = {}
+    return {
+        "status_code": int(result.get("status_code") or 0),
+        "ok": body.get("ok"),
+        "status": body.get("status"),
+        "identity_status": identity_context.get("status"),
+        "target_ref": first_person.get("target_ref"),
+        "person_id": person.get("person_id"),
+        "display_name": person.get("display_name"),
+        "anonymous_id": anonymous.get("anonymous_id"),
     }
 
 
