@@ -3963,6 +3963,72 @@ async def test_event_identity_recall_cache_miss_updates_overlay_without_event_or
 
 
 @pytest.mark.asyncio
+async def test_event_identity_recall_cache_miss_registers_pending_for_event_track_only(
+    tmp_path,
+) -> None:
+    backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
+    backend.block_queries = True
+    subject = service(tmp_path, embedding_backend=backend)
+    frame_message = frame()
+    state = visual_state()
+    state["tracks"] = [
+        {**state["tracks"][0], "track_id": 7},
+        {**state["tracks"][0], "track_id": 8},
+    ]
+    state["semantic_events"] = [
+        {"event": "person_waving", "track_id": 7, "event_id": "event_track_only"}
+    ]
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=state,
+        snapshot=memory_snapshot_with_tracks(
+            [
+                person_track(7, frame_message=frame_message),
+                person_track(8, frame_message=frame_message),
+            ],
+            frame_message=frame_message,
+        ),
+    )
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+
+    assert list(subject._pending_event_identity_recalls) == [  # noqa: SLF001
+        ("ws_1", "front", 7, "front:1:1000")
+    ]
+    assert await asyncio.to_thread(backend.entered.wait, 1.0)
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+    assert [track["identity"] for track in projected["tracks"]] == [
+        {
+            "status": "pending",
+            "source": "event_recall",
+            "fresh_ms": 0,
+            "reason": "cache_miss",
+        },
+        {"status": "unknown", "source": "none"},
+    ]
+
+    backend.release.set()
+    await _wait_for_event_identity_recall_idle(subject)
+
+    assert subject._pending_event_identity_recalls == {}  # noqa: SLF001
+    assert (
+        subject.identity_context_for_visual_state(
+            connection_id="ws_1",
+            visual_state=state,
+        )["tracks"][0]["identity"]["status"]
+        != "pending"
+    )
+
+
+@pytest.mark.asyncio
 async def test_event_identity_recall_familiar_unknown_is_read_only(tmp_path) -> None:
     backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
     subject = service(tmp_path, embedding_backend=backend)
@@ -4178,6 +4244,63 @@ async def test_event_identity_recall_failure_cleans_in_flight_and_can_retry(
 
 
 @pytest.mark.asyncio
+async def test_event_identity_recall_late_result_does_not_overwrite_reused_track(
+    tmp_path,
+) -> None:
+    backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_known_active_target(subject, backend)
+    backend.block_queries = True
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    first_state = visual_state(frame_id=1, timestamp_ms=1_000)
+    first_state["semantic_events"] = [
+        {"event": "person_waving", "track_id": 7, "event_id": "late_known"}
+    ]
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=first_frame,
+        state=first_state,
+        snapshot=memory_snapshot(frame_message=first_frame),
+    )
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=first_state,
+    )
+    assert await asyncio.to_thread(backend.entered.wait, 1.0)
+    assert (
+        subject.identity_context_for_visual_state(
+            connection_id="ws_1",
+            visual_state=first_state,
+        )["tracks"][0]["identity"]["status"]
+        == "pending"
+    )
+
+    reused_frame = frame(frame_id=2, timestamp_ms=1_500)
+    reused_state = visual_state(frame_id=2, timestamp_ms=1_500)
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=reused_frame,
+        state=reused_state,
+        snapshot=memory_snapshot(frame_message=reused_frame),
+    )
+    backend.release.set()
+    await _wait_for_event_identity_recall_idle(subject)
+
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=reused_state,
+    )
+    assert projected["tracks"][0]["identity"] == {
+        "status": "unknown",
+        "source": "none",
+    }
+    assert subject._pending_event_identity_recalls == {}  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_event_identity_recall_drops_result_when_latest_track_is_not_visible(
     tmp_path,
 ) -> None:
@@ -4227,7 +4350,7 @@ async def test_event_identity_recall_drops_result_when_latest_track_is_not_visib
         connection_id="ws_1",
         visual_state=visible_again,
     )["tracks"][0]["identity"]
-    assert visible_again_identity["status"] == "pending"
+    assert visible_again_identity == {"status": "unknown", "source": "none"}
 
 
 @pytest.mark.asyncio
@@ -5506,7 +5629,7 @@ async def test_identify_current_timeout_does_not_block_or_write_overlay(tmp_path
             visual_state=visual_state(),
         )
         assert projected["tracks"][0]["identity"] == {
-            "status": "pending",
+            "status": "unknown",
             "source": "none",
         }
     finally:
@@ -5520,7 +5643,7 @@ async def test_identify_current_timeout_does_not_block_or_write_overlay(tmp_path
         visual_state=visual_state(),
     )
     assert projected_after_release["tracks"][0]["identity"] == {
-        "status": "pending",
+        "status": "unknown",
         "source": "none",
     }
 

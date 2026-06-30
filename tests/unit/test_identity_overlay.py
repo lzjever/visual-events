@@ -25,6 +25,8 @@ def person_track(track_id: int = 7) -> dict:
 
 def visual_state(*, track_id: int = 7) -> dict:
     return {
+        "frame_id": 1,
+        "frame_timestamp_ms": 1_000,
         "camera": "front",
         "tracks": [person_track(track_id)],
         "attention": {"target_track_id": track_id},
@@ -96,7 +98,10 @@ def test_known_projection_is_stream_scoped_redacted_and_expires() -> None:
             },
         }
     ]
-    assert isolated["tracks"][0]["identity"]["status"] == "pending"
+    assert isolated["tracks"][0]["identity"] == {
+        "status": "unknown",
+        "source": "none",
+    }
     assert "bbox_xyxy" not in projected["tracks"][0]
     assert "keypoints" not in projected["tracks"][0]
     assert "embedding" not in str(projected)
@@ -109,9 +114,108 @@ def test_known_projection_is_stream_scoped_redacted_and_expires() -> None:
         camera="front",
         visual_state=visual_state(),
     )
-    assert expired["tracks"][0]["identity"]["status"] == "pending"
+    assert expired["tracks"][0]["identity"] == {
+        "status": "unknown",
+        "source": "none",
+    }
     overlay.purge()
     assert overlay.active_count == 0
+
+
+def test_visible_no_cache_projects_unknown_pending_requires_registration() -> None:
+    now = 1_000
+    overlay = IdentityOverlay(ttl_ms=500, clock_ms=lambda: now)
+
+    initial = overlay.project(
+        connection_id="ws_a",
+        camera="front",
+        visual_state=visual_state(),
+    )
+    overlay.register_pending(
+        connection_id="ws_a",
+        camera="front",
+        track_id=7,
+        source="event_recall",
+        source_frame_ref="front:1:1000",
+        reason="cache_miss",
+    )
+    pending = overlay.project(
+        connection_id="ws_a",
+        camera="front",
+        visual_state=visual_state(),
+    )
+    overlay.clear_pending(
+        connection_id="ws_a",
+        camera="front",
+        track_id=7,
+        source_frame_ref="front:1:1000",
+    )
+    cleared = overlay.project(
+        connection_id="ws_a",
+        camera="front",
+        visual_state=visual_state(),
+    )
+
+    assert initial["tracks"][0]["identity"] == {
+        "status": "unknown",
+        "source": "none",
+    }
+    assert pending["tracks"][0]["identity"] == {
+        "status": "pending",
+        "source": "event_recall",
+        "fresh_ms": 0,
+        "reason": "cache_miss",
+    }
+    assert "bbox_xyxy" not in str(pending)
+    assert "keypoints" not in str(pending)
+    assert "embedding" not in str(pending)
+    assert "crop" not in str(pending)
+    assert cleared["tracks"][0]["identity"] == {
+        "status": "unknown",
+        "source": "none",
+    }
+
+
+def test_pending_projection_is_stream_and_source_frame_scoped() -> None:
+    now = 1_000
+    overlay = IdentityOverlay(ttl_ms=500, clock_ms=lambda: now)
+    overlay.register_pending(
+        connection_id="ws_a",
+        camera="front",
+        track_id=7,
+        source="event_recall",
+        source_frame_ref="front:1:1000",
+    )
+
+    same_stream_same_frame = overlay.project(
+        connection_id="ws_a",
+        camera="front",
+        visual_state=visual_state(),
+    )
+    other_stream = overlay.project(
+        connection_id="ws_b",
+        camera="front",
+        visual_state=visual_state(),
+    )
+    reused_track_new_frame = overlay.project(
+        connection_id="ws_a",
+        camera="front",
+        visual_state={
+            **visual_state(),
+            "frame_id": 2,
+            "frame_timestamp_ms": 1_100,
+        },
+    )
+
+    assert same_stream_same_frame["tracks"][0]["identity"]["status"] == "pending"
+    assert other_stream["tracks"][0]["identity"] == {
+        "status": "unknown",
+        "source": "none",
+    }
+    assert reused_track_new_frame["tracks"][0]["identity"] == {
+        "status": "unknown",
+        "source": "none",
+    }
 
 
 def test_familiar_unknown_unknown_and_unavailable_public_shapes() -> None:

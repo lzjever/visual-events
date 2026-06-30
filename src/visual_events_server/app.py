@@ -487,16 +487,16 @@ async def _attach_memory_events(
         )
         return visual_state
 
+    _enrich_visual_state_event_identities(
+        memory_service,
+        connection_id=connection_id,
+        visual_state=visual_state,
+    )
     _attach_identity_context(
         memory_service,
         connection_id=connection_id,
         visual_state=visual_state,
         fallback_reason=None,
-    )
-    _enrich_visual_state_event_identities(
-        memory_service,
-        connection_id=connection_id,
-        visual_state=visual_state,
     )
     if not completed_events:
         return visual_state

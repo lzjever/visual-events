@@ -277,6 +277,56 @@ class EnrichingMemoryService(FakeMemoryService):
                 }
 
 
+class PendingOverlayMemoryService(FakeMemoryService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pending_tracks: set[tuple[str, str, int]] = set()
+
+    def enrich_visual_state_event_identities(
+        self,
+        *,
+        connection_id: str,
+        visual_state: dict[str, Any],
+    ) -> None:
+        camera = str(visual_state.get("camera") or "")
+        semantic_events = visual_state.get("semantic_events")
+        if not isinstance(semantic_events, list):
+            return
+        for event in semantic_events:
+            if not isinstance(event, dict):
+                continue
+            track_id = event.get("track_id")
+            if isinstance(track_id, int):
+                self.pending_tracks.add((connection_id, camera, track_id))
+
+    def identity_context_for_visual_state(
+        self,
+        *,
+        connection_id: str,
+        visual_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        camera = str(visual_state.get("camera") or "")
+        tracks = []
+        for track in visual_state.get("tracks", []):
+            if not isinstance(track, dict):
+                continue
+            track_id = track.get("track_id")
+            if not isinstance(track_id, int):
+                continue
+            identity = (
+                {
+                    "status": "pending",
+                    "source": "event_recall",
+                    "fresh_ms": 0,
+                    "reason": "cache_miss",
+                }
+                if (connection_id, camera, track_id) in self.pending_tracks
+                else {"status": "unknown", "source": "none"}
+            )
+            tracks.append({"track_id": track_id, "identity": identity})
+        return {"overlay_status": "ready", "tracks": tracks}
+
+
 def test_memory_http_endpoints_delegate_to_app_level_service():
     service = FakeMemoryService()
     client = TestClient(create_app(memory_service=service))
@@ -864,6 +914,33 @@ def test_stream_enriches_existing_person_events_before_appending_memory_events()
             "event_names": ["person_waving"],
         }
     ]
+
+
+def test_stream_projects_identity_context_after_event_enrichment_pending_registration():
+    service = PendingOverlayMemoryService()
+    client = TestClient(
+        create_app(processor=PersonEventVisualProcessor(), memory_service=service)
+    )
+
+    with client.websocket_connect("/v1/stream") as websocket:
+        websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
+        message = json.loads(websocket.receive_text())
+
+    assert message["semantic_events"][0]["event"] == "person_waving"
+    assert message["identity_context"] == {
+        "overlay_status": "ready",
+        "tracks": [
+            {
+                "track_id": 7,
+                "identity": {
+                    "status": "pending",
+                    "source": "event_recall",
+                    "fresh_ms": 0,
+                    "reason": "cache_miss",
+                },
+            }
+        ],
+    }
 
 
 def test_stream_passes_memory_snapshot_side_channel_to_memory_service():

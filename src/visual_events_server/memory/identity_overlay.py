@@ -19,6 +19,14 @@ class _OverlayRecord:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class _PendingRecord:
+    source: str
+    observed_at_ms: int
+    reason: str | None = None
+    source_frame_ref: str | None = None
+
+
 class IdentityOverlay:
     def __init__(
         self,
@@ -31,12 +39,13 @@ class IdentityOverlay:
         self.ttl_ms = int(ttl_ms)
         self._clock_ms = clock_ms
         self._records: dict[tuple[str, str, int], _OverlayRecord] = {}
+        self._pending: dict[tuple[str, str, int], _PendingRecord] = {}
         self._lock = threading.RLock()
 
     @property
     def active_count(self) -> int:
         with self._lock:
-            return len(self._records)
+            return len(self._records) + len(self._pending)
 
     def put_known_person(
         self,
@@ -50,8 +59,10 @@ class IdentityOverlay:
     ) -> None:
         if track_id is None:
             return
+        key = (connection_id, camera, int(track_id))
         with self._lock:
-            self._records[(connection_id, camera, int(track_id))] = _OverlayRecord(
+            self._pending.pop(key, None)
+            self._records[key] = _OverlayRecord(
                 status="known_person",
                 source=source,
                 observed_at_ms=self._clock_ms(),
@@ -71,8 +82,10 @@ class IdentityOverlay:
     ) -> None:
         if track_id is None:
             return
+        key = (connection_id, camera, int(track_id))
         with self._lock:
-            self._records[(connection_id, camera, int(track_id))] = _OverlayRecord(
+            self._pending.pop(key, None)
+            self._records[key] = _OverlayRecord(
                 status="familiar_unknown",
                 source=source,
                 observed_at_ms=self._clock_ms(),
@@ -91,8 +104,10 @@ class IdentityOverlay:
     ) -> None:
         if track_id is None:
             return
+        key = (connection_id, camera, int(track_id))
         with self._lock:
-            self._records[(connection_id, camera, int(track_id))] = _OverlayRecord(
+            self._pending.pop(key, None)
+            self._records[key] = _OverlayRecord(
                 status="unknown",
                 source=source,
                 observed_at_ms=self._clock_ms(),
@@ -110,13 +125,59 @@ class IdentityOverlay:
     ) -> None:
         if track_id is None:
             return
+        key = (connection_id, camera, int(track_id))
         with self._lock:
-            self._records[(connection_id, camera, int(track_id))] = _OverlayRecord(
+            self._pending.pop(key, None)
+            self._records[key] = _OverlayRecord(
                 status="unavailable",
                 source=source,
                 observed_at_ms=self._clock_ms(),
                 reason=reason,
             )
+
+    def register_pending(
+        self,
+        *,
+        connection_id: str,
+        camera: str,
+        track_id: int | None,
+        source: str,
+        reason: str | None = None,
+        source_frame_ref: str | None = None,
+    ) -> None:
+        if track_id is None:
+            return
+        key = (connection_id, camera, int(track_id))
+        with self._lock:
+            self._records.pop(key, None)
+            self._pending[key] = _PendingRecord(
+                source=source,
+                observed_at_ms=self._clock_ms(),
+                reason=reason,
+                source_frame_ref=source_frame_ref,
+            )
+
+    def clear_pending(
+        self,
+        *,
+        connection_id: str,
+        camera: str,
+        track_id: int | None,
+        source_frame_ref: str | None = None,
+    ) -> None:
+        if track_id is None:
+            return
+        key = (connection_id, camera, int(track_id))
+        with self._lock:
+            pending = self._pending.get(key)
+            if pending is None:
+                return
+            if (
+                source_frame_ref is not None
+                and pending.source_frame_ref != source_frame_ref
+            ):
+                return
+            self._pending.pop(key, None)
 
     def project(
         self,
@@ -131,16 +192,23 @@ class IdentityOverlay:
             visible_track_ids = _visible_person_track_ids(visual_state)
             self._purge_missing_tracks(connection_id, camera, visible_track_ids)
             projected_tracks: list[dict[str, Any]] = []
+            source_frame_ref = _visual_state_source_frame_ref(visual_state, camera)
             for track_id in visible_track_ids:
-                record = self._records.get((connection_id, camera, track_id))
+                key = (connection_id, camera, track_id)
+                record = self._records.get(key)
+                pending = self._pending.get(key)
+                identity = _unknown_identity()
+                if record is not None:
+                    identity = _record_to_public(record, now_ms=now_ms)
+                elif pending is not None and _pending_applies_to_source_frame(
+                    pending,
+                    source_frame_ref,
+                ):
+                    identity = _pending_to_public(pending, now_ms=now_ms)
                 projected_tracks.append(
                     {
                         "track_id": track_id,
-                        "identity": (
-                            _record_to_public(record, now_ms=now_ms)
-                            if record is not None
-                            else _pending_identity()
-                        ),
+                        "identity": identity,
                     }
                 )
         context: dict[str, Any] = {
@@ -191,6 +259,13 @@ class IdentityOverlay:
             ]
             for key in expired:
                 self._records.pop(key, None)
+            expired_pending = [
+                key
+                for key, record in self._pending.items()
+                if now_ms - record.observed_at_ms > self.ttl_ms
+            ]
+            for key in expired_pending:
+                self._pending.pop(key, None)
 
     def _purge_missing_tracks(
         self,
@@ -209,6 +284,15 @@ class IdentityOverlay:
             ]
             for key in stale:
                 self._records.pop(key, None)
+            stale_pending = [
+                key
+                for key in self._pending
+                if key[0] == connection_id
+                and key[1] == camera
+                and key[2] not in visible
+            ]
+            for key in stale_pending:
+                self._pending.pop(key, None)
 
 
 def unavailable_identity_context(reason: str) -> dict[str, Any]:
@@ -272,6 +356,20 @@ def _record_to_public(
     return identity
 
 
+def _pending_to_public(
+    record: _PendingRecord,
+    *,
+    now_ms: int,
+) -> dict[str, Any]:
+    identity = _identity_base(
+        status="pending",
+        source=record.source,
+        reason=record.reason,
+    )
+    identity["fresh_ms"] = max(0, int(now_ms - record.observed_at_ms))
+    return identity
+
+
 def _identity_base(
     *,
     status: str,
@@ -296,11 +394,34 @@ def _identity_base(
     return identity
 
 
-def _pending_identity() -> dict[str, Any]:
+def _unknown_identity() -> dict[str, Any]:
     return {
-        "status": "pending",
+        "status": "unknown",
         "source": "none",
     }
+
+
+def _pending_applies_to_source_frame(
+    pending: _PendingRecord,
+    source_frame_ref: str | None,
+) -> bool:
+    if pending.source_frame_ref is None:
+        return True
+    return source_frame_ref == pending.source_frame_ref
+
+
+def _visual_state_source_frame_ref(
+    visual_state: dict[str, Any],
+    camera: str,
+) -> str | None:
+    frame_id = visual_state.get("frame_id")
+    timestamp_ms = visual_state.get(
+        "frame_timestamp_ms",
+        visual_state.get("timestamp_ms"),
+    )
+    if frame_id is None or timestamp_ms is None:
+        return None
+    return f"{camera}:{frame_id}:{timestamp_ms}"
 
 
 def _public_person(profile: dict[str, Any]) -> dict[str, Any]:

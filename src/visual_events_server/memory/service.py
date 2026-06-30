@@ -81,7 +81,7 @@ _RECOGNITION_ELIGIBILITY_POLICY = (
     "class_name == 'person' and lost_ms == 0 and hits > 0"
 )
 _StreamKey = tuple[str, str]
-_EventRecallKey = tuple[str, str, int]
+_EventRecallKey = tuple[str, str, int, str]
 
 
 class MemoryServiceError(RuntimeError):
@@ -421,7 +421,12 @@ class AppMemoryService:
         if pending_query is not None and not pending_query.done():
             return
 
-        recall_key = (connection_id, camera, track_id)
+        try:
+            cached = self._cache.get_fresh_for_stream(connection_id, camera)
+        except FrameCacheError:
+            return
+        source_frame_ref = _source_frame_ref(cached)
+        recall_key = (connection_id, camera, track_id, source_frame_ref)
         pending_recall = self._pending_event_identity_recalls.get(recall_key)
         if pending_recall is not None:
             if pending_recall.done():
@@ -434,12 +439,20 @@ class AppMemoryService:
         except RuntimeError:
             return
 
+        self._identity_overlay.register_pending(
+            connection_id=connection_id,
+            camera=camera,
+            track_id=track_id,
+            source="event_recall",
+            reason="cache_miss",
+            source_frame_ref=source_frame_ref,
+        )
         future = loop.run_in_executor(
             None,
             self._run_event_identity_recall,
-            connection_id,
-            camera,
+            cached,
             track_id,
+            source_frame_ref,
         )
         self._pending_event_identity_recalls[recall_key] = future
         future.add_done_callback(
@@ -458,21 +471,28 @@ class AppMemoryService:
             future.result()
         except Exception:
             _LOGGER.exception(
-                "event identity recall failed for camera %s track %s",
+                "event identity recall failed for camera %s track %s frame %s",
                 recall_key[1],
                 recall_key[2],
+                recall_key[3],
+            )
+        finally:
+            self._identity_overlay.clear_pending(
+                connection_id=recall_key[0],
+                camera=recall_key[1],
+                track_id=recall_key[2],
+                source_frame_ref=recall_key[3],
             )
         if self._pending_event_identity_recalls.get(recall_key) is future:
             self._pending_event_identity_recalls.pop(recall_key, None)
 
     def _run_event_identity_recall(
         self,
-        connection_id: str,
-        camera: str,
+        cached: CachedFrame,
         track_id: int,
+        source_frame_ref: str,
     ) -> None:
         try:
-            cached = self._cache.get_fresh_for_stream(connection_id, camera)
             target = self._resolve_event_recall_target(cached, track_id)
             if target is None:
                 return
@@ -482,7 +502,12 @@ class AppMemoryService:
                 source="event_recall",
                 include_anonymous=True,
             )
-            latest = self._cache.get_fresh_for_stream(connection_id, camera)
+            latest = self._cache.get_fresh_for_stream(
+                cached.connection_id,
+                cached.frame.camera,
+            )
+            if _source_frame_ref(latest) != source_frame_ref:
+                return
             if not _cached_visible_person_track(latest, track_id):
                 return
             self._put_identity_overlay_result(
