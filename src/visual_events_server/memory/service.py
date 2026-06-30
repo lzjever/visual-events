@@ -775,6 +775,11 @@ class AppMemoryService:
                                 external_user_ref=external_ref.external_user_ref,
                                 now_ms=now_ms,
                             )
+                        self._refresh_teach_person_identity_overlay(
+                            cached,
+                            target,
+                            existing_person.matched_id,
+                        )
                         return {
                             "ok": True,
                             "person_id": existing_person.matched_id,
@@ -863,16 +868,11 @@ class AppMemoryService:
                 except Exception:
                     self._delete_embedding_artifact(crop_path_or_artifact_ref)
                     raise
-                person_profile = self.store.get_person_profile(person_id)
-                if person_profile is not None:
-                    self._identity_overlay.put_known_person(
-                        connection_id=cached.connection_id,
-                        camera=cached.frame.camera,
-                        track_id=target.track_id,
-                        person_profile=person_profile,
-                        match=anonymous_match,
-                        source="teach",
-                    )
+                self._refresh_teach_person_identity_overlay(
+                    cached,
+                    target,
+                    person_id,
+                )
                 return {
                     "ok": True,
                     "person_id": person_id,
@@ -952,7 +952,11 @@ class AppMemoryService:
             except Exception:
                 self._delete_embedding_artifact(crop_path_or_artifact_ref)
                 raise
-            person_profile = self.store.get_person_profile(created["person_id"])
+            person_profile = self._refresh_teach_person_identity_overlay(
+                cached,
+                target,
+                created["person_id"],
+            )
             if person_profile is None:
                 person_profile = {
                     "person_id": created["person_id"],
@@ -2416,6 +2420,24 @@ class AppMemoryService:
             reason=result.reason or "no_public_identity_match",
             source=source,
         )
+
+    def _refresh_teach_person_identity_overlay(
+        self,
+        cached: CachedFrame,
+        target: ResolvedTarget,
+        person_id: str,
+    ) -> dict[str, Any] | None:
+        person_profile = self.store.get_person_profile(person_id)
+        if person_profile is None:
+            return None
+        self._identity_overlay.put_known_person_profile(
+            connection_id=cached.connection_id,
+            camera=cached.frame.camera,
+            track_id=target.track_id,
+            person_profile=person_profile,
+            source="teach",
+        )
+        return person_profile
 
     def _query_anonymous_person(
         self,

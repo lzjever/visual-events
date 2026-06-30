@@ -491,6 +491,28 @@ def _assert_crop_artifact(
     assert hashlib.sha256(path.read_bytes()).hexdigest() == crop_hash
 
 
+def _assert_teach_overlay_identity(
+    subject: AppMemoryService,
+    *,
+    person_profile: dict[str, Any],
+    connection_id: str = "ws_1",
+) -> None:
+    projected = subject.identity_context_for_visual_state(
+        connection_id=connection_id,
+        visual_state=visual_state(),
+    )
+    assert projected["active_target"] == {"track_id": 7}
+    identity = projected["tracks"][0]["identity"]
+    assert identity["status"] == "known_person"
+    assert identity["source"] == "teach"
+    assert "confidence" not in identity
+    assert identity["person"] == person_profile
+    assert "bbox_xyxy" not in str(projected)
+    assert "keypoints" not in str(projected)
+    assert "crop" not in str(projected)
+    assert "embedding" not in str(projected)
+
+
 def _decoded_jpeg(image_bytes: bytes) -> Image.Image:
     with Image.open(BytesIO(image_bytes)) as image:
         assert image.format == "JPEG"
@@ -890,6 +912,7 @@ async def test_teach_person_created_response_includes_contract_profile_and_store
     assert created["store_delta"]["delta"]["embedding_provenance"] == 1
     assert created["store_delta"]["delta"]["external_user_links"] == 0
     assert _store_counts(subject.store) == created["store_delta"]["after"]
+    _assert_teach_overlay_identity(subject, person_profile=created["profile"])
 
 
 @pytest.mark.asyncio
@@ -1097,17 +1120,19 @@ async def test_teach_person_duplicate_same_display_name_updates_metadata_without
     assert updated["store_delta"]["delta"]["person_profiles"] == 0
     assert updated["store_delta"]["delta"]["person_embeddings"] == 0
     assert updated["store_delta"]["delta"]["embedding_provenance"] == 0
-    assert subject.store.get_person_profile(created["person_id"]) == {
+    updated_profile = {
         "person_id": created["person_id"],
         "display_name": "张三",
         "description": "新备注",
         "tags": ["vip", "staff"],
     }
+    assert subject.store.get_person_profile(created["person_id"]) == updated_profile
     assert _store_counts(subject.store) == before_counts
     assert (
         sorted(path.name for path in artifact_dir.rglob("*") if path.is_file())
         == before_artifacts
     )
+    _assert_teach_overlay_identity(subject, person_profile=updated_profile)
 
 
 @pytest.mark.asyncio
@@ -1494,15 +1519,7 @@ async def test_teach_person_duplicate_active_anonymous_auto_merges(
     assert copied_provenance["crop_hash"] == "anonymous-crop-hash"
     assert copied_provenance["resolution_reason"] == "recognition_track"
 
-    projected = subject.identity_context_for_visual_state(
-        connection_id="ws_1",
-        visual_state=visual_state(),
-    )
-    identity = projected["tracks"][0]["identity"]
-    assert identity["status"] == "known_person"
-    assert identity["source"] == "teach"
-    assert identity["person"]["person_id"] == merged["person_id"]
-    assert identity["person"]["display_name"] == "张三"
+    _assert_teach_overlay_identity(subject, person_profile=profile)
     assert [path for path in artifact_dir.rglob("*") if path.is_file()]
 
 

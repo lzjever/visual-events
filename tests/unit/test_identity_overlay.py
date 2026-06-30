@@ -122,6 +122,50 @@ def test_known_projection_is_stream_scoped_redacted_and_expires() -> None:
     assert overlay.active_count == 0
 
 
+def test_identity_overlay_known_profile_projection_can_omit_confidence() -> None:
+    overlay = IdentityOverlay(ttl_ms=500, clock_ms=lambda: 1_000)
+    overlay.put_known_person_profile(
+        connection_id="ws_a",
+        camera="front",
+        track_id=7,
+        person_profile={
+            "person_id": "person_1",
+            "display_name": "张三",
+            "description": "店长",
+            "tags": ["staff"],
+            "bbox_xyxy": [1, 2, 3, 4],
+            "keypoints": [{"name": "nose"}],
+            "embedding": [1.0, 0.0],
+            "crop_ref": "runtime/private/crop.jpg",
+        },
+        source="teach",
+    )
+
+    projected = overlay.project(
+        connection_id="ws_a",
+        camera="front",
+        visual_state=visual_state(),
+    )
+
+    identity = projected["tracks"][0]["identity"]
+    assert identity == {
+        "status": "known_person",
+        "source": "teach",
+        "fresh_ms": 0,
+        "person": {
+            "person_id": "person_1",
+            "display_name": "张三",
+            "description": "店长",
+            "tags": ["staff"],
+        },
+    }
+    assert "confidence" not in identity
+    assert "bbox_xyxy" not in str(projected)
+    assert "keypoints" not in str(projected)
+    assert "embedding" not in str(projected)
+    assert "crop" not in str(projected)
+
+
 def test_visible_no_cache_projects_unknown_pending_requires_registration() -> None:
     now = 1_000
     overlay = IdentityOverlay(ttl_ms=500, clock_ms=lambda: now)

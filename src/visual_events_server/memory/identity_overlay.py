@@ -59,6 +59,27 @@ class IdentityOverlay:
     ) -> None:
         if track_id is None:
             return
+        self.put_known_person_profile(
+            connection_id=connection_id,
+            camera=camera,
+            track_id=track_id,
+            person_profile=person_profile,
+            source=source,
+            confidence=match.match_score,
+        )
+
+    def put_known_person_profile(
+        self,
+        *,
+        connection_id: str,
+        camera: str,
+        track_id: int | None,
+        person_profile: dict[str, Any],
+        source: str,
+        confidence: float | None = None,
+    ) -> None:
+        if track_id is None:
+            return
         key = (connection_id, camera, int(track_id))
         with self._lock:
             self._pending.pop(key, None)
@@ -66,7 +87,9 @@ class IdentityOverlay:
                 status="known_person",
                 source=source,
                 observed_at_ms=self._clock_ms(),
-                confidence=_rounded(match.match_score),
+                confidence=(
+                    _rounded(confidence) if confidence is not None else None
+                ),
                 person=_public_person(person_profile),
             )
 
