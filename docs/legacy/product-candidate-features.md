@@ -1,5 +1,7 @@
 # Visual Events 产品候选特性
 
+Legacy note: historical reference only. Current active entry points are `docs/ga-development-plan.md` and `docs/identity-overlay-product-development-plan.md`.
+
 日期：2026-06-27
 
 ## 1. 背景

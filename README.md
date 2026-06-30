@@ -30,10 +30,11 @@ DDS JPEG @10Hz
 
 - [产品设计](docs/product-design.md)
 - [开发与测试计划](docs/development-test-plan.md)
-- [Server 开发计划](docs/server-development-plan.md)
-- [Server handoff](docs/server-handoff.md)
 - [GA 后续开发计划](docs/ga-development-plan.md)
 - [Identity Overlay active plan](docs/identity-overlay-product-development-plan.md)
+- [Visual Evidence Tool Development Plan](docs/visual-evidence-tool-development-plan.md)
+- [Memory Teaching Evidence Tool Development Plan](docs/memory-teaching-evidence-tool-development-plan.md)
+- 历史参考见 [docs/legacy/](docs/legacy/)
 - [协议草案](common/schema/protocol.md)
 - DDS contracts: [camera JPEG](common/schema/dds/camera_jpeg_contract.md), [gaze target v1](common/schema/dds/gaze_target_v1.md), [head state v1](common/schema/dds/head_state_v1.md)
 

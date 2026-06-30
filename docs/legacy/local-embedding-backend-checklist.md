@@ -1,5 +1,7 @@
 # Local Embedding Backend 实现 Checklist
 
+Legacy note: historical reference only. Current active entry points are `docs/ga-development-plan.md` and `docs/identity-overlay-product-development-plan.md`.
+
 日期：2026-06-29
 
 ## 目标

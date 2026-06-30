@@ -1,12 +1,14 @@
 # Visual Events Server 开发计划
 
+Legacy note: historical reference only. Current active entry points are `docs/ga-development-plan.md` and `docs/identity-overlay-product-development-plan.md`.
+
 日期：2026-06-27
 
 ## 1. 目标
 
 本计划只覆盖 `visual-events-server` 的开发。当前阶段不开发正式机器人端 CLI。
 
-Server 的目标是接收符合 [protocol.md](../common/schema/protocol.md) 的 JPEG 帧，完成 person pose 推理、追踪、事件规则和注视目标计算，并返回 10Hz `visual_state`。首个产品场景是商店门口揽客，V1 必须支持：
+Server 的目标是接收符合 [protocol.md](../../common/schema/protocol.md) 的 JPEG 帧，完成 person pose 推理、追踪、事件规则和注视目标计算，并返回 10Hz `visual_state`。首个产品场景是商店门口揽客，V1 必须支持：
 
 - `person_appeared`
 - `person_left`
@@ -195,7 +197,7 @@ KISS 约束：
 
 ## 5. 协议实现
 
-Server 必须实现 [protocol.md](../common/schema/protocol.md)：
+Server 必须实现 [protocol.md](../../common/schema/protocol.md)：
 
 - binary request：`uint32_be header_len + header_json_utf8 + jpeg_bytes`
 - JSON response：`visual_state` 或 `error`
@@ -558,7 +560,7 @@ UV_CACHE_DIR=.uv-cache UV_PROJECT_ENVIRONMENT=.venv \
 - `val-data/`、`runtime/`、`artifacts/`、metrics JSONL、模型和 cache 保持 ignored/untracked；不得提交资源证据。
 - KISS/DRY/YAGNI：只有一种 server metrics 输出格式、一种 writer、一条 E2E 消费路径。
 
-Latest S8 runtime evidence is recorded in [`docs/server-handoff.md`](server-handoff.md): runtime smoke passed; full `val-data` E2E 19-case matrix passed with S6.3 timeline gate still passing; 300s soak passed; `artifacts/perf/server_metrics.jsonl` contains 5019 frame metrics lines and `server_perf.json` records phase latency, RSS, and PyTorch CUDA allocated/reserved VRAM evidence under the 4 GiB threshold.
+Latest S8 runtime evidence is recorded in [`docs/legacy/server-handoff.md`](server-handoff.md): runtime smoke passed; full `val-data` E2E 19-case matrix passed with S6.3 timeline gate still passing; 300s soak passed; `artifacts/perf/server_metrics.jsonl` contains 5019 frame metrics lines and `server_perf.json` records phase latency, RSS, and PyTorch CUDA allocated/reserved VRAM evidence under the 4 GiB threshold.
 
 ## 9. 测试计划
 
@@ -810,7 +812,7 @@ Soak 摘要字段：
 
 ## 13. Handoff 要求
 
-Server handoff 的 canonical 交付文档是 [`docs/server-handoff.md`](server-handoff.md)。该文档必须维护当前模型 manifest、授权状态、runtime/cache/model policy、E2E/perf evidence、已知限制和阈值说明。
+Server handoff 的 canonical 交付文档是 [`docs/legacy/server-handoff.md`](server-handoff.md)。该文档必须维护当前模型 manifest、授权状态、runtime/cache/model policy、E2E/perf evidence、已知限制和阈值说明。
 
 Server handoff 必须包含：
 
@@ -823,8 +825,8 @@ Server handoff 必须包含：
 - S6.3 semantic event first-trigger/timeline gate evidence：expected first trigger frame tolerance <= 3 frames、forbidden scene events 和 `pic_walk_in_stop` ordering。
 - 如 handoff 声称 S6.1/S7 5 分钟 soak 已通过，必须包含 runner 命令、`artifacts/e2e/soak/loop_0001/...` 证据路径、`report.json` 和 `server_perf.json` 中的 `soak` 摘要。
 - 如 handoff 声称 release/runtime 已验证，full matrix 和 soak 必须跑在 `runtime/venv/bin/visual-events-server` 上，不能只使用 source `.venv` server。
-- `docs/server-handoff.md` 中的模型权重和授权说明。
-- `docs/server-handoff.md` 中的已知失败场景和阈值说明。
+- `docs/legacy/server-handoff.md` 中的模型权重和授权说明。
+- `docs/legacy/server-handoff.md` 中的已知失败场景和阈值说明。
 
 不满足以下任一项，不可 handoff：
 
@@ -834,7 +836,7 @@ Server handoff 必须包含：
 - 声称 release/runtime 已验证，但没有 `artifacts/runtime-smoke/report.json` 或没有 runtime server E2E/soak 证据。
 - 运动敏感事件在 `head_motion=unknown` 或 `moving` 时仍触发。
 - S6.3 event correctness 没有 first-trigger/timeline evidence。
-- server 输出不符合 [protocol.md](../common/schema/protocol.md)。
+- server 输出不符合 [protocol.md](../../common/schema/protocol.md)。
 - server 内部事件规则依赖正式 robot CLI。
 - 未输出 `summary.json` 和 `server_perf.json`。
 - 声称 5 分钟 soak 通过，但没有 `soak.enabled == true`、`soak.passed == true` 和 `artifacts/e2e/soak/...` 证据。
@@ -872,6 +874,6 @@ Server handoff 必须包含：
 
 ## 16. 参考
 
-- [产品设计](product-design.md)
-- [开发与测试计划](development-test-plan.md)
-- [协议草案](../common/schema/protocol.md)
+- [产品设计](../product-design.md)
+- [开发与测试计划](../development-test-plan.md)
+- [协议草案](../../common/schema/protocol.md)
