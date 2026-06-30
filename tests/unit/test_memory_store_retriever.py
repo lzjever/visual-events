@@ -68,6 +68,177 @@ def test_person_profile_embedding_and_sqlite_vec_retrieval_round_trip(tmp_path) 
     }
 
 
+def test_query_person_margin_ignores_second_embedding_from_same_person(tmp_path) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    store.upsert_person_profile(
+        person_id="person_1",
+        display_name="张三",
+        description="店长",
+        tags=(),
+        now_ms=1000,
+    )
+    first_embedding_id = store.add_person_embedding(
+        person_id="person_1",
+        result=embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        source_target_type="fresh_teach",
+        now_ms=1000,
+    )
+    second_embedding_id = store.add_person_embedding(
+        person_id="person_1",
+        result=embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        source_target_type="copied_anonymous",
+        now_ms=1001,
+    )
+
+    match = MemoryRetriever(store).query_person(
+        embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        threshold=0.95,
+        margin=0.05,
+    )
+
+    assert match is not None
+    assert match.matched_id == "person_1"
+    assert match.embedding_id in {first_embedding_id, second_embedding_id}
+    assert match.top2_margin >= 0.99
+
+
+def test_query_person_same_identity_truncated_window_does_not_amplify_margin(
+    tmp_path,
+) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    store.upsert_person_profile(
+        person_id="person_1",
+        display_name="张三",
+        description="",
+        tags=(),
+        now_ms=1000,
+    )
+    store.upsert_person_profile(
+        person_id="person_2",
+        display_name="李四",
+        description="",
+        tags=(),
+        now_ms=1000,
+    )
+    for index in range(64):
+        store.add_person_embedding(
+            person_id="person_1",
+            result=embedding(
+                [1.0, 0.0, 0.0, 0.0],
+                embedding_type="face",
+                model="fake-face",
+            ),
+            source_target_type="same_identity_window",
+            now_ms=1000 + index,
+        )
+    store.add_person_embedding(
+        person_id="person_2",
+        result=embedding([0.0, 1.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        source_target_type="hidden_distinct_identity",
+        now_ms=2000,
+    )
+
+    match = MemoryRetriever(store).query_person(
+        embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        threshold=0.95,
+        margin=0.05,
+        top_k=2,
+    )
+
+    assert match is None
+
+
+def test_query_anonymous_margin_uses_third_candidate_when_top_two_same_identity(
+    tmp_path,
+) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    for anonymous_id in ("anon_1", "anon_2"):
+        store.create_anonymous_profile(
+            anonymous_id=anonymous_id,
+            seen_count=1,
+            first_seen_at_ms=1000,
+            last_seen_at_ms=1000,
+            familiar_score=0.5,
+        )
+    for now_ms in (1000, 1001):
+        store.add_anonymous_embedding(
+            anonymous_id="anon_1",
+            result=embedding(
+                [1.0, 0.0, 0.0, 0.0],
+                embedding_type="face",
+                model="fake-face",
+            ),
+            source_target_type="recognition_track",
+            now_ms=now_ms,
+        )
+    store.add_anonymous_embedding(
+        anonymous_id="anon_2",
+        result=embedding(
+            [0.995, 0.1, 0.0, 0.0],
+            embedding_type="face",
+            model="fake-face",
+        ),
+        source_target_type="recognition_track",
+        now_ms=1002,
+    )
+
+    match = MemoryRetriever(store).query_anonymous_person(
+        embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        threshold=0.95,
+        margin=0.05,
+    )
+
+    assert match is None
+
+
+def test_query_anonymous_active_nearest_survives_inactive_crowding(tmp_path) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    store.create_anonymous_profile(
+        anonymous_id="anon_active",
+        seen_count=1,
+        first_seen_at_ms=1000,
+        last_seen_at_ms=1000,
+        familiar_score=0.5,
+    )
+    active_embedding_id = store.add_anonymous_embedding(
+        anonymous_id="anon_active",
+        result=embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        source_target_type="recognition_track",
+        now_ms=1000,
+    )
+    for index in range(8):
+        anonymous_id = f"anon_merged_{index}"
+        store.create_anonymous_profile(
+            anonymous_id=anonymous_id,
+            seen_count=3,
+            first_seen_at_ms=900,
+            last_seen_at_ms=950,
+            familiar_score=0.9,
+            status="merged",
+            merged_person_id=f"person_{index}",
+        )
+        store.add_anonymous_embedding(
+            anonymous_id=anonymous_id,
+            result=embedding(
+                [0.999, 0.045 + (index * 0.001), 0.0, 0.0],
+                embedding_type="face",
+                model="fake-face",
+            ),
+            source_target_type="recognition_track",
+            now_ms=1001 + index,
+        )
+
+    match = MemoryRetriever(store).query_anonymous_person(
+        embedding([1.0, 0.0, 0.0, 0.0], embedding_type="face", model="fake-face"),
+        threshold=0.95,
+        margin=0.05,
+    )
+
+    assert match is not None
+    assert match.matched_id == "anon_active"
+    assert match.embedding_id == active_embedding_id
+
+
 def test_create_person_with_embedding_commits_profile_embedding_vector_and_provenance(
     tmp_path,
 ) -> None:

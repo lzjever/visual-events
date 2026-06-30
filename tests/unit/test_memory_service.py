@@ -1178,7 +1178,7 @@ async def test_teach_person_duplicate_different_display_name_conflicts_without_w
 
 
 @pytest.mark.asyncio
-async def test_teach_person_duplicate_active_anonymous_requires_merge_without_write(
+async def test_teach_person_duplicate_active_anonymous_auto_merges(
     tmp_path,
 ):
     vector = _unit_vector(0)
@@ -1186,10 +1186,197 @@ async def test_teach_person_duplicate_active_anonymous_requires_merge_without_wr
     subject = service(tmp_path, embedding_backend=backend)
     subject.store.create_anonymous_profile(
         anonymous_id="anon_1",
-        seen_count=2,
+        seen_count=1,
         first_seen_at_ms=9_000,
         last_seen_at_ms=9_500,
-        familiar_score=0.75,
+        familiar_score=0.25,
+    )
+    anonymous_embedding_id = subject.store.add_anonymous_embedding(
+        anonymous_id="anon_1",
+        result=EmbeddingResult(
+            vector=vector,
+            embedding_type="face",
+            embedding_model="local-face",
+            embedding_version="face-v1",
+            quality=1.0,
+        ),
+        source_target_type="recognition_track",
+        source_track_ref="front:track:7",
+        source_frame_ref="front:0:900",
+        crop_hash="anonymous-crop-hash",
+        crop_path_or_artifact_ref=None,
+        resolver_target_ref="front:track:7",
+        resolution_reason="recognition_track",
+        now_ms=9_500,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    artifact_dir = tmp_path / "runtime" / "memory" / "artifacts"
+    before_counts = _store_counts(subject.store)
+
+    merged = await subject.teach_person(
+        {
+            "camera": "front",
+            "stream_ref": "ws_1",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三"},
+        }
+    )
+
+    assert merged["ok"] is True
+    assert merged["outcome"] == "merged_anonymous_person"
+    assert merged["merged_anonymous_id"] == "anon_1"
+    assert merged["person_id"].startswith("person_")
+    assert merged["embedding_id"].startswith("emb_person_")
+    assert merged["copied_embedding_count"] == 1
+    assert merged["merge_id"].startswith("merge_")
+    assert merged["target_quality"] == "usable"
+    assert "anonymous_merge_required" not in repr(merged)
+    assert merged["evidence"]["matched_type"] == "anonymous_person"
+    assert merged["evidence"]["matched_id"] == "anon_1"
+    visual_evidence = merged["evidence"]["person_visual_evidence"]
+    assert visual_evidence["source_frame_ref"] == "front:1:1000"
+    assert visual_evidence["source_bbox_xyxy"] == [300.0, 100.0, 700.0, 650.0]
+    assert visual_evidence["source_bbox_coordinate_space"] == "source_frame"
+    assert visual_evidence["crop_box_xyxy"] == [260.0, 45.0, 740.0, 705.0]
+    assert visual_evidence["crop_box_coordinate_space"] == "source_frame"
+    assert visual_evidence["embedding_crop_hash"] == hashlib.sha256(
+        backend.person_inputs[0]
+    ).hexdigest()
+    assert visual_evidence["embedding_crop_path"]
+    assert (Path.cwd() / visual_evidence["embedding_crop_path"]).exists()
+    assert visual_evidence["face_detection"] == {
+        "coordinate_space": "crop",
+        "face_bbox_xyxy": [20.0, 30.0, 120.0, 150.0],
+        "landmarks_5": [
+            [45.0, 70.0],
+            [92.0, 70.0],
+            [68.0, 96.0],
+            [50.0, 128.0],
+            [88.0, 128.0],
+        ],
+        "score": 0.91,
+        "source": "local_embedding_scrfd",
+    }
+    assert merged["store_delta"]["delta"]["person_profiles"] == 1
+    assert merged["store_delta"]["delta"]["person_embeddings"] == 2
+    assert merged["store_delta"]["delta"]["person_embedding_vectors"] == 2
+    assert merged["store_delta"]["delta"]["embedding_provenance"] == 2
+    assert merged["store_delta"]["delta"]["profile_merge_history"] == 1
+    assert merged["store_delta"]["delta"]["anonymous_profiles"] == 0
+    assert merged["store_delta"]["delta"]["anonymous_embeddings"] == 0
+    assert _store_counts(subject.store) == merged["store_delta"]["after"]
+
+    profile = subject.store.get_person_profile(merged["person_id"])
+    assert profile == {
+        "person_id": merged["person_id"],
+        "display_name": "张三",
+        "description": "",
+        "tags": [],
+    }
+    anonymous = subject.store.connection.execute(
+        """
+        SELECT status, merged_person_id
+        FROM anonymous_profiles
+        WHERE anonymous_id = ?
+        """,
+        ("anon_1",),
+    ).fetchone()
+    assert dict(anonymous) == {
+        "status": "merged",
+        "merged_person_id": merged["person_id"],
+    }
+    assert subject.store.get_active_anonymous_profile("anon_1") is None
+    assert subject.store.get_profile_merge_history(merged["merge_id"]) == {
+        "merge_id": merged["merge_id"],
+        "anonymous_id": "anon_1",
+        "person_id": merged["person_id"],
+        "merge_reason": "teach_person",
+        "created_at_ms": 10_000,
+    }
+
+    person_embedding_ids = [
+        row["embedding_id"]
+        for row in subject.store.connection.execute(
+            """
+            SELECT embedding_id
+            FROM person_embeddings
+            WHERE person_id = ?
+            ORDER BY created_at_ms, embedding_id
+            """,
+            (merged["person_id"],),
+        ).fetchall()
+    ]
+    assert len(person_embedding_ids) == 2
+    assert merged["embedding_id"] in person_embedding_ids
+    copied_embedding_id = next(
+        embedding_id
+        for embedding_id in person_embedding_ids
+        if embedding_id != merged["embedding_id"]
+    )
+    assert subject.store.get_embedding_provenance(anonymous_embedding_id)[
+        "owner_type"
+    ] == "anonymous"
+    fresh_provenance = subject.store.get_embedding_provenance(merged["embedding_id"])
+    assert fresh_provenance["owner_type"] == "person"
+    assert fresh_provenance["owner_id"] == merged["person_id"]
+    assert fresh_provenance["source_track_ref"] == "front:track:7"
+    assert fresh_provenance["source_frame_ref"] == "front:1:1000"
+    assert fresh_provenance["crop_hash"] == hashlib.sha256(
+        backend.person_inputs[0]
+    ).hexdigest()
+    assert fresh_provenance["crop_path_or_artifact_ref"]
+    assert (Path.cwd() / fresh_provenance["crop_path_or_artifact_ref"]).exists()
+    copied_provenance = subject.store.get_embedding_provenance(copied_embedding_id)
+    assert copied_provenance["owner_type"] == "person"
+    assert copied_provenance["owner_id"] == merged["person_id"]
+    assert copied_provenance["source_track_ref"] == "front:track:7"
+    assert copied_provenance["source_frame_ref"] == "front:0:900"
+    assert copied_provenance["crop_hash"] == "anonymous-crop-hash"
+    assert copied_provenance["resolution_reason"] == "recognition_track"
+
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visual_state(),
+    )
+    identity = projected["tracks"][0]["identity"]
+    assert identity["status"] == "known_person"
+    assert identity["source"] == "teach"
+    assert identity["person"]["person_id"] == merged["person_id"]
+    assert identity["person"]["display_name"] == "张三"
+    assert [path for path in artifact_dir.rglob("*") if path.is_file()]
+
+
+@pytest.mark.asyncio
+async def test_teach_person_anonymous_external_ref_bound_elsewhere_conflicts_without_write(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = FaceMetadataEmbeddingBackend(person_vector=vector)
+    subject = service(tmp_path, embedding_backend=backend)
+    subject.store.upsert_person_profile(
+        person_id="person_other",
+        display_name="李四",
+        description="",
+        tags=(),
+        now_ms=9_000,
+    )
+    subject.store.link_external_user(
+        person_id="person_other",
+        external_user_ref="wechat:zhangsan",
+        now_ms=9_000,
+    )
+    subject.store.create_anonymous_profile(
+        anonymous_id="anon_1",
+        seen_count=1,
+        first_seen_at_ms=9_000,
+        last_seen_at_ms=9_500,
+        familiar_score=0.25,
     )
     subject.store.add_anonymous_embedding(
         anonymous_id="anon_1",
@@ -1209,6 +1396,7 @@ async def test_teach_person_duplicate_active_anonymous_requires_merge_without_wr
         visual_state=visual_state(),
     )
     await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
     artifact_dir = tmp_path / "runtime" / "memory" / "artifacts"
     before_counts = _store_counts(subject.store)
 
@@ -1218,45 +1406,105 @@ async def test_teach_person_duplicate_active_anonymous_requires_merge_without_wr
                 "camera": "front",
                 "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
-                "profile": {"display_name": "张三"},
+                "profile": {
+                    "display_name": "张三",
+                    "external_user_ref": "wechat:zhangsan",
+                },
             }
         )
 
     assert exc.value.status_code == 409
-    assert exc.value.code == "anonymous_merge_required"
-    assert exc.value.details["error_code"] == "anonymous_merge_required"
-    assert exc.value.details["outcome"] == "merge_anonymous_required"
-    assert exc.value.details["anonymous_id"] == "anon_1"
+    assert exc.value.code == "person_teach_conflict"
+    assert exc.value.details["error_code"] == "person_teach_conflict"
+    assert exc.value.details["external_user_ref"] == "wechat:zhangsan"
+    assert exc.value.details["external_user_person_id"] == "person_other"
+    assert exc.value.details["matched_anonymous_id"] == "anon_1"
     assert exc.value.details["evidence"]["matched_type"] == "anonymous_person"
-    visual_evidence = exc.value.details["evidence"]["person_visual_evidence"]
-    assert visual_evidence["source_frame_ref"] == "front:1:1000"
-    assert visual_evidence["source_bbox_xyxy"] == [300.0, 100.0, 700.0, 650.0]
-    assert visual_evidence["source_bbox_coordinate_space"] == "source_frame"
-    assert visual_evidence["crop_box_xyxy"] == [260.0, 45.0, 740.0, 705.0]
-    assert visual_evidence["crop_box_coordinate_space"] == "source_frame"
-    assert visual_evidence["embedding_crop_hash"] == hashlib.sha256(
-        backend.person_inputs[0]
-    ).hexdigest()
-    assert "embedding_crop_path" not in visual_evidence
-    assert visual_evidence["face_detection"] == {
-        "coordinate_space": "crop",
-        "face_bbox_xyxy": [20.0, 30.0, 120.0, 150.0],
-        "landmarks_5": [
-            [45.0, 70.0],
-            [92.0, 70.0],
-            [68.0, 96.0],
-            [50.0, 128.0],
-            [88.0, 128.0],
-        ],
-        "score": 0.91,
-        "source": "local_embedding_scrfd",
-    }
     _assert_zero_store_delta(exc.value.details["store_delta"])
     assert _store_counts(subject.store) == before_counts
+    assert subject.store.get_person_by_external_user("wechat:zhangsan")[
+        "person_id"
+    ] == "person_other"
+    assert subject.store.get_active_anonymous_profile("anon_1") is not None
+    if artifact_dir.exists():
+        assert [path for path in artifact_dir.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
+async def test_teach_person_anonymous_auto_merge_rolls_back_db_and_artifact_on_mid_transaction_failure(
+    tmp_path,
+    monkeypatch,
+):
+    vector = _unit_vector(0)
+    backend = FaceMetadataEmbeddingBackend(person_vector=vector)
+    subject = service(tmp_path, embedding_backend=backend)
+    subject.store.create_anonymous_profile(
+        anonymous_id="anon_1",
+        seen_count=1,
+        first_seen_at_ms=9_000,
+        last_seen_at_ms=9_500,
+        familiar_score=0.25,
+    )
+    subject.store.add_anonymous_embedding(
+        anonymous_id="anon_1",
+        result=EmbeddingResult(
+            vector=vector,
+            embedding_type="face",
+            embedding_model="local-face",
+            embedding_version="face-v1",
+            quality=1.0,
+        ),
+        source_target_type="recognition_track",
+        source_track_ref="front:track:7",
+        source_frame_ref="front:0:900",
+        crop_hash="anonymous-crop-hash",
+        crop_path_or_artifact_ref=None,
+        resolver_target_ref="front:track:7",
+        resolution_reason="recognition_track",
+        now_ms=9_500,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    artifact_dir = tmp_path / "runtime" / "memory" / "artifacts"
+    before_counts = _store_counts(subject.store)
+
+    def fail_insert_profile_merge_history(**_kwargs):
+        raise RuntimeError("merge history insert failed")
+
+    monkeypatch.setattr(
+        subject.store,
+        "_insert_profile_merge_history",
+        fail_insert_profile_merge_history,
+    )
+
+    with pytest.raises(RuntimeError, match="merge history insert failed"):
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "stream_ref": "ws_1",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {
+                    "display_name": "张三",
+                    "external_user_ref": "wechat:zhangsan",
+                },
+            }
+        )
+
+    assert _store_counts(subject.store) == before_counts
     assert _count_rows(subject.store, "person_profiles") == 0
-    assert _count_rows(subject.store, "person_embeddings") == before_counts[
-        "person_embeddings"
+    assert _count_rows(subject.store, "person_embeddings") == 0
+    assert _count_rows(subject.store, "person_embedding_vectors") == 0
+    assert _count_rows(subject.store, "external_user_links") == 0
+    assert _count_rows(subject.store, "profile_merge_history") == 0
+    assert _count_rows(subject.store, "embedding_provenance") == before_counts[
+        "embedding_provenance"
     ]
+    assert subject.store.get_active_anonymous_profile("anon_1") is not None
     if artifact_dir.exists():
         assert [path for path in artifact_dir.rglob("*") if path.is_file()] == []
 
@@ -1332,12 +1580,18 @@ async def test_teach_person_waits_pending_same_camera_before_duplicate_store_del
     assert not teach.done()
     backend.release.set()
 
-    with pytest.raises(MemoryServiceError) as exc:
-        await asyncio.wait_for(teach, 1.0)
+    merged = await asyncio.wait_for(teach, 1.0)
 
-    assert exc.value.code == "anonymous_merge_required"
-    _assert_zero_store_delta(exc.value.details["store_delta"])
+    assert merged["ok"] is True
+    assert merged["outcome"] == "merged_anonymous_person"
+    assert merged["copied_embedding_count"] == 1
+    assert "anonymous_merge_required" not in repr(merged)
+    assert merged["store_delta"]["delta"]["person_profiles"] == 1
+    assert merged["store_delta"]["delta"]["person_embeddings"] == 2
     assert _count_rows(subject.store, "anonymous_profiles") == 1
+    assert subject.store.get_active_anonymous_profile(
+        merged["merged_anonymous_id"],
+    ) is None
 
 
 @pytest.mark.asyncio
@@ -4470,6 +4724,61 @@ async def test_identify_current_uses_stream_ref_and_never_camera_fallback(tmp_pa
     assert ws_b["status"] == "ambiguous"
     missing = await subject.identify_current(_identify_request(stream_ref="ws_missing"))
     assert missing["status"] == "no_active_frame"
+
+
+@pytest.mark.asyncio
+async def test_teach_person_uses_stream_ref_and_never_camera_fallback(tmp_path):
+    subject = service(tmp_path)
+    frame_b = frame(frame_id=1, timestamp_ms=1_000)
+    frame_a = frame(frame_id=2, timestamp_ms=1_100)
+    empty_state = visual_state(frame_id=1, timestamp_ms=1_000)
+    empty_state["tracks"] = []
+    empty_state["attention"] = {
+        "target_track_id": None,
+        "target_uv": None,
+        "reason": "no_person",
+        "confidence": 0.0,
+    }
+
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_b",
+        frame_message=frame_b,
+        state=empty_state,
+        snapshot=None,
+    )
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_a",
+        frame_message=frame_a,
+        state=visual_state(frame_id=2, timestamp_ms=1_100),
+        snapshot=memory_snapshot(frame_message=frame_a),
+    )
+    before_counts = _store_counts(subject.store)
+
+    with pytest.raises(MemoryServiceError) as wrong_stream:
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "stream_ref": "ws_b",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "张三"},
+            }
+        )
+    assert wrong_stream.value.code == "target_not_visible"
+    assert _store_counts(subject.store) == before_counts
+
+    with pytest.raises(MemoryServiceError) as missing_stream:
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "stream_ref": "ws_missing",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {"display_name": "张三"},
+            }
+        )
+    assert missing_stream.value.code == "no_active_frame"
+    assert _store_counts(subject.store) == before_counts
 
 
 @pytest.mark.asyncio

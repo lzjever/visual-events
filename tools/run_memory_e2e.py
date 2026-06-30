@@ -307,15 +307,16 @@ class MemoryE2ERunner:
         states_file: Any,
         phase: str,
     ) -> list[dict[str, Any]]:
-        self.send(
+        query_state = self.send(
             websocket,
             timestamp_ms=query_timestamp_ms,
             states_file=states_file,
             phase=f"{phase}:query",
         )
-        # Give the in-process memory worker a short window to finish, then send a
-        # drain-only frame whose timestamp does not satisfy query_interval_ms.
-        time.sleep(QUERY_DRAIN_WAIT_SECONDS)
+        stream_ref = query_state.get("stream_ref")
+        if not isinstance(stream_ref, str) or not stream_ref:
+            stream_ref = self.latest_stream_ref
+        self._wait_for_memory_query_idle(stream_ref)
         drained = self.send(
             websocket,
             timestamp_ms=query_timestamp_ms + 1,
@@ -323,6 +324,31 @@ class MemoryE2ERunner:
             phase=f"{phase}:drain",
         )
         return list(drained.get("semantic_events") or [])
+
+    def _wait_for_memory_query_idle(self, stream_ref: str | None) -> bool:
+        for attempt in range(12):
+            pending = self._pending_memory_query(stream_ref)
+            if pending is not None:
+                if pending.done():
+                    return True
+            elif attempt > 0:
+                return True
+            time.sleep(QUERY_DRAIN_WAIT_SECONDS)
+        return False
+
+    def _pending_memory_query(self, stream_ref: str | None) -> Any | None:
+        if not stream_ref:
+            return None
+        memory_service = self._memory_service()
+        pending_by_stream = getattr(memory_service, "_pending_queries_by_stream", None)
+        if not isinstance(pending_by_stream, dict):
+            return None
+        return pending_by_stream.get((stream_ref, self.camera))
+
+    def _memory_service(self) -> Any | None:
+        app = getattr(self.client, "app", None)
+        state = getattr(app, "state", None)
+        return getattr(state, "memory_service", None)
 
     def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         payload = _with_stream_ref_for_endpoint(

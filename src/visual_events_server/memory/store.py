@@ -17,10 +17,17 @@ except ImportError:  # pragma: no cover - exercised by monkeypatch in tests.
 
 
 class MemoryStoreError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.details = dict(details or {})
 
 
 @dataclass(frozen=True)
@@ -202,6 +209,170 @@ class MemoryStore:
                     now_ms=now_ms,
                 )
         return {"person_id": person_id, "embedding_id": embedding_id}
+
+    def promote_anonymous_to_person(
+        self,
+        *,
+        anonymous_id: str,
+        person_id: str,
+        display_name: str,
+        description: str,
+        tags: tuple[str, ...],
+        now_ms: int,
+        merge_reason: str,
+        external_user_ref: str | None = None,
+        fresh_embedding: EmbeddingResult | None = None,
+        source_target_type: str | None = None,
+        source_track_ref: str | None = None,
+        source_frame_ref: str | None = None,
+        crop_hash: str | None = None,
+        crop_path_or_artifact_ref: str | None = None,
+        resolver_target_ref: str | None = None,
+        resolution_reason: str | None = None,
+    ) -> dict[str, Any]:
+        fresh_embedding_id: str | None = None
+        fresh_vector_blob: bytes | None = None
+        if fresh_embedding is not None:
+            vector = self._checked_vector(
+                fresh_embedding.vector,
+                expected_dim=self.person_dim,
+            )
+            fresh_vector_blob = _serialize_vector(vector)
+            fresh_embedding_id = _new_id("emb_person")
+            if not all(
+                value is not None
+                for value in (
+                    source_target_type,
+                    source_frame_ref,
+                    crop_hash,
+                    resolver_target_ref,
+                    resolution_reason,
+                )
+            ):
+                raise MemoryStoreError(
+                    "invalid_embedding_provenance",
+                    "fresh person embedding provenance is incomplete",
+                )
+        merge_id = _new_id("merge")
+        with self._lock:
+            with self.connection:
+                active_anonymous = self.connection.execute(
+                    """
+                    SELECT anonymous_id
+                    FROM anonymous_profiles
+                    WHERE anonymous_id = ? AND status = 'active'
+                    """,
+                    (anonymous_id,),
+                ).fetchone()
+                if active_anonymous is None:
+                    raise MemoryStoreError(
+                        "anonymous_not_found",
+                        "active anonymous profile not found",
+                    )
+                self._upsert_person_profile(
+                    person_id=person_id,
+                    display_name=display_name,
+                    description=description,
+                    tags=tags,
+                    now_ms=now_ms,
+                )
+                if external_user_ref:
+                    linked = self.connection.execute(
+                        """
+                        SELECT person_id
+                        FROM external_user_links
+                        WHERE external_user_ref = ?
+                        """,
+                        (external_user_ref,),
+                    ).fetchone()
+                    if linked is not None and linked["person_id"] != person_id:
+                        raise MemoryStoreError(
+                            "external_user_ref_conflict",
+                            "external_user_ref is already linked to a different person",
+                            details={
+                                "external_user_ref": external_user_ref,
+                                "external_user_person_id": linked["person_id"],
+                            },
+                        )
+                    if linked is None:
+                        self.connection.execute(
+                            """
+                            INSERT INTO external_user_links (
+                              external_user_ref, person_id, created_at_ms
+                            )
+                            VALUES (?, ?, ?)
+                            """,
+                            (external_user_ref, person_id, now_ms),
+                        )
+                    else:
+                        self.connection.execute(
+                            """
+                            UPDATE external_user_links
+                            SET created_at_ms = ?
+                            WHERE external_user_ref = ? AND person_id = ?
+                            """,
+                            (now_ms, external_user_ref, person_id),
+                        )
+                if fresh_embedding is not None:
+                    assert fresh_embedding_id is not None
+                    assert fresh_vector_blob is not None
+                    assert source_target_type is not None
+                    assert source_frame_ref is not None
+                    assert crop_hash is not None
+                    assert resolver_target_ref is not None
+                    assert resolution_reason is not None
+                    self._insert_person_embedding_rows(
+                        embedding_id=fresh_embedding_id,
+                        person_id=person_id,
+                        result=fresh_embedding,
+                        source_target_type=source_target_type,
+                        vector_blob=fresh_vector_blob,
+                        now_ms=now_ms,
+                    )
+                    self._insert_embedding_provenance(
+                        embedding_id=fresh_embedding_id,
+                        owner_type="person",
+                        owner_id=person_id,
+                        source_track_ref=source_track_ref,
+                        source_frame_ref=source_frame_ref,
+                        crop_hash=crop_hash,
+                        crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                        resolver_target_ref=resolver_target_ref,
+                        resolution_reason=resolution_reason,
+                        embedding_type=fresh_embedding.embedding_type,
+                        embedding_model=fresh_embedding.embedding_model,
+                        embedding_version=fresh_embedding.embedding_version,
+                        embedding_dim=self.person_dim,
+                        now_ms=now_ms,
+                    )
+                copied_embedding_ids = self._copy_anonymous_embeddings_to_person(
+                    anonymous_id=anonymous_id,
+                    person_id=person_id,
+                    now_ms=now_ms,
+                )
+                self.connection.execute(
+                    """
+                    UPDATE anonymous_profiles
+                    SET status = 'merged',
+                        merged_person_id = ?,
+                        updated_at_ms = ?
+                    WHERE anonymous_id = ? AND status = 'active'
+                    """,
+                    (person_id, now_ms, anonymous_id),
+                )
+                self._insert_profile_merge_history(
+                    merge_id=merge_id,
+                    anonymous_id=anonymous_id,
+                    person_id=person_id,
+                    merge_reason=merge_reason,
+                    now_ms=now_ms,
+                )
+        return {
+            "person_id": person_id,
+            "embedding_id": fresh_embedding_id,
+            "copied_embedding_ids": copied_embedding_ids,
+            "merge_id": merge_id,
+        }
 
     def create_scene_memory(
         self,
@@ -818,101 +989,12 @@ class MemoryStore:
         now_ms: int,
     ) -> list[str]:
         with self._lock:
-            rows = self.connection.execute(
-                """
-                SELECT
-                  embedding_id, embedding_type, embedding_model, embedding_version, embedding_dim,
-                  source_target_type, vector_blob, quality
-                FROM anonymous_embeddings
-                WHERE anonymous_id = ?
-                ORDER BY created_at_ms, vector_rowid
-                """,
-                (anonymous_id,),
-            ).fetchall()
-            copied_ids: list[str] = []
             with self.connection:
-                for row in rows:
-                    if int(row["embedding_dim"]) != self.person_dim:
-                        raise MemoryStoreError(
-                            "memory_db_dimension_mismatch",
-                            f"anonymous embedding dim is {row['embedding_dim']}, expected {self.person_dim}",
-                        )
-                    embedding_id = _new_id("emb_person")
-                    cursor = self.connection.execute(
-                        """
-                        INSERT INTO person_embeddings (
-                          embedding_id, person_id, embedding_type, embedding_model,
-                          embedding_version, embedding_dim, source_target_type,
-                          vector_blob, quality, created_at_ms
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            embedding_id,
-                            person_id,
-                            row["embedding_type"],
-                            row["embedding_model"],
-                            row["embedding_version"],
-                            self.person_dim,
-                            row["source_target_type"],
-                            row["vector_blob"],
-                            row["quality"],
-                            now_ms,
-                        ),
-                    )
-                    self.connection.execute(
-                        """
-                        INSERT INTO person_embedding_vectors(
-                          rowid, embedding, embedding_id, person_id, embedding_type,
-                          embedding_model, embedding_version, embedding_dim, source_target_type
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            cursor.lastrowid,
-                            row["vector_blob"],
-                            embedding_id,
-                            person_id,
-                            row["embedding_type"],
-                            row["embedding_model"],
-                            row["embedding_version"],
-                            self.person_dim,
-                            row["source_target_type"],
-                        ),
-                    )
-                    provenance = self.connection.execute(
-                        """
-                        SELECT
-                          source_track_ref, source_frame_ref, crop_hash,
-                          crop_path_or_artifact_ref, resolver_target_ref,
-                          resolution_reason, embedding_type, embedding_model,
-                          embedding_version, embedding_dim
-                        FROM embedding_provenance
-                        WHERE embedding_id = ?
-                        """,
-                        (row["embedding_id"],),
-                    ).fetchone()
-                    if provenance is not None:
-                        self._insert_embedding_provenance(
-                            embedding_id=embedding_id,
-                            owner_type="person",
-                            owner_id=person_id,
-                            source_track_ref=provenance["source_track_ref"],
-                            source_frame_ref=provenance["source_frame_ref"],
-                            crop_hash=provenance["crop_hash"],
-                            crop_path_or_artifact_ref=provenance[
-                                "crop_path_or_artifact_ref"
-                            ],
-                            resolver_target_ref=provenance["resolver_target_ref"],
-                            resolution_reason=provenance["resolution_reason"],
-                            embedding_type=provenance["embedding_type"],
-                            embedding_model=provenance["embedding_model"],
-                            embedding_version=provenance["embedding_version"],
-                            embedding_dim=int(provenance["embedding_dim"]),
-                            now_ms=now_ms,
-                        )
-                    copied_ids.append(embedding_id)
-        return copied_ids
+                return self._copy_anonymous_embeddings_to_person(
+                    anonymous_id=anonymous_id,
+                    person_id=person_id,
+                    now_ms=now_ms,
+                )
 
     def mark_anonymous_profile_merged(
         self,
@@ -945,14 +1027,12 @@ class MemoryStore:
         merge_id = _new_id("merge")
         with self._lock:
             with self.connection:
-                self.connection.execute(
-                    """
-                    INSERT INTO profile_merge_history (
-                      merge_id, anonymous_id, person_id, merge_reason, created_at_ms
-                    )
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (merge_id, anonymous_id, person_id, merge_reason, now_ms),
+                self._insert_profile_merge_history(
+                    merge_id=merge_id,
+                    anonymous_id=anonymous_id,
+                    person_id=person_id,
+                    merge_reason=merge_reason,
+                    now_ms=now_ms,
                 )
         return merge_id
 
@@ -1139,13 +1219,15 @@ class MemoryStore:
         result: EmbeddingResult,
         *,
         limit: int,
+        active_only: bool = True,
     ) -> list[VectorCandidate]:
         vector_blob = _serialize_vector(
             self._checked_vector(result.vector, expected_dim=self.person_dim)
         )
+        active_clause = "AND p.status = 'active'" if active_only else ""
         with self._lock:
             rows = self.connection.execute(
-                """
+                f"""
                 SELECT
                   v.anonymous_id AS matched_id,
                   v.embedding_id,
@@ -1161,7 +1243,7 @@ class MemoryStore:
                   AND v.embedding_model = ?
                   AND v.embedding_version = ?
                   AND v.embedding_dim = ?
-                  AND p.status = 'active'
+                  {active_clause}
                 ORDER BY v.distance
                 """,
                 (
@@ -1359,6 +1441,127 @@ class MemoryStore:
                 self.scene_dim,
                 source_target_type,
             ),
+        )
+
+    def _copy_anonymous_embeddings_to_person(
+        self,
+        *,
+        anonymous_id: str,
+        person_id: str,
+        now_ms: int,
+    ) -> list[str]:
+        rows = self.connection.execute(
+            """
+            SELECT
+              embedding_id, embedding_type, embedding_model, embedding_version, embedding_dim,
+              source_target_type, vector_blob, quality
+            FROM anonymous_embeddings
+            WHERE anonymous_id = ?
+            ORDER BY created_at_ms, vector_rowid
+            """,
+            (anonymous_id,),
+        ).fetchall()
+        copied_ids: list[str] = []
+        for row in rows:
+            if int(row["embedding_dim"]) != self.person_dim:
+                raise MemoryStoreError(
+                    "memory_db_dimension_mismatch",
+                    f"anonymous embedding dim is {row['embedding_dim']}, expected {self.person_dim}",
+                )
+            embedding_id = _new_id("emb_person")
+            cursor = self.connection.execute(
+                """
+                INSERT INTO person_embeddings (
+                  embedding_id, person_id, embedding_type, embedding_model,
+                  embedding_version, embedding_dim, source_target_type,
+                  vector_blob, quality, created_at_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    embedding_id,
+                    person_id,
+                    row["embedding_type"],
+                    row["embedding_model"],
+                    row["embedding_version"],
+                    self.person_dim,
+                    row["source_target_type"],
+                    row["vector_blob"],
+                    row["quality"],
+                    now_ms,
+                ),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO person_embedding_vectors(
+                  rowid, embedding, embedding_id, person_id, embedding_type,
+                  embedding_model, embedding_version, embedding_dim, source_target_type
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cursor.lastrowid,
+                    row["vector_blob"],
+                    embedding_id,
+                    person_id,
+                    row["embedding_type"],
+                    row["embedding_model"],
+                    row["embedding_version"],
+                    self.person_dim,
+                    row["source_target_type"],
+                ),
+            )
+            provenance = self.connection.execute(
+                """
+                SELECT
+                  source_track_ref, source_frame_ref, crop_hash,
+                  crop_path_or_artifact_ref, resolver_target_ref,
+                  resolution_reason, embedding_type, embedding_model,
+                  embedding_version, embedding_dim
+                FROM embedding_provenance
+                WHERE embedding_id = ?
+                """,
+                (row["embedding_id"],),
+            ).fetchone()
+            if provenance is not None:
+                self._insert_embedding_provenance(
+                    embedding_id=embedding_id,
+                    owner_type="person",
+                    owner_id=person_id,
+                    source_track_ref=provenance["source_track_ref"],
+                    source_frame_ref=provenance["source_frame_ref"],
+                    crop_hash=provenance["crop_hash"],
+                    crop_path_or_artifact_ref=provenance[
+                        "crop_path_or_artifact_ref"
+                    ],
+                    resolver_target_ref=provenance["resolver_target_ref"],
+                    resolution_reason=provenance["resolution_reason"],
+                    embedding_type=provenance["embedding_type"],
+                    embedding_model=provenance["embedding_model"],
+                    embedding_version=provenance["embedding_version"],
+                    embedding_dim=int(provenance["embedding_dim"]),
+                    now_ms=now_ms,
+                )
+            copied_ids.append(embedding_id)
+        return copied_ids
+
+    def _insert_profile_merge_history(
+        self,
+        *,
+        merge_id: str,
+        anonymous_id: str,
+        person_id: str,
+        merge_reason: str,
+        now_ms: int,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO profile_merge_history (
+              merge_id, anonymous_id, person_id, merge_reason, created_at_ms
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (merge_id, anonymous_id, person_id, merge_reason, now_ms),
         )
 
     def _insert_embedding_provenance(

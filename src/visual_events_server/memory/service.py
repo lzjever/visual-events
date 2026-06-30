@@ -45,7 +45,7 @@ from .identity_overlay import (
     unknown_identity_context,
 )
 from .retriever import MemoryRetriever
-from .store import MemoryStore
+from .store import MemoryStore, MemoryStoreError
 from .target_resolver import (
     ResolvedTarget,
     TargetRequest,
@@ -595,27 +595,106 @@ class AppMemoryService:
                 margin=self.anonymous_margin,
             )
             if anonymous_match is not None:
-                raise MemoryServiceError(
-                    "anonymous_merge_required",
-                    "teach_person matched an active anonymous profile; "
-                    "merge it explicitly",
-                    status_code=409,
-                    details={
-                        "error_code": "anonymous_merge_required",
-                        "outcome": "merge_anonymous_required",
-                        "anonymous_id": anonymous_match.matched_id,
-                        "evidence": self._teach_match_evidence(
-                            anonymous_match,
-                            cached,
-                            target,
-                            crop_hash=_sha256_hex(embedding_bytes),
-                            embedding=embedding,
-                            person_embedding_candidate=embedding_candidate,
-                            interaction_snapshot=interaction_snapshot,
-                        ),
-                        "store_delta": self._store_delta(store_before),
-                    },
+                now_ms = self._clock_ms()
+                crop_hash = _sha256_hex(embedding_bytes)
+                person_id = _public_id("person")
+                crop_path_or_artifact_ref = self._write_embedding_artifact(
+                    owner_type="person",
+                    owner_id=person_id,
+                    crop_hash=crop_hash,
+                    payload=embedding_bytes,
                 )
+                external_user_ref = _optional_text(profile.get("external_user_ref"))
+                try:
+                    promoted = self.store.promote_anonymous_to_person(
+                        anonymous_id=anonymous_match.matched_id,
+                        person_id=person_id,
+                        display_name=display_name,
+                        description=description,
+                        tags=tags,
+                        external_user_ref=external_user_ref,
+                        fresh_embedding=embedding,
+                        source_target_type=target.source_target_mode,
+                        source_track_ref=_source_track_ref(cached, target),
+                        source_frame_ref=_source_frame_ref(cached),
+                        crop_hash=crop_hash,
+                        crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                        resolver_target_ref=_resolver_target_ref(cached, target),
+                        resolution_reason=target.source_target_mode,
+                        merge_reason="teach_person",
+                        now_ms=now_ms,
+                    )
+                except MemoryStoreError as exc:
+                    self._delete_embedding_artifact(crop_path_or_artifact_ref)
+                    if exc.code == "external_user_ref_conflict":
+                        raise self._teach_anonymous_external_ref_conflict_error(
+                            matched_anonymous_id=anonymous_match.matched_id,
+                            evidence=self._teach_match_evidence(
+                                anonymous_match,
+                                cached,
+                                target,
+                                crop_hash=crop_hash,
+                                embedding=embedding,
+                                person_embedding_candidate=embedding_candidate,
+                                interaction_snapshot=interaction_snapshot,
+                            ),
+                            store_before=store_before,
+                            external_user_ref=str(
+                                exc.details.get("external_user_ref")
+                                or external_user_ref
+                                or ""
+                            ),
+                            external_user_person_id=str(
+                                exc.details.get("external_user_person_id") or ""
+                            ),
+                        ) from exc
+                    if exc.code == "anonymous_not_found":
+                        raise MemoryServiceError(
+                            "anonymous_not_found",
+                            "active anonymous profile not found",
+                            status_code=404,
+                            details={
+                                "anonymous_id": anonymous_match.matched_id,
+                                "store_delta": self._store_delta(store_before),
+                            },
+                        ) from exc
+                    raise
+                except Exception:
+                    self._delete_embedding_artifact(crop_path_or_artifact_ref)
+                    raise
+                person_profile = self.store.get_person_profile(person_id)
+                if person_profile is not None:
+                    self._identity_overlay.put_known_person(
+                        connection_id=cached.connection_id,
+                        camera=cached.frame.camera,
+                        track_id=target.track_id,
+                        person_profile=person_profile,
+                        match=anonymous_match,
+                        source="teach",
+                    )
+                return {
+                    "ok": True,
+                    "person_id": person_id,
+                    "outcome": "merged_anonymous_person",
+                    "merged_anonymous_id": anonymous_match.matched_id,
+                    "copied_embedding_count": len(
+                        promoted["copied_embedding_ids"],
+                    ),
+                    "embedding_id": promoted["embedding_id"],
+                    "merge_id": promoted["merge_id"],
+                    "target_quality": target.quality,
+                    "evidence": self._teach_match_evidence(
+                        anonymous_match,
+                        cached,
+                        target,
+                        crop_hash=crop_hash,
+                        crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                        embedding=embedding,
+                        person_embedding_candidate=embedding_candidate,
+                        interaction_snapshot=interaction_snapshot,
+                    ),
+                    "store_delta": self._store_delta(store_before),
+                }
 
             now_ms = self._clock_ms()
             crop_hash = _sha256_hex(embedding_bytes)
@@ -777,12 +856,17 @@ class AppMemoryService:
         now_ms = self._clock_ms()
         merge_reason = _optional_text(request.get("merge_reason")) or "manual_merge"
         if person_id:
-            if self.store.get_person_profile(person_id) is None:
+            existing_profile = self.store.get_person_profile(person_id)
+            if existing_profile is None:
                 raise MemoryServiceError(
                     "person_not_found",
                     "person profile not found",
                     status_code=404,
                 )
+            display_name = str(existing_profile["display_name"])
+            description = str(existing_profile["description"])
+            tags = tuple(str(tag) for tag in existing_profile["tags"])
+            external_user_ref = None
         else:
             if not isinstance(profile, dict):
                 raise MemoryServiceError(
@@ -790,36 +874,50 @@ class AppMemoryService:
                     "profile is required when person_id is absent",
                 )
             person_id = _public_id("person")
-            self.store.upsert_person_profile(
+            display_name = _required_text(profile, "display_name")
+            description = _optional_text(profile.get("description"))
+            tags = tuple(str(tag) for tag in profile.get("tags", []) if str(tag))
+            external_user_ref = _optional_text(profile.get("external_user_ref"))
+
+        try:
+            promoted = self.store.promote_anonymous_to_person(
+                anonymous_id=anonymous_id,
                 person_id=person_id,
-                display_name=_required_text(profile, "display_name"),
-                description=_optional_text(profile.get("description")),
-                tags=tuple(str(tag) for tag in profile.get("tags", []) if str(tag)),
+                display_name=display_name,
+                description=description,
+                tags=tags,
+                external_user_ref=external_user_ref,
+                merge_reason=merge_reason,
                 now_ms=now_ms,
             )
-
-        copied_ids = self.store.copy_anonymous_embeddings_to_person(
-            anonymous_id=anonymous_id,
-            person_id=person_id,
-            now_ms=now_ms,
-        )
-        self.store.mark_anonymous_profile_merged(
-            anonymous_id=anonymous_id,
-            person_id=person_id,
-            now_ms=now_ms,
-        )
-        merge_id = self.store.add_profile_merge_history(
-            anonymous_id=anonymous_id,
-            person_id=person_id,
-            merge_reason=merge_reason,
-            now_ms=now_ms,
-        )
+        except MemoryStoreError as exc:
+            if exc.code == "anonymous_not_found":
+                raise MemoryServiceError(
+                    "anonymous_not_found",
+                    "active anonymous profile not found",
+                    status_code=404,
+                ) from exc
+            if exc.code == "external_user_ref_conflict":
+                raise MemoryServiceError(
+                    "person_teach_conflict",
+                    "external_user_ref is already linked to a different person",
+                    status_code=409,
+                    details={
+                        "error_code": "person_teach_conflict",
+                        "outcome": "conflict",
+                        "external_user_ref": exc.details.get("external_user_ref"),
+                        "external_user_person_id": exc.details.get(
+                            "external_user_person_id",
+                        ),
+                    },
+                ) from exc
+            raise
         return {
             "ok": True,
             "anonymous_id": anonymous_id,
             "person_id": person_id,
-            "copied_embedding_count": len(copied_ids),
-            "merge_id": merge_id,
+            "copied_embedding_count": len(promoted["copied_embedding_ids"]),
+            "merge_id": promoted["merge_id"],
         }
 
     async def correct_identity(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -2371,6 +2469,30 @@ class AppMemoryService:
             "external_user_ref is already linked to a different person",
             status_code=409,
             details=details,
+        )
+
+    def _teach_anonymous_external_ref_conflict_error(
+        self,
+        *,
+        matched_anonymous_id: str,
+        evidence: dict[str, Any],
+        store_before: dict[str, int],
+        external_user_ref: str,
+        external_user_person_id: str,
+    ) -> MemoryServiceError:
+        return MemoryServiceError(
+            "person_teach_conflict",
+            "external_user_ref is already linked to a different person",
+            status_code=409,
+            details={
+                "error_code": "person_teach_conflict",
+                "outcome": "conflict",
+                "matched_anonymous_id": matched_anonymous_id,
+                "external_user_ref": external_user_ref,
+                "external_user_person_id": external_user_person_id,
+                "evidence": evidence,
+                "store_delta": self._store_delta(store_before),
+            },
         )
 
     def _external_ref_decision(

@@ -1109,24 +1109,20 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
                     "profile": person_profile,
                 },
             )
-            assert person.status_code == 409
-            merge_required = person.json()["detail"]
-            assert merge_required["code"] == "anonymous_merge_required"
-            assert merge_required["outcome"] == "merge_anonymous_required"
-            assert merge_required["anonymous_id"].startswith("anon_")
-            assert merge_required["store_delta"]["delta"]["person_profiles"] == 0
-            assert merge_required["store_delta"]["delta"]["person_embeddings"] == 0
-            assert merge_required["store_delta"]["delta"]["embedding_provenance"] == 0
-
-            merged_person = client.post(
-                "/v1/memory/merge-anonymous-person",
-                json={
-                    "anonymous_id": merge_required["anonymous_id"],
-                    "profile": person_profile,
-                },
+            assert person.status_code == 200
+            taught_person = person.json()
+            assert taught_person["ok"] is True
+            assert taught_person["outcome"] == "merged_anonymous_person"
+            assert taught_person["merged_anonymous_id"].startswith("anon_")
+            assert taught_person["copied_embedding_count"] >= 1
+            assert taught_person["embedding_id"].startswith("emb_person_")
+            assert taught_person["merge_id"].startswith("merge_")
+            assert taught_person["store_delta"]["delta"]["person_profiles"] == 1
+            assert taught_person["store_delta"]["delta"]["person_embeddings"] >= 2
+            assert (
+                taught_person["store_delta"]["delta"]["profile_merge_history"] == 1
             )
-            assert merged_person.status_code == 200
-            person_id = merged_person.json()["person_id"]
+            person_id = taught_person["person_id"]
 
             scene = client.post(
                 "/v1/memory/teach/scene",

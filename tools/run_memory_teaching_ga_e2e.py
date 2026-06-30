@@ -3490,60 +3490,13 @@ def _post_teach_person_with_optional_anonymous_merge(
         payload=payload,
         operation=operation,
     )
-    merge_required = _anonymous_merge_required_detail(teach)
-    if merge_required is None:
-        body = dict(teach["body"]) if isinstance(teach["body"], dict) else {}
-        if body.get("ok") is True:
-            body.setdefault("teach_person_outcome", body.get("outcome") or "created_person")
-        return {**teach, "body": body}
-
-    profile = payload.get("profile")
-    merge_payload: dict[str, Any] = {
-        "anonymous_id": merge_required["anonymous_id"],
-    }
-    if isinstance(profile, dict):
-        merge_payload["profile"] = dict(profile)
-    merge = _post_and_record_api_response(
-        runner=runner,
-        api_response_records=api_response_records,
-        payload_index=f"{payload_index}:merge-anonymous",
-        scene=scene,
-        endpoint="/v1/memory/merge-anonymous-person",
-        payload=merge_payload,
-        operation=f"{operation}_merge_anonymous_person",
-    )
-    merge_body = merge["body"] if isinstance(merge["body"], dict) else {}
-    final_body = {
-        **merge_body,
-        "evidence": merge_required.get("evidence", {}),
-        "teach_person_outcome": "merge_anonymous_required",
-        "teach_person": teach["body"],
-        "merge_anonymous_person": merge_body,
-    }
-    return {
-        "status_code": merge["status_code"],
-        "body": final_body,
-        "teach_person_response": teach,
-        "merge_anonymous_person_response": merge,
-    }
-
-
-def _anonymous_merge_required_detail(response: dict[str, Any]) -> dict[str, Any] | None:
-    if response.get("status_code") != 409:
-        return None
-    body = response.get("body")
-    if not isinstance(body, dict):
-        return None
-    detail = body.get("detail")
-    payload = detail if isinstance(detail, dict) else body
-    code = payload.get("code") or payload.get("error_code")
-    if code != "anonymous_merge_required":
-        return None
-    if payload.get("outcome") != "merge_anonymous_required":
-        return None
-    if not payload.get("anonymous_id"):
-        return None
-    return payload
+    body = dict(teach["body"]) if isinstance(teach["body"], dict) else {}
+    if body.get("ok") is True:
+        body.setdefault(
+            "teach_person_outcome",
+            body.get("outcome") or "created_person",
+        )
+    return {**teach, "body": body}
 
 
 def _append_botified_frame_records(
@@ -4032,21 +3985,7 @@ def _build_actual_checks(
 
 def _api_response_status_ok(record: dict[str, Any]) -> bool:
     status_code = int(record.get("status_code") or 0)
-    if status_code < 400:
-        return True
-    if status_code != 409:
-        return False
-    response = record.get("response")
-    if not isinstance(response, dict):
-        return False
-    detail = response.get("detail")
-    payload = detail if isinstance(detail, dict) else response
-    return (
-        (payload.get("code") or payload.get("error_code"))
-        == "anonymous_merge_required"
-        and payload.get("outcome") == "merge_anonymous_required"
-        and bool(payload.get("anonymous_id"))
-    )
+    return status_code < 400
 
 
 def _build_local_smoke_checks(

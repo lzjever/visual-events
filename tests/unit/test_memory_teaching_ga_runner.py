@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+import threading
 
 from visual_events_server.memory.api_contract import (
     ResolveTargetRequest,
@@ -219,7 +220,7 @@ def test_generated_payloads_parse_with_public_memory_api_contract(
             raise AssertionError(f"unexpected endpoint: {record['endpoint']}")
 
 
-def test_teach_person_helper_merges_anonymous_required_response() -> None:
+def test_teach_person_helper_accepts_server_side_anonymous_auto_merge() -> None:
     posts: list[dict[str, Any]] = []
 
     class FakeResponse:
@@ -233,28 +234,18 @@ def test_teach_person_helper_merges_anonymous_required_response() -> None:
     class FakeClient:
         def post(self, endpoint: str, json: dict[str, Any]) -> FakeResponse:
             posts.append({"endpoint": endpoint, "payload": json})
-            if endpoint == "/v1/memory/teach/person":
-                return FakeResponse(
-                    409,
-                    {
-                        "detail": {
-                            "code": "anonymous_merge_required",
-                            "error_code": "anonymous_merge_required",
-                            "outcome": "merge_anonymous_required",
-                            "anonymous_id": "anon_123",
-                            "evidence": {"resolver_target_ref": "front:track:8"},
-                        }
-                    },
-                )
-            assert endpoint == "/v1/memory/merge-anonymous-person"
+            assert endpoint == "/v1/memory/teach/person"
             return FakeResponse(
                 200,
                 {
                     "ok": True,
-                    "anonymous_id": "anon_123",
-                    "person_id": "person_from_merge",
+                    "outcome": "merged_anonymous_person",
+                    "merged_anonymous_id": "anon_123",
+                    "person_id": "person_from_teach",
                     "copied_embedding_count": 1,
+                    "embedding_id": "emb_fresh",
                     "merge_id": "merge_123",
+                    "evidence": {"resolver_target_ref": "front:track:8"},
                 },
             )
 
@@ -277,24 +268,17 @@ def test_teach_person_helper_merges_anonymous_required_response() -> None:
         operation="teach_person_third_person",
     )
 
-    assert [post["endpoint"] for post in posts] == [
-        "/v1/memory/teach/person",
-        "/v1/memory/merge-anonymous-person",
-    ]
-    assert posts[1]["payload"] == {
-        "anonymous_id": "anon_123",
-        "profile": {"display_name": "彭刚"},
-    }
+    assert [post["endpoint"] for post in posts] == ["/v1/memory/teach/person"]
     assert result["status_code"] == 200
-    assert result["body"]["person_id"] == "person_from_merge"
-    assert result["body"]["teach_person_outcome"] == "merge_anonymous_required"
+    assert result["body"]["person_id"] == "person_from_teach"
+    assert result["body"]["teach_person_outcome"] == "merged_anonymous_person"
+    assert result["body"]["merged_anonymous_id"] == "anon_123"
     assert result["body"]["evidence"] == {"resolver_target_ref": "front:track:8"}
-    assert result["body"]["teach_person"]["detail"]["anonymous_id"] == "anon_123"
-    assert result["body"]["merge_anonymous_person"]["person_id"] == "person_from_merge"
-    assert [record["operation"] for record in records] == [
-        "teach_person_third_person",
-        "teach_person_third_person_merge_anonymous_person",
-    ]
+    assert [record["operation"] for record in records] == ["teach_person_third_person"]
+    assert all(
+        record["endpoint"] != "/v1/memory/merge-anonymous-person"
+        for record in records
+    )
 
 
 def test_teach_person_helper_keeps_non_anonymous_409_failed() -> None:
@@ -1228,6 +1212,83 @@ def test_post_teach_scene_replay_uses_one_runner_case(
     ]
     assert "post-teach-third-person-seed:stable-1" in phases
     assert "post-teach-third-person-seed:stable-2" in phases
+
+
+def test_memory_e2e_runner_drain_waits_for_current_query_before_returning_events(
+    monkeypatch,
+) -> None:
+    pending = threading.Event()
+    sends: list[dict[str, Any]] = []
+
+    class FakePending:
+        def done(self) -> bool:
+            return pending.is_set()
+
+    class FakeRunner(memory_e2e.MemoryE2ERunner):
+        latest_stream_ref = "ws_1"
+        camera = "front"
+        case = "fake"
+        _query_wait_attempt = 0
+
+        def __init__(self) -> None:
+            pass
+
+        def send(
+            self,
+            _websocket: Any,
+            *,
+            timestamp_ms: int,
+            states_file: Any,
+            phase: str,
+        ) -> dict[str, Any]:
+            sends.append({"timestamp_ms": timestamp_ms, "phase": phase})
+            if phase.endswith(":query"):
+                return {"stream_ref": "ws_1", "semantic_events": []}
+            if self._query_wait_attempt < 2:
+                return {"stream_ref": "ws_1", "semantic_events": []}
+            return {
+                "stream_ref": "ws_1",
+                "semantic_events": [
+                    {
+                        "event": "known_person_present",
+                        "memory_context": {"person": {"person_id": "person_current"}},
+                    }
+                ],
+            }
+
+        def _memory_service(self) -> Any:
+            return SimpleNamespace(
+                _pending_queries_by_stream={("ws_1", "front"): FakePending()},
+            )
+
+    def fake_sleep(_seconds: float) -> None:
+        runner._query_wait_attempt += 1
+        if runner._query_wait_attempt >= 2:
+            pending.set()
+
+    runner = FakeRunner()
+    monkeypatch.setattr(memory_e2e.time, "sleep", fake_sleep)
+
+    events = memory_e2e.MemoryE2ERunner.start_query_and_drain(
+        runner,
+        object(),
+        query_timestamp_ms=1_000,
+        states_file=SimpleNamespace(write=lambda *_args: None, flush=lambda: None),
+        phase="scene-a",
+    )
+
+    assert events == [
+        {
+            "event": "known_person_present",
+            "memory_context": {"person": {"person_id": "person_current"}},
+        }
+    ]
+    assert [send["phase"] for send in sends] == [
+        "scene-a:query",
+        "scene-a:drain",
+    ]
+    assert runner._query_wait_attempt == 2
+    assert sends[-1]["timestamp_ms"] == 1_001
 
 
 def test_local_smoke_requires_explicit_real_local_backends(tmp_path: Path) -> None:
