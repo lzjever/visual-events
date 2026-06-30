@@ -519,6 +519,9 @@ def _visual_context(
     memory_context = _project_memory_context(event)
     if memory_context:
         context["memory_context"] = memory_context
+    identity_context = _project_identity_context(event)
+    if identity_context:
+        context["identity_context"] = identity_context
     return context
 
 
@@ -692,6 +695,49 @@ def _project_memory_context(event: dict[str, Any]) -> dict[str, Any]:
     )
     if summaries:
         projected["conversation_summaries"] = summaries
+
+    return projected
+
+
+def _project_identity_context(event: dict[str, Any]) -> dict[str, Any]:
+    context = event.get("identity_context")
+    if not isinstance(context, dict):
+        return {}
+
+    projected = _project_section(
+        context,
+        {
+            "status": 80,
+            "source": 80,
+            "fresh_ms": None,
+            "confidence": None,
+            "reason": 180,
+        },
+    )
+
+    person = _project_section(
+        context.get("person"),
+        {
+            "person_id": 80,
+            "display_name": 80,
+            "description": 180,
+            "tags": 6,
+        },
+    )
+    if person:
+        projected["person"] = person
+
+    anonymous_person = _project_section(
+        context.get("anonymous_person"),
+        {
+            "anonymous_id": 80,
+            "seen_count": None,
+            "observed_duration_ms": None,
+            "familiar_score": None,
+        },
+    )
+    if anonymous_person:
+        projected["anonymous_person"] = anonymous_person
 
     return projected
 

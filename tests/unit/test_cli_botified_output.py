@@ -199,6 +199,47 @@ def familiar_unknown_event(
     }
 
 
+def known_identity_context() -> dict[str, Any]:
+    return {
+        "status": "known_person",
+        "source": "cache",
+        "fresh_ms": 120,
+        "confidence": 0.91,
+        "person": {
+            "person_id": "person_000001",
+            "display_name": "张三",
+            "description": "店长，熟悉新品陈列和现场活动",
+            "tags": ["staff", "manager"],
+            "bbox_xyxy": [1, 2, 3, 4],
+            "embedding": [0.1, 0.2],
+            "crop_ref": "runtime/private/crop.jpg",
+        },
+        "track_id": 7,
+        "stream_ref": "ws_1",
+    }
+
+
+def familiar_unknown_identity_context() -> dict[str, Any]:
+    return {
+        "status": "familiar_unknown",
+        "source": "cache",
+        "fresh_ms": 250,
+        "confidence": 0.88,
+        "anonymous_person": {
+            "anonymous_id": "anon_seeded",
+            "seen_count": 5,
+            "observed_duration_ms": 4_200,
+            "familiar_score": 0.88,
+            "bbox_xyxy": [1, 2, 3, 4],
+            "keypoints": [{"name": "nose"}],
+            "embedding": [1.0, 0.0],
+            "crop_ref": "runtime/private/crop.jpg",
+            "stream_ref": "ws_1",
+        },
+        "raw_track_id": 7,
+    }
+
+
 def parse_botified_frame(frame: str, *, event_id: str) -> dict[str, Any]:
     assert "\n" not in frame
     assert frame.startswith(BOTIFIED_OPEN)
@@ -611,6 +652,162 @@ def test_trigger_evidence_only_contains_whitelisted_projection_fields():
         "wrist_y_relative_to_shoulder_px": 18.0,
         "wave_duration_ms": 900,
         "keypoint_min_confidence": 0.72,
+    }
+
+
+def test_event_identity_context_known_person_is_projected_to_visual_context():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    event = semantic_event(event_id="front:waving_known", event="person_waving")
+    event["identity_context"] = known_identity_context()
+    state = visual_state_with_events([event])
+    state["identity_context"] = {
+        "overlay_status": "ready",
+        "tracks": [
+            {
+                "track_id": 7,
+                "identity": {
+                    "status": "known_person",
+                    "source": "top_level_must_not_be_used",
+                    "person": {"display_name": "李四"},
+                },
+            }
+        ],
+    }
+
+    frames = mapper.frames_from_visual_state(state)
+
+    context = parse_visual_context(
+        parse_botified_frame(frames[0], event_id="front:waving_known")
+    )
+    assert context["identity_context"] == {
+        "status": "known_person",
+        "source": "cache",
+        "fresh_ms": 120,
+        "confidence": 0.91,
+        "person": {
+            "person_id": "person_000001",
+            "display_name": "张三",
+            "description": "店长，熟悉新品陈列和现场活动",
+            "tags": ["staff", "manager"],
+        },
+    }
+
+
+def test_event_identity_context_familiar_unknown_projects_anonymous_summary():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    event = semantic_event(
+        event_id="front:waving_familiar_unknown",
+        event="person_waving",
+    )
+    event["identity_context"] = familiar_unknown_identity_context()
+
+    frames = mapper.frames_from_visual_state(visual_state_with_events([event]))
+
+    context = parse_visual_context(
+        parse_botified_frame(frames[0], event_id="front:waving_familiar_unknown")
+    )
+    assert context["identity_context"] == {
+        "status": "familiar_unknown",
+        "source": "cache",
+        "fresh_ms": 250,
+        "confidence": 0.88,
+        "anonymous_person": {
+            "anonymous_id": "anon_seeded",
+            "seen_count": 5,
+            "observed_duration_ms": 4_200,
+            "familiar_score": 0.88,
+        },
+    }
+
+
+def test_event_identity_context_redacts_non_dict_and_low_level_fields():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    non_dict = semantic_event(
+        event_id="front:waving_non_dict_identity",
+        event="person_waving",
+        track_id=7,
+    )
+    non_dict["identity_context"] = ["must-not-project"]
+    malicious = semantic_event(
+        event_id="front:waving_redacted_identity",
+        event="person_waving",
+        track_id=8,
+        evidence={"runtime_person_slot": 8, "wave_duration_ms": 900},
+    )
+    malicious["identity_context"] = {
+        **known_identity_context(),
+        "bbox": [1, 2, 3, 4],
+        "bbox_xyxy": [1, 2, 3, 4],
+        "keypoints": [{"name": "nose"}],
+        "embedding": [1.0, 0.0],
+        "crop": "must-not-leak",
+        "stream_ref": "ws_1",
+        "raw_track_id": 8,
+        "unknown_debug": {"bbox_xyxy": [9, 9, 9, 9]},
+    }
+
+    frames = mapper.frames_from_visual_state(
+        visual_state_with_events([non_dict, malicious])
+    )
+
+    contexts = [
+        parse_visual_context(parse_botified_frame(frame, event_id=event_id))
+        for frame, event_id in zip(
+            frames,
+            ["front:waving_non_dict_identity", "front:waving_redacted_identity"],
+        )
+    ]
+    assert "identity_context" not in contexts[0]
+    assert contexts[1]["identity_context"] == {
+        "status": "known_person",
+        "source": "cache",
+        "fresh_ms": 120,
+        "confidence": 0.91,
+        "person": {
+            "person_id": "person_000001",
+            "display_name": "张三",
+            "description": "店长，熟悉新品陈列和现场活动",
+            "tags": ["staff", "manager"],
+        },
+    }
+    serialized = json.dumps(contexts[1]["identity_context"], ensure_ascii=False)
+    for forbidden in (
+        "bbox",
+        "bbox_xyxy",
+        "keypoints",
+        "embedding",
+        "crop",
+        "stream_ref",
+        "raw_track_id",
+        "unknown_debug",
+    ):
+        assert forbidden not in serialized
+
+
+def test_event_identity_context_and_memory_context_can_coexist():
+    module = import_botified_output()
+    mapper = module.BotifiedEventMapper(clock_ms=lambda: 1_710_000_000_100)
+    event = known_person_event()
+    event["identity_context"] = known_identity_context()
+
+    frames = mapper.frames_from_visual_state(visual_state_with_events([event]))
+
+    context = parse_visual_context(
+        parse_botified_frame(frames[0], event_id="front:mem_evt_000001")
+    )
+    assert context["identity_context"]["person"]["display_name"] == "张三"
+    assert context["memory_context"] == {
+        "person": {
+            "person_id": "person_000001",
+            "display_name": "张三",
+            "description": "店长，熟悉新品陈列和现场活动",
+            "tags": ["staff", "manager"],
+            "match_confidence": 0.86,
+        },
+        "conversation_summaries": ["上次问过新品尺码，偏好浅色外套。"],
     }
 
 
