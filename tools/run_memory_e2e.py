@@ -68,10 +68,15 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
         self.mode = "single"
         self._last_snapshot: MemoryFrameSnapshot | None = None
         self.drop_next_memory_snapshot = False
+        self.emit_next_ordinary_person_event = False
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
         tracks = self._tracks(frame)
         self._last_snapshot = self._memory_snapshot(frame)
+        semantic_events = []
+        if self.emit_next_ordinary_person_event:
+            self.emit_next_ordinary_person_event = False
+            semantic_events.append(_ordinary_person_waving_event(frame))
         return {
             "type": "visual_state",
             "schema_version": SCHEMA_VERSION,
@@ -100,7 +105,7 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
                 "largest_person_stable": True,
                 "someone_near_center": True,
             },
-            "semantic_events": [],
+            "semantic_events": semantic_events,
         }
 
     def take_memory_frame_snapshot(self) -> MemoryFrameSnapshot | None:
@@ -1121,6 +1126,28 @@ def _track(
         "lost_ms": 0,
         "confidence": confidence,
         "pose_confidence": 0.86,
+    }
+
+
+def _ordinary_person_waving_event(frame: FrameMessage) -> dict[str, Any]:
+    return {
+        "type": "semantic_event",
+        "event_id": f"{frame.camera}:evt_memory_e2e_waving_{frame.frame_id:06d}",
+        "event": "person_waving",
+        "camera": frame.camera,
+        "track_id": PRIMARY_TRACK_ID,
+        "confidence": 0.86,
+        "duration_ms": 900,
+        "lifecycle_state": "confirmed",
+        "evidence": {
+            "runtime_person_slot": 1,
+            "wrist_x_span_px": 96.0,
+            "wrist_x_span_bbox_ratio": 0.43,
+            "wrist_y_relative_to_shoulder_px": -42.0,
+            "wave_duration_ms": 900,
+            "keypoint_min_confidence": 0.9,
+        },
+        "text": "有人在挥手",
     }
 
 

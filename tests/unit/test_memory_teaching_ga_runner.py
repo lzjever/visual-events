@@ -1218,6 +1218,14 @@ def test_actual_fake_runner_report_includes_supporting_contracts(
     assert supporting["familiar_unknown"]["present"] is True
     assert supporting["teach_auto_merge_anonymous"]["old_anonymous_suppressed"] is True
     assert supporting["teach_auto_merge_anonymous"]["known_replay_present"] is True
+    assert supporting["assertions"]["event_identity_context_present"] is True
+    assert supporting["assertions"]["event_identity_context_person_waving"] is True
+    assert supporting["assertions"]["event_identity_context_known_person"] is True
+    assert supporting["event_identity_context"]["event"]["event"] == "person_waving"
+    assert (
+        supporting["event_identity_context"]["identity_context"]["status"]
+        == "known_person"
+    )
     api_records = [
         json.loads(line)
         for line in (out / "api_responses.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1243,6 +1251,28 @@ def test_actual_fake_runner_report_includes_supporting_contracts(
     assert resolve_states["ambiguous"]["no_memory_write"] is True
     assert resolve_states["not_found"]["status"] == "not_found"
     assert resolve_states["not_found"]["no_memory_write"] is True
+    payload_records = json.loads(
+        (out / "teach_payloads.json").read_text(encoding="utf-8")
+    )["payloads"]
+    visual_evidence_index = module.memory_teaching_evidence.build_artifact_visual_evidence_index(
+        artifact=out,
+        out=tmp_path / "evidence-check",
+        scenes=[
+            module.memory_teaching_evidence.EvidenceScene(
+                name=scene.name,
+                path=scene.path,
+                jpeg_paths=scene.jpeg_paths,
+            )
+            for scene in module.discover_scene_dirs(data_dir)
+        ],
+        report=report,
+        payload_records=payload_records,
+    )
+    by_assertion = {
+        item["assertion_id"]: item
+        for item in visual_evidence_index
+    }
+    assert by_assertion["event_identity_context"]["status"] == "present"
 
 
 def test_bounded_recognition_projection_reads_service_report_without_recomputing() -> None:

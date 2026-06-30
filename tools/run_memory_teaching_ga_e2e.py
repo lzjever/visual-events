@@ -2934,6 +2934,14 @@ def _run_actual_supporting_contracts(
         api_response_records=api_response_records,
         botified_frame_records=botified_frame_records,
     )
+    event_identity_context = _run_actual_supporting_event_identity_context(
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+        states_file=states_file,
+        api_response_records=api_response_records,
+        botified_frame_records=botified_frame_records,
+    )
     resolve_states = _run_actual_supporting_resolve_target_states(
         out=out,
         source_frame=source_frame,
@@ -2963,6 +2971,15 @@ def _run_actual_supporting_contracts(
         "correct_identity_suppressed_wrong_person": bool(
             correct_identity["assertions"].get("wrong_person_not_returned")
         ),
+        "event_identity_context_present": bool(
+            event_identity_context["assertions"].get("event_identity_context_present")
+        ),
+        "event_identity_context_person_waving": bool(
+            event_identity_context["assertions"].get("event_is_person_waving")
+        ),
+        "event_identity_context_known_person": bool(
+            event_identity_context["assertions"].get("identity_status_known_person")
+        ),
         "resolve_target_resolved": resolve_states["resolved"].get("status") == "resolved",
         "resolve_target_ambiguous": resolve_states["ambiguous"].get("status") == "ambiguous",
         "resolve_target_ambiguous_no_write": bool(
@@ -2983,6 +3000,7 @@ def _run_actual_supporting_contracts(
             "conversation_summary_context": summary_link["runner_case"],
             "familiar_unknown_auto_merge": familiar_merge["runner_case"],
             "correct_identity": correct_identity["runner_case"],
+            "event_identity_context": event_identity_context["runner_case"],
             "resolve_target_states": resolve_states["runner_case"],
         },
         "assertions": assertions,
@@ -2991,6 +3009,7 @@ def _run_actual_supporting_contracts(
         "familiar_unknown": familiar_merge["familiar_unknown"],
         "teach_auto_merge_anonymous": familiar_merge["teach_auto_merge_anonymous"],
         "correct_identity": correct_identity["correct_identity"],
+        "event_identity_context": event_identity_context["event_identity_context"],
         "resolve_target_states": {
             "resolved": resolve_states["resolved"],
             "ambiguous": resolve_states["ambiguous"],
@@ -3330,6 +3349,88 @@ def _run_actual_supporting_correct_identity(
     }
 
 
+def _run_actual_supporting_event_identity_context(
+    *,
+    out: Path,
+    source_frame: memory_e2e.SourceFrame,
+    camera: str,
+    states_file: Any,
+    api_response_records: list[dict[str, Any]],
+    botified_frame_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    runner = _actual_runner(
+        case="ga-supporting-event-identity-context",
+        out=out,
+        source_frame=source_frame,
+        camera=camera,
+    )
+    _attach_cli_botified_projection_recorder(runner, botified_frame_records)
+    with runner.open_stream() as websocket:
+        _seed_stable_interaction_window(
+            runner,
+            websocket,
+            start_timestamp_ms=1_000,
+            states_file=states_file,
+            phase="supporting-event-identity-seed",
+        )
+        teach = _post_teach_person_recording_outcome(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:event-identity:teach-person",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/teach/person",
+            payload=memory_e2e.self_introduction_payload(
+                camera=camera,
+                stream_ref=runner.require_stream_ref(),
+                display_name="Supporting Event Person",
+                description="supporting contracts event identity fixture",
+                tags=["memory-ga"],
+            ),
+            operation="supporting_teach_person_event_identity_context",
+        )
+        runner.start_query_and_drain(
+            websocket,
+            query_timestamp_ms=3_000,
+            states_file=states_file,
+            phase="supporting-event-identity-known-replay",
+        )
+        runner.processor.emit_next_ordinary_person_event = True
+        state = runner.send(
+            websocket,
+            timestamp_ms=5_000,
+            states_file=states_file,
+            phase="supporting-event-identity-ordinary-event",
+        )
+
+    event = _first_event_with_identity_context(state)
+    identity_context = (
+        event.get("identity_context") if isinstance(event, dict) else None
+    )
+    assertions = {
+        "teach_person_ok": teach["body"].get("ok") is True,
+        "person_id_present": bool(teach["body"].get("person_id")),
+        "event_identity_context_present": isinstance(identity_context, dict),
+        "event_is_person_waving": (
+            isinstance(event, dict) and event.get("event") == "person_waving"
+        ),
+        "identity_status_known_person": (
+            isinstance(identity_context, dict)
+            and identity_context.get("status") == "known_person"
+        ),
+    }
+    return {
+        "runner_case": runner.case,
+        "assertions": assertions,
+        "event_identity_context": {
+            "person_id": teach["body"].get("person_id"),
+            "event": memory_e2e.compact_events([event])[0]
+            if event is not None
+            else None,
+            "identity_context": identity_context,
+        },
+    }
+
+
 def _run_actual_supporting_resolve_target_states(
     *,
     out: Path,
@@ -3442,6 +3543,18 @@ def _anonymous_id_from_event(event: dict[str, Any] | None) -> Any:
     anonymous = memory_context.get("anonymous")
     if isinstance(anonymous, dict):
         return anonymous.get("anonymous_id")
+    return None
+
+
+def _first_event_with_identity_context(
+    visual_state: dict[str, Any],
+) -> dict[str, Any] | None:
+    semantic_events = visual_state.get("semantic_events")
+    if not isinstance(semantic_events, list):
+        return None
+    for event in semantic_events:
+        if isinstance(event, dict) and isinstance(event.get("identity_context"), dict):
+            return event
     return None
 
 
