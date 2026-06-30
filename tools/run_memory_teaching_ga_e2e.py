@@ -1693,9 +1693,8 @@ def _teach_person_report_fields(response: dict[str, Any]) -> dict[str, Any]:
     person_visual_evidence = _person_visual_evidence_from_teach_body(body)
     if person_visual_evidence is not None:
         fields["person_visual_evidence"] = person_visual_evidence
-    outcome = body.get("teach_person_outcome")
-    if outcome and outcome != "created_person":
-        fields["teach_person_outcome"] = outcome
+    if "teach_person_outcome" in body:
+        fields["teach_person_outcome"] = body["teach_person_outcome"]
     teach_person = body.get("teach_person")
     if teach_person is not None:
         fields["teach_person"] = teach_person
@@ -3522,10 +3521,10 @@ def _post_teach_person_with_optional_anonymous_merge(
         operation=operation,
     )
     body = dict(teach["body"]) if isinstance(teach["body"], dict) else {}
-    if body.get("ok") is True:
+    if body.get("ok") is True and body.get("outcome"):
         body.setdefault(
             "teach_person_outcome",
-            body.get("outcome") or "created_person",
+            body["outcome"],
         )
     return {**teach, "body": body}
 

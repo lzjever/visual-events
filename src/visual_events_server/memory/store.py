@@ -171,6 +171,7 @@ class MemoryStore:
         resolver_target_ref: str,
         resolution_reason: str,
         now_ms: int,
+        external_user_ref: str | None = None,
     ) -> dict[str, str]:
         vector = self._checked_vector(embedding.vector, expected_dim=self.person_dim)
         embedding_id = _new_id("emb_person")
@@ -184,6 +185,12 @@ class MemoryStore:
                     tags=tags,
                     now_ms=now_ms,
                 )
+                if external_user_ref:
+                    self._link_external_user_if_available(
+                        person_id=person_id,
+                        external_user_ref=external_user_ref,
+                        now_ms=now_ms,
+                    )
                 self._insert_person_embedding_rows(
                     embedding_id=embedding_id,
                     person_id=person_id,
@@ -277,42 +284,11 @@ class MemoryStore:
                     now_ms=now_ms,
                 )
                 if external_user_ref:
-                    linked = self.connection.execute(
-                        """
-                        SELECT person_id
-                        FROM external_user_links
-                        WHERE external_user_ref = ?
-                        """,
-                        (external_user_ref,),
-                    ).fetchone()
-                    if linked is not None and linked["person_id"] != person_id:
-                        raise MemoryStoreError(
-                            "external_user_ref_conflict",
-                            "external_user_ref is already linked to a different person",
-                            details={
-                                "external_user_ref": external_user_ref,
-                                "external_user_person_id": linked["person_id"],
-                            },
-                        )
-                    if linked is None:
-                        self.connection.execute(
-                            """
-                            INSERT INTO external_user_links (
-                              external_user_ref, person_id, created_at_ms
-                            )
-                            VALUES (?, ?, ?)
-                            """,
-                            (external_user_ref, person_id, now_ms),
-                        )
-                    else:
-                        self.connection.execute(
-                            """
-                            UPDATE external_user_links
-                            SET created_at_ms = ?
-                            WHERE external_user_ref = ? AND person_id = ?
-                            """,
-                            (now_ms, external_user_ref, person_id),
-                        )
+                    self._link_external_user_if_available(
+                        person_id=person_id,
+                        external_user_ref=external_user_ref,
+                        now_ms=now_ms,
+                    )
                 if fresh_embedding is not None:
                     assert fresh_embedding_id is not None
                     assert fresh_vector_blob is not None
@@ -1335,6 +1311,50 @@ class MemoryStore:
                 now_ms,
                 now_ms,
             ),
+        )
+
+    def _link_external_user_if_available(
+        self,
+        *,
+        person_id: str,
+        external_user_ref: str,
+        now_ms: int,
+    ) -> None:
+        linked = self.connection.execute(
+            """
+            SELECT person_id
+            FROM external_user_links
+            WHERE external_user_ref = ?
+            """,
+            (external_user_ref,),
+        ).fetchone()
+        if linked is not None and linked["person_id"] != person_id:
+            raise MemoryStoreError(
+                "external_user_ref_conflict",
+                "external_user_ref is already linked to a different person",
+                details={
+                    "external_user_ref": external_user_ref,
+                    "external_user_person_id": linked["person_id"],
+                },
+            )
+        if linked is None:
+            self.connection.execute(
+                """
+                INSERT INTO external_user_links (
+                  external_user_ref, person_id, created_at_ms
+                )
+                VALUES (?, ?, ?)
+                """,
+                (external_user_ref, person_id, now_ms),
+            )
+            return
+        self.connection.execute(
+            """
+            UPDATE external_user_links
+            SET created_at_ms = ?
+            WHERE external_user_ref = ? AND person_id = ?
+            """,
+            (now_ms, external_user_ref, person_id),
         )
 
     def _insert_person_embedding_rows(

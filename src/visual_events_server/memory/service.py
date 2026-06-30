@@ -881,12 +881,23 @@ class AppMemoryService:
                 crop_hash=crop_hash,
                 payload=embedding_bytes,
             )
+            external_user_ref = _optional_text(profile.get("external_user_ref"))
+            evidence = self._target_evidence(
+                cached,
+                target,
+                crop_hash=crop_hash,
+                crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                embedding=embedding,
+                person_embedding_candidate=embedding_candidate,
+                interaction_snapshot=interaction_snapshot,
+            )
             try:
                 created = self.store.create_person_with_embedding(
                     person_id=person_id,
                     display_name=display_name,
                     description=description,
                     tags=tags,
+                    external_user_ref=external_user_ref,
                     embedding=embedding,
                     source_target_type=target.source_target_mode,
                     source_track_ref=_source_track_ref(cached, target),
@@ -897,24 +908,43 @@ class AppMemoryService:
                     resolution_reason=target.source_target_mode,
                     now_ms=now_ms,
                 )
+            except MemoryStoreError as exc:
+                self._delete_embedding_artifact(crop_path_or_artifact_ref)
+                if exc.code == "external_user_ref_conflict":
+                    raise self._teach_created_external_ref_conflict_error(
+                        evidence=evidence,
+                        store_before=store_before,
+                        external_user_ref=str(
+                            exc.details.get("external_user_ref")
+                            or external_user_ref
+                            or ""
+                        ),
+                        external_user_person_id=str(
+                            exc.details.get("external_user_person_id") or ""
+                        ),
+                    ) from exc
+                raise
             except Exception:
                 self._delete_embedding_artifact(crop_path_or_artifact_ref)
                 raise
+            person_profile = self.store.get_person_profile(created["person_id"])
+            if person_profile is None:
+                person_profile = {
+                    "person_id": created["person_id"],
+                    "display_name": display_name,
+                    "description": description,
+                    "tags": list(tags),
+                }
             return {
                 "ok": True,
+                "outcome": "created_person",
                 "person_id": created["person_id"],
                 "embedding_id": created["embedding_id"],
                 "embedding_count": 1,
                 "target_quality": target.quality,
-                "evidence": self._target_evidence(
-                    cached,
-                    target,
-                    crop_hash=crop_hash,
-                    crop_path_or_artifact_ref=crop_path_or_artifact_ref,
-                    embedding=embedding,
-                    person_embedding_candidate=embedding_candidate,
-                    interaction_snapshot=interaction_snapshot,
-                ),
+                "evidence": evidence,
+                "profile": person_profile,
+                "store_delta": self._store_delta(store_before),
             }
         finally:
             await self._exit_teach_request()
@@ -2673,6 +2703,28 @@ class AppMemoryService:
                 "error_code": "person_teach_conflict",
                 "outcome": "conflict",
                 "matched_anonymous_id": matched_anonymous_id,
+                "external_user_ref": external_user_ref,
+                "external_user_person_id": external_user_person_id,
+                "evidence": evidence,
+                "store_delta": self._store_delta(store_before),
+            },
+        )
+
+    def _teach_created_external_ref_conflict_error(
+        self,
+        *,
+        evidence: dict[str, Any],
+        store_before: dict[str, int],
+        external_user_ref: str,
+        external_user_person_id: str,
+    ) -> MemoryServiceError:
+        return MemoryServiceError(
+            "person_teach_conflict",
+            "external_user_ref is already linked to a different person",
+            status_code=409,
+            details={
+                "error_code": "person_teach_conflict",
+                "outcome": "conflict",
                 "external_user_ref": external_user_ref,
                 "external_user_person_id": external_user_person_id,
                 "evidence": evidence,

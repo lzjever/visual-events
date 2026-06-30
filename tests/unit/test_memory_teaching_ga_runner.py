@@ -281,6 +281,99 @@ def test_teach_person_helper_accepts_server_side_anonymous_auto_merge() -> None:
     )
 
 
+def test_teach_person_helper_does_not_synthesize_created_outcome_when_missing() -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "person_id": "person_from_teach",
+            }
+
+    class FakeClient:
+        def post(self, endpoint: str, json: dict[str, Any]) -> FakeResponse:
+            assert endpoint == "/v1/memory/teach/person"
+            return FakeResponse()
+
+    records: list[dict[str, Any]] = []
+    result = module._post_teach_person_with_optional_anonymous_merge(
+        runner=SimpleNamespace(client=FakeClient()),
+        api_response_records=records,
+        payload_index="pic_teach_person:teach",
+        scene="pic_teach_person",
+        endpoint="/v1/memory/teach/person",
+        payload={
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "third_person_introduction",
+                "referent_text": "这位/彭刚",
+            },
+            "profile": {"display_name": "彭刚"},
+        },
+        operation="teach_person_third_person",
+    )
+
+    assert result["status_code"] == 200
+    assert result["body"] == {
+        "ok": True,
+        "person_id": "person_from_teach",
+    }
+    assert "teach_person_outcome" not in result["body"]
+    assert records[0]["response"] == {
+        "ok": True,
+        "person_id": "person_from_teach",
+    }
+
+
+def test_teach_person_helper_reports_explicit_created_outcome() -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "ok": True,
+                "outcome": "created_person",
+                "person_id": "person_from_teach",
+                "profile": {
+                    "person_id": "person_from_teach",
+                    "display_name": "彭刚",
+                    "description": "",
+                    "tags": [],
+                },
+                "store_delta": {"before": {}, "after": {}, "delta": {}},
+            }
+
+    class FakeClient:
+        def post(self, endpoint: str, json: dict[str, Any]) -> FakeResponse:
+            assert endpoint == "/v1/memory/teach/person"
+            return FakeResponse()
+
+    result = module._post_teach_person_with_optional_anonymous_merge(
+        runner=SimpleNamespace(client=FakeClient()),
+        api_response_records=[],
+        payload_index="pic_teach_person:teach",
+        scene="pic_teach_person",
+        endpoint="/v1/memory/teach/person",
+        payload={
+            "camera": "front",
+            "target": {
+                "kind": "person",
+                "intent": "third_person_introduction",
+                "referent_text": "这位/彭刚",
+            },
+            "profile": {"display_name": "彭刚"},
+        },
+        operation="teach_person_third_person",
+    )
+
+    assert result["body"]["outcome"] == "created_person"
+    assert result["body"]["teach_person_outcome"] == "created_person"
+    assert result["body"]["profile"]["display_name"] == "彭刚"
+    assert "store_delta" in result["body"]
+
+
 def test_teach_person_helper_keeps_non_anonymous_409_failed() -> None:
     posts: list[dict[str, Any]] = []
 
@@ -379,6 +472,18 @@ def test_teach_person_report_fields_promote_person_visual_evidence() -> None:
     )
 
     assert fields == {"person_visual_evidence": person_visual_evidence}
+
+
+def test_teach_person_report_fields_keep_explicit_created_outcome() -> None:
+    assert module._teach_person_report_fields(
+        {
+            "status_code": 200,
+            "body": {"ok": True, "teach_person_outcome": "created_person"},
+        }
+    ) == {"teach_person_outcome": "created_person"}
+    assert module._teach_person_report_fields(
+        {"status_code": 200, "body": {"ok": True}}
+    ) == {}
 
 
 def test_memory_e2e_runner_generates_public_rest_payloads_without_low_level_fields() -> None:

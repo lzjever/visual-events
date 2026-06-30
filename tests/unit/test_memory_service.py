@@ -841,6 +841,159 @@ async def test_teach_person_persists_embedding_provenance_for_resolved_target(tm
 
 
 @pytest.mark.asyncio
+async def test_teach_person_created_response_includes_contract_profile_and_store_delta(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = FaceMetadataEmbeddingBackend(person_vector=vector)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+
+    created = await subject.teach_person(
+        {
+            "camera": "front",
+            "stream_ref": "ws_1",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {
+                "display_name": "张三",
+                "description": "店员",
+                "tags": ["staff", "vip"],
+            },
+        }
+    )
+
+    assert created["ok"] is True
+    assert created["outcome"] == "created_person"
+    assert created["person_id"].startswith("person_")
+    assert created["embedding_id"].startswith("emb_person_")
+    assert created["embedding_count"] == 1
+    assert created["target_quality"] == "usable"
+    assert created["evidence"]["source_frame_ref"] == "front:1:1000"
+    assert created["profile"] == {
+        "person_id": created["person_id"],
+        "display_name": "张三",
+        "description": "店员",
+        "tags": ["staff", "vip"],
+    }
+    assert subject.store.get_person_profile(created["person_id"]) == created[
+        "profile"
+    ]
+    assert created["store_delta"]["delta"]["person_profiles"] == 1
+    assert created["store_delta"]["delta"]["person_embeddings"] == 1
+    assert created["store_delta"]["delta"]["person_embedding_vectors"] == 1
+    assert created["store_delta"]["delta"]["embedding_provenance"] == 1
+    assert created["store_delta"]["delta"]["external_user_links"] == 0
+    assert _store_counts(subject.store) == created["store_delta"]["after"]
+
+
+@pytest.mark.asyncio
+async def test_teach_person_created_external_ref_binds_in_create_transaction(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = FaceMetadataEmbeddingBackend(person_vector=vector)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+
+    created = await subject.teach_person(
+        {
+            "camera": "front",
+            "stream_ref": "ws_1",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {
+                "display_name": "张三",
+                "external_user_ref": "wechat:zhangsan",
+            },
+        }
+    )
+
+    assert created["outcome"] == "created_person"
+    assert created["profile"] == {
+        "person_id": created["person_id"],
+        "display_name": "张三",
+        "description": "",
+        "tags": [],
+    }
+    assert subject.store.get_person_by_external_user("wechat:zhangsan") == created[
+        "profile"
+    ]
+    assert created["store_delta"]["delta"]["person_profiles"] == 1
+    assert created["store_delta"]["delta"]["person_embeddings"] == 1
+    assert created["store_delta"]["delta"]["embedding_provenance"] == 1
+    assert created["store_delta"]["delta"]["external_user_links"] == 1
+    assert _store_counts(subject.store) == created["store_delta"]["after"]
+
+
+@pytest.mark.asyncio
+async def test_teach_person_created_external_ref_bound_elsewhere_conflicts_without_write_or_artifact(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = FaceMetadataEmbeddingBackend(person_vector=vector)
+    subject = service(tmp_path, embedding_backend=backend)
+    subject.store.upsert_person_profile(
+        person_id="person_other",
+        display_name="另一个人",
+        description="",
+        tags=(),
+        now_ms=10_000,
+    )
+    subject.store.link_external_user(
+        person_id="person_other",
+        external_user_ref="wechat:zhangsan",
+        now_ms=10_000,
+    )
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+    before_counts = _store_counts(subject.store)
+
+    with pytest.raises(MemoryServiceError) as exc:
+        await subject.teach_person(
+            {
+                "camera": "front",
+                "stream_ref": "ws_1",
+                "target": {"mode": "track_id", "track_id": 7},
+                "profile": {
+                    "display_name": "张三",
+                    "external_user_ref": "wechat:zhangsan",
+                },
+            }
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.code == "person_teach_conflict"
+    assert exc.value.details["outcome"] == "conflict"
+    assert exc.value.details["external_user_ref"] == "wechat:zhangsan"
+    assert exc.value.details["external_user_person_id"] == "person_other"
+    assert exc.value.details["evidence"]["source_frame_ref"] == "front:1:1000"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
+    assert _store_counts(subject.store) == before_counts
+    assert subject.store.get_person_by_external_user("wechat:zhangsan")[
+        "person_id"
+    ] == "person_other"
+    artifact_dir = tmp_path / "runtime" / "memory" / "artifacts"
+    if artifact_dir.exists():
+        assert [path for path in artifact_dir.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
 async def test_teach_person_response_includes_minimal_person_visual_evidence(
     tmp_path,
 ):
