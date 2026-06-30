@@ -234,6 +234,49 @@ class FailingMemoryService(FakeMemoryService):
         raise RuntimeError("memory worker unavailable")
 
 
+class EnrichingMemoryService(FakeMemoryService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.enrich_calls: list[dict[str, Any]] = []
+
+    def enrich_visual_state_event_identities(
+        self,
+        *,
+        connection_id: str,
+        visual_state: dict[str, Any],
+    ) -> None:
+        semantic_events = visual_state.get("semantic_events")
+        event_names = (
+            [
+                event.get("event")
+                for event in semantic_events
+                if isinstance(event, dict)
+            ]
+            if isinstance(semantic_events, list)
+            else []
+        )
+        self.enrich_calls.append(
+            {
+                "connection_id": connection_id,
+                "event_names": event_names,
+            }
+        )
+        if not isinstance(semantic_events, list):
+            return
+        for event in semantic_events:
+            if isinstance(event, dict):
+                event["identity_context"] = {
+                    "status": "known_person",
+                    "source": "cache",
+                    "person": {
+                        "person_id": "person_000001",
+                        "display_name": "张三",
+                        "description": "",
+                        "tags": [],
+                    },
+                }
+
+
 def test_memory_http_endpoints_delegate_to_app_level_service():
     service = FakeMemoryService()
     client = TestClient(create_app(memory_service=service))
@@ -787,6 +830,42 @@ def test_stream_observes_visual_state_and_drains_completed_memory_events():
     ]
 
 
+def test_stream_enriches_existing_person_events_before_appending_memory_events():
+    service = EnrichingMemoryService()
+    appended_memory_event = memory_event()
+    service.completed_by_camera["front"] = [appended_memory_event]
+    client = TestClient(
+        create_app(processor=PersonEventVisualProcessor(), memory_service=service)
+    )
+
+    with client.websocket_connect("/v1/stream") as websocket:
+        websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
+        message = json.loads(websocket.receive_text())
+
+    semantic_events = message["semantic_events"]
+    assert [event["event"] for event in semantic_events] == [
+        "person_waving",
+        "known_person_present",
+    ]
+    assert semantic_events[0]["identity_context"] == {
+        "status": "known_person",
+        "source": "cache",
+        "person": {
+            "person_id": "person_000001",
+            "display_name": "张三",
+            "description": "",
+            "tags": [],
+        },
+    }
+    assert "identity_context" not in semantic_events[1]
+    assert service.enrich_calls == [
+        {
+            "connection_id": service.observed[0]["connection_id"],
+            "event_names": ["person_waving"],
+        }
+    ]
+
+
 def test_stream_passes_memory_snapshot_side_channel_to_memory_service():
     service = FakeMemoryService()
     client = TestClient(create_app(processor=MemoryVisualProcessor(), memory_service=service))
@@ -992,6 +1071,23 @@ class MemoryVisualProcessor:
         snapshot = self._memory_snapshot
         self._memory_snapshot = None
         return snapshot
+
+
+class PersonEventVisualProcessor(MemoryVisualProcessor):
+    async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
+        visual_state = await super().process_frame(frame)
+        visual_state["semantic_events"] = [
+            {
+                "type": "semantic_event",
+                "event_id": "front:evt_000001",
+                "event": "person_waving",
+                "camera": frame.camera,
+                "track_id": 7,
+                "confidence": 0.79,
+                "lifecycle_state": "confirmed",
+            }
+        ]
+        return visual_state
 
 
 class BrokenSnapshotProcessor(MemoryVisualProcessor):

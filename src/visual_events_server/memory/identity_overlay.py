@@ -152,6 +152,35 @@ class IdentityOverlay:
             context["active_target"] = {"track_id": active_target}
         return context
 
+    def identity_for_track(
+        self,
+        *,
+        connection_id: str,
+        camera: str,
+        track_id: int | None,
+        source: str = "cache",
+    ) -> dict[str, Any] | None:
+        if track_id is None:
+            return None
+        with self._lock:
+            self.purge()
+            now_ms = self._clock_ms()
+            record = self._records.get((connection_id, camera, int(track_id)))
+            if record is None:
+                return None
+            if record.status not in {"known_person", "familiar_unknown"}:
+                return None
+            identity = _identity_base(
+                status=record.status,
+                source=source,
+                confidence=record.confidence,
+                person=record.person,
+                anonymous_person=record.anonymous_person,
+                reason=record.reason,
+            )
+            identity["fresh_ms"] = max(0, int(now_ms - record.observed_at_ms))
+            return identity
+
     def purge(self) -> None:
         with self._lock:
             now_ms = self._clock_ms()

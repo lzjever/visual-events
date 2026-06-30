@@ -39,6 +39,7 @@ from .frame_cache import (
 )
 from .identity_overlay import (
     IdentityOverlay,
+    _visible_person_track_ids,
     familiar_unknown_identity_context,
     known_person_identity_context,
     unavailable_person_identity_context,
@@ -60,6 +61,13 @@ _PERSON_EMBEDDING_CROP_MARGIN_RATIO = 0.10
 _PERSON_EMBEDDING_CONTEXT_MARGIN_RATIO = 0.50
 _MAX_PERSON_QUERY_TRACKS = 4
 _REQUIRED_POSE_SNAPSHOT_COUNT = 2
+_MEMORY_SEMANTIC_EVENTS = frozenset(
+    {
+        "known_person_present",
+        "familiar_unknown_present",
+        "scene_activated",
+    }
+)
 _RECOGNITION_ELIGIBILITY_POLICY = (
     "class_name == 'person' and lost_ms == 0 and hits > 0"
 )
@@ -345,6 +353,38 @@ class AppMemoryService:
             camera=camera,
             visual_state=visual_state,
         )
+
+    def enrich_visual_state_event_identities(
+        self,
+        *,
+        connection_id: str,
+        visual_state: dict[str, Any],
+    ) -> None:
+        semantic_events = visual_state.get("semantic_events")
+        if not isinstance(semantic_events, list):
+            return
+        visible_track_ids = set(_visible_person_track_ids(visual_state))
+        if not visible_track_ids:
+            return
+        camera = str(visual_state.get("camera") or "")
+        for event in semantic_events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("event") in _MEMORY_SEMANTIC_EVENTS:
+                continue
+            track_id = event.get("track_id")
+            if type(track_id) is not int:
+                continue
+            if track_id not in visible_track_ids:
+                continue
+            identity = self._identity_overlay.identity_for_track(
+                connection_id=connection_id,
+                camera=camera,
+                track_id=track_id,
+                source="cache",
+            )
+            if identity is not None:
+                event["identity_context"] = identity
 
     async def identify_current(self, request: dict[str, Any]) -> dict[str, Any]:
         camera = _required_text(request, "camera")

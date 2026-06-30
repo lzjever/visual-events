@@ -257,6 +257,151 @@ def test_overlay_source_override_public_shape_and_redaction() -> None:
     assert "crop" not in str(projected)
 
 
+def test_identity_for_track_returns_only_public_cache_hit_identities() -> None:
+    now = 5_000
+    overlay = IdentityOverlay(ttl_ms=1_000, clock_ms=lambda: now)
+    overlay.put_known_person(
+        connection_id="ws_a",
+        camera="front",
+        track_id=7,
+        person_profile={
+            "person_id": "person_1",
+            "display_name": "张三",
+            "description": "店长",
+            "tags": ["staff"],
+            "bbox_xyxy": [1, 2, 3, 4],
+            "keypoints": [{"name": "nose"}],
+            "embedding": [1.0, 0.0],
+            "crop_ref": "runtime/private/crop.jpg",
+            "stream_ref": "ws_a",
+        },
+        match=match(),
+        source="background_recall",
+    )
+    overlay.put_familiar_unknown(
+        connection_id="ws_a",
+        camera="front",
+        track_id=8,
+        anonymous_profile={
+            "anonymous_id": "anon_1",
+            "seen_count": 4,
+            "observed_duration_ms": 3_500,
+            "familiar_score": 0.88,
+            "bbox_xyxy": [1, 2, 3, 4],
+            "keypoints": [{"name": "nose"}],
+            "embedding": [1.0, 0.0],
+            "crop_ref": "runtime/private/crop.jpg",
+            "stream_ref": "ws_a",
+        },
+        match=match(
+            matched_type="anonymous_person",
+            matched_id="anon_1",
+            score=0.88,
+        ),
+    )
+    overlay.put_unknown(
+        connection_id="ws_a",
+        camera="front",
+        track_id=9,
+        reason="not_familiar",
+    )
+    overlay.put_unavailable(
+        connection_id="ws_a",
+        camera="front",
+        track_id=10,
+        reason="no_usable_face",
+    )
+
+    known = overlay.identity_for_track(
+        connection_id="ws_a",
+        camera="front",
+        track_id=7,
+    )
+    familiar = overlay.identity_for_track(
+        connection_id="ws_a",
+        camera="front",
+        track_id=8,
+    )
+
+    assert known == {
+        "status": "known_person",
+        "source": "cache",
+        "fresh_ms": 0,
+        "confidence": 0.91,
+        "person": {
+            "person_id": "person_1",
+            "display_name": "张三",
+            "description": "店长",
+            "tags": ["staff"],
+        },
+    }
+    assert familiar == {
+        "status": "familiar_unknown",
+        "source": "cache",
+        "fresh_ms": 0,
+        "confidence": 0.88,
+        "anonymous_person": {
+            "anonymous_id": "anon_1",
+            "seen_count": 4,
+            "observed_duration_ms": 3_500,
+            "familiar_score": 0.88,
+        },
+    }
+    assert (
+        overlay.identity_for_track(
+            connection_id="ws_a",
+            camera="front",
+            track_id=9,
+        )
+        is None
+    )
+    assert (
+        overlay.identity_for_track(
+            connection_id="ws_a",
+            camera="front",
+            track_id=10,
+        )
+        is None
+    )
+    assert (
+        overlay.identity_for_track(
+            connection_id="ws_a",
+            camera="front",
+            track_id=11,
+        )
+        is None
+    )
+    assert (
+        overlay.identity_for_track(
+            connection_id="ws_b",
+            camera="front",
+            track_id=7,
+        )
+        is None
+    )
+    assert "bbox_xyxy" not in str(known)
+    assert "keypoints" not in str(known)
+    assert "embedding" not in str(known)
+    assert "crop" not in str(known)
+    assert "stream_ref" not in str(known)
+    assert "bbox_xyxy" not in str(familiar)
+    assert "keypoints" not in str(familiar)
+    assert "embedding" not in str(familiar)
+    assert "crop" not in str(familiar)
+    assert "stream_ref" not in str(familiar)
+
+    now = 6_001
+
+    assert (
+        overlay.identity_for_track(
+            connection_id="ws_a",
+            camera="front",
+            track_id=7,
+        )
+        is None
+    )
+
+
 def test_rejects_invalid_overlay_inputs() -> None:
     with pytest.raises(ValueError, match="ttl_ms"):
         IdentityOverlay(ttl_ms=0, clock_ms=lambda: 0)

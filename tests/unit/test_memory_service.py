@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw
 from visual_events_server.memory import AppMemoryService, MemoryServiceError
 from visual_events_server.memory.embedding import EmbeddingResult, EmbeddingUnavailable
 from visual_events_server.memory.embedding import FakeEmbeddingBackend
+from visual_events_server.memory.events import MemoryMatch
 from visual_events_server.memory.frame_cache import MemoryFrameSnapshot
 from visual_events_server.memory.service import (
     _person_embedding_input_candidates,
@@ -3452,6 +3453,265 @@ async def test_known_person_background_query_updates_identity_overlay_even_when_
     assert identity_context["tracks"][0]["identity"]["fresh_ms"] == 0
 
 
+def test_enrich_visual_state_event_identities_adds_known_person_from_cache(
+    tmp_path,
+) -> None:
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    subject._identity_overlay.put_known_person(  # noqa: SLF001
+        connection_id="ws_1",
+        camera="front",
+        track_id=7,
+        person_profile={
+            "person_id": "person_seeded",
+            "display_name": "张三",
+            "description": "店长",
+            "tags": ["staff"],
+            "bbox_xyxy": [1, 2, 3, 4],
+            "keypoints": [{"name": "nose"}],
+            "embedding": [1.0, 0.0],
+            "crop_ref": "runtime/private/crop.jpg",
+            "stream_ref": "ws_1",
+        },
+        match=_memory_match(score=0.91),
+    )
+    state = visual_state()
+    event = {
+        "type": "semantic_event",
+        "event_id": "front:evt_000001",
+        "event": "person_waving",
+        "camera": "front",
+        "track_id": 7,
+        "confidence": 0.73,
+        "lifecycle_state": "confirmed",
+    }
+    state["semantic_events"] = [event]
+    before_counts = _store_counts(subject.store)
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+
+    assert event["event_id"] == "front:evt_000001"
+    assert event["event"] == "person_waving"
+    assert event["lifecycle_state"] == "confirmed"
+    assert event["confidence"] == 0.73
+    assert event["identity_context"] == {
+        "status": "known_person",
+        "source": "cache",
+        "fresh_ms": 0,
+        "confidence": 0.91,
+        "person": {
+            "person_id": "person_seeded",
+            "display_name": "张三",
+            "description": "店长",
+            "tags": ["staff"],
+        },
+    }
+    _assert_event_identity_redacted(event["identity_context"])
+    assert _store_counts(subject.store) == before_counts
+    assert backend.person_inputs == []
+    assert backend.scene_inputs == []
+    assert subject._pending_queries_by_stream == {}  # noqa: SLF001
+
+
+def test_enrich_visual_state_event_identities_adds_familiar_unknown_from_cache(
+    tmp_path,
+) -> None:
+    subject = service(tmp_path)
+    subject._identity_overlay.put_familiar_unknown(  # noqa: SLF001
+        connection_id="ws_1",
+        camera="front",
+        track_id=7,
+        anonymous_profile={
+            "anonymous_id": "anon_seeded",
+            "seen_count": 5,
+            "observed_duration_ms": 4_200,
+            "familiar_score": 0.88,
+            "bbox_xyxy": [1, 2, 3, 4],
+            "keypoints": [{"name": "nose"}],
+            "embedding": [1.0, 0.0],
+            "crop_ref": "runtime/private/crop.jpg",
+            "stream_ref": "ws_1",
+        },
+        match=_memory_match(
+            matched_type="anonymous_person",
+            matched_id="anon_seeded",
+            score=0.88,
+        ),
+    )
+    state = visual_state()
+    event = {
+        "type": "semantic_event",
+        "event_id": "front:evt_000002",
+        "event": "person_approaching_robot",
+        "camera": "front",
+        "track_id": 7,
+        "confidence": 0.81,
+        "lifecycle_state": "confirmed",
+    }
+    state["semantic_events"] = [event]
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+
+    assert event["identity_context"] == {
+        "status": "familiar_unknown",
+        "source": "cache",
+        "fresh_ms": 0,
+        "confidence": 0.88,
+        "anonymous_person": {
+            "anonymous_id": "anon_seeded",
+            "seen_count": 5,
+            "observed_duration_ms": 4_200,
+            "familiar_score": 0.88,
+        },
+    }
+    _assert_event_identity_redacted(event["identity_context"])
+
+
+def test_enrich_visual_state_event_identities_leaves_miss_unknown_and_unavailable(
+    tmp_path,
+) -> None:
+    subject = service(tmp_path)
+    subject._identity_overlay.put_unknown(  # noqa: SLF001
+        connection_id="ws_1",
+        camera="front",
+        track_id=7,
+        reason="not_familiar",
+    )
+    subject._identity_overlay.put_unavailable(  # noqa: SLF001
+        connection_id="ws_1",
+        camera="front",
+        track_id=8,
+        reason="no_usable_face",
+    )
+    state = visual_state()
+    state["tracks"] = [
+        {**state["tracks"][0], "track_id": 7},
+        {**state["tracks"][0], "track_id": 8},
+        {**state["tracks"][0], "track_id": 9},
+    ]
+    events = [
+        {"event": "person_waving", "track_id": 7, "event_id": "unknown"},
+        {"event": "person_approaching_robot", "track_id": 8, "event_id": "unavailable"},
+        {"event": "person_waving", "track_id": 9, "event_id": "miss"},
+    ]
+    state["semantic_events"] = events
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+
+    assert [event["event_id"] for event in state["semantic_events"]] == [
+        "unknown",
+        "unavailable",
+        "miss",
+    ]
+    assert all("identity_context" not in event for event in events)
+
+
+def test_enrich_visual_state_event_identities_is_stream_scoped_for_same_camera(
+    tmp_path,
+) -> None:
+    subject = service(tmp_path)
+    subject._identity_overlay.put_known_person(  # noqa: SLF001
+        connection_id="ws_a",
+        camera="front",
+        track_id=7,
+        person_profile={
+            "person_id": "person_ws_a",
+            "display_name": "张三",
+            "description": "",
+            "tags": [],
+        },
+        match=_memory_match(),
+    )
+    other_stream_state = visual_state()
+    other_stream_state["semantic_events"] = [
+        {"event": "person_waving", "track_id": 7, "event_id": "ws_b_event"}
+    ]
+    same_stream_state = visual_state()
+    same_stream_state["semantic_events"] = [
+        {"event": "person_waving", "track_id": 7, "event_id": "ws_a_event"}
+    ]
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_b",
+        visual_state=other_stream_state,
+    )
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_a",
+        visual_state=same_stream_state,
+    )
+
+    assert "identity_context" not in other_stream_state["semantic_events"][0]
+    assert (
+        same_stream_state["semantic_events"][0]["identity_context"]["person"][
+            "person_id"
+        ]
+        == "person_ws_a"
+    )
+
+
+def test_enrich_visual_state_event_identities_skips_memory_events(tmp_path) -> None:
+    subject = service(tmp_path)
+    subject._identity_overlay.put_known_person(  # noqa: SLF001
+        connection_id="ws_1",
+        camera="front",
+        track_id=7,
+        person_profile={
+            "person_id": "person_seeded",
+            "display_name": "张三",
+            "description": "",
+            "tags": [],
+        },
+        match=_memory_match(),
+    )
+    state = visual_state()
+    events = [
+        {
+            "event": "known_person_present",
+            "track_id": 7,
+            "identity_context": {"status": "do_not_rewrite"},
+        },
+        {
+            "event": "familiar_unknown_present",
+            "track_id": 7,
+        },
+        {
+            "event": "scene_activated",
+            "identity_context": {"status": "scene_identity"},
+        },
+    ]
+    state["semantic_events"] = events
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+
+    assert events == [
+        {
+            "event": "known_person_present",
+            "track_id": 7,
+            "identity_context": {"status": "do_not_rewrite"},
+        },
+        {
+            "event": "familiar_unknown_present",
+            "track_id": 7,
+        },
+        {
+            "event": "scene_activated",
+            "identity_context": {"status": "scene_identity"},
+        },
+    ]
+
+
 @pytest.mark.asyncio
 async def test_familiar_anonymous_overlay_requires_seen_count_duration_and_score(tmp_path):
     now = 10_000
@@ -4245,6 +4505,29 @@ def _assert_identify_current_identity_context_shape(identity: dict[str, Any]) ->
     assert set(identity) == {"status", "source"}
 
 
+def _assert_event_identity_redacted(identity: dict[str, Any]) -> None:
+    forbidden_low_level_keys = {
+        "bbox",
+        "bbox_xyxy",
+        "keypoints",
+        "embedding",
+        "crop",
+        "crop_ref",
+        "stream_ref",
+    }
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                assert str(key) not in forbidden_low_level_keys
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(identity)
+
+
 def _assert_zero_store_delta(store_delta: dict) -> None:
     assert {
         "embedding_provenance",
@@ -4269,6 +4552,25 @@ def _unit_vector(index: int, *, dim: int = 8) -> tuple[float, ...]:
     vector = [0.0] * dim
     vector[index] = 1.0
     return tuple(vector)
+
+
+def _memory_match(
+    *,
+    matched_type: str = "person",
+    matched_id: str = "person_seeded",
+    score: float = 0.91,
+) -> MemoryMatch:
+    return MemoryMatch(
+        memory_match_id="match_seeded",
+        matched_type=matched_type,
+        matched_id=matched_id,
+        embedding_id="emb_seeded",
+        match_type="face",
+        match_score=score,
+        top2_margin=0.2,
+        embedding_model="fake-face",
+        embedding_version="v1",
+    )
 
 
 def _seed_person(

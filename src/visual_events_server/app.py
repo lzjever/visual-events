@@ -493,6 +493,11 @@ async def _attach_memory_events(
         visual_state=visual_state,
         fallback_reason=None,
     )
+    _enrich_visual_state_event_identities(
+        memory_service,
+        connection_id=connection_id,
+        visual_state=visual_state,
+    )
     if not completed_events:
         return visual_state
 
@@ -525,6 +530,25 @@ def _attach_identity_context(
         identity_context = unavailable_identity_context(fallback_reason)
     if isinstance(identity_context, dict):
         visual_state["identity_context"] = identity_context
+
+
+def _enrich_visual_state_event_identities(
+    memory_service: MemoryService,
+    *,
+    connection_id: str,
+    visual_state: dict[str, Any],
+) -> None:
+    enrich_events = getattr(
+        memory_service,
+        "enrich_visual_state_event_identities",
+        None,
+    )
+    if not callable(enrich_events):
+        return
+    try:
+        enrich_events(connection_id=connection_id, visual_state=visual_state)
+    except Exception:
+        return
 
 
 def _take_memory_frame_snapshot(processor_session: Any) -> Any | None:
