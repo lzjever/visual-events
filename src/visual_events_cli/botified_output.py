@@ -822,7 +822,6 @@ def _visual_context(
     context = {
         "event_target": {
             "target_ref": _event_target_ref(event, visual_state, camera=camera),
-            "runtime_person_slot": _runtime_person_slot(event),
             "visible_now": _track_visible(track),
             "matches_attention_target": fresh_target
             and event.get("track_id") == target_track_id,
@@ -865,18 +864,15 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
         return {}
     allowed_by_event = {
         "person_appeared": (
-            "runtime_person_slot",
             "visible_duration_ms",
             "bbox_area_ratio",
             "salient_reason",
         ),
         "person_left": (
-            "runtime_person_slot",
             "lost_duration_ms",
             "last_bbox_area_ratio",
         ),
         "person_passing_by": (
-            "runtime_person_slot",
             "dx_ratio",
             "avg_vx_px_s",
             "crossed_side_bands",
@@ -884,7 +880,6 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
             "passing_speed_class",
         ),
         "person_approaching_robot": (
-            "runtime_person_slot",
             "bbox_area_ratio_start",
             "bbox_area_ratio_end",
             "area_growth_ratio",
@@ -892,14 +887,12 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
             "camera_motion_state",
         ),
         "person_stopped_near_robot": (
-            "runtime_person_slot",
             "bbox_area_ratio",
             "speed_px_s_p95",
             "stationary_duration_ms",
             "camera_motion_state",
         ),
         "person_waving": (
-            "runtime_person_slot",
             "wrist_x_span_px",
             "wrist_x_span_bbox_ratio",
             "wrist_y_relative_to_shoulder_px",

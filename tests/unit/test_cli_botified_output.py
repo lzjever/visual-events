@@ -573,7 +573,7 @@ def test_waving_frame_contains_parseable_visual_context_and_stable_top_level_pay
     assert set(context) == {"event_target", "trigger_evidence", "current_scene"}
     assert context["event_target"]["target_ref"] == "current:front:person:0"
     assert "track_id" not in context["event_target"]
-    assert context["event_target"]["runtime_person_slot"] == 3
+    assert "runtime_person_slot" not in context["event_target"]
     assert context["event_target"]["visible_now"] is True
     assert context["event_target"]["position"] in {"left", "center", "right"}
     assert context["event_target"]["size"] in {"far", "mid", "near"}
@@ -723,7 +723,6 @@ def test_trigger_evidence_only_contains_whitelisted_projection_fields():
         parse_botified_frame(frames[0], event_id="front:waving")
     )["trigger_evidence"]
     assert evidence == {
-        "runtime_person_slot": 3,
         "wrist_x_span_px": 84.0,
         "wrist_x_span_bbox_ratio": 0.42,
         "wrist_y_relative_to_shoulder_px": 18.0,
