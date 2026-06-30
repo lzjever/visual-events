@@ -1329,6 +1329,202 @@ def test_local_smoke_report_fails_insufficient_third_person_without_models(
     ] is False
 
 
+def test_local_smoke_runner_writes_visual_evidence_overlays_join_report_sections(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    _make_scene(
+        data_dir,
+        "pic_teach_me",
+        des_text="请你记住我，我是小李飞刀",
+        jpeg_bytes=_valid_jpeg_bytes((196, 64, 64)),
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_person",
+        des_text="这是彭刚，请你记住",
+        jpeg_bytes=_valid_jpeg_bytes((64, 180, 96)),
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        des_text="这是银河通用的办公室，请你记住",
+        jpeg_bytes=_valid_jpeg_bytes((220, 190, 72)),
+    )
+    person_model = tmp_path / "runtime" / "models" / "face-buffalo-s"
+    scene_model = tmp_path / "runtime" / "models" / "scene-mobileclip2-s0"
+    pose_model = tmp_path / "runtime" / "models" / "yolov8n-pose.pt"
+    person_model.mkdir(parents=True)
+    scene_model.mkdir(parents=True)
+    pose_model.parent.mkdir(parents=True, exist_ok=True)
+    pose_model.write_bytes(b"pose")
+    out = tmp_path / "artifacts" / "memory-teaching-ga-local-smoke"
+
+    self_result = {
+        "status": "passed",
+        "passed": True,
+        "person_id": "person_self",
+        "teach_crop_hash": "self_crop_hash",
+        "teach_crop_path_or_artifact_ref": "runtime/memory/artifacts/self.jpg",
+        "selected_window": {
+            "scene": "pic_teach_me",
+            "frame": str(data_dir / "pic_teach_me" / "img_000.jpeg"),
+        },
+        "events": [
+            {
+                "event": "known_person_present",
+                "event_id": "evt_self",
+                "evidence": {"memory_match_id": "match_self"},
+            }
+        ],
+    }
+    third_person_result = {
+        "status": "passed",
+        "passed": True,
+        "resolver_target_ref": "front:track:8",
+        "introducer_ref": "front:track:7",
+        "stored_embedding_source_track_ref": "front:track:8",
+        "stored_crop_hash": "third_crop_hash",
+        "stored_crop_path_or_artifact_ref": "runtime/memory/artifacts/third.jpg",
+        "selected_window": {
+            "scene": "pic_teach_person",
+            "frame": str(data_dir / "pic_teach_person" / "img_000.jpeg"),
+        },
+        "pose_pointing_scoring": {
+            "candidate_scores": [{"track_id": 8, "score": 0.93}]
+        },
+        "resolve_target": {
+            "status": "ok",
+            "evidence": {
+                "request_snapshot_ref": "memory_frame:front:42:1000",
+                "source_frame_ref": "front:42:1000",
+                "pose_stability_window": {
+                    "size": 3,
+                    "fresh_snapshot_count": 3,
+                    "required_pose_snapshot_count": 2,
+                    "selected_target_track_id": 8,
+                    "selected_arm_side": "left",
+                    "selected_count": 2,
+                    "failure_reason": None,
+                },
+            },
+            "candidates": [
+                {"track_id": 8, "bbox_xyxy": [144, 80, 360, 650]},
+            ],
+        },
+        "bounded_multi_person_recognition": {
+            "attention_target_only": False,
+            "tracks_seen": 2,
+            "tracks_eligible": 2,
+            "tracks_candidates": 2,
+            "candidate_track_ids": [7, 8],
+            "tracks_queried": 2,
+            "queried_track_ids": [7, 8],
+            "tracks_skipped_reason": {},
+            "attention_target_track_id": 7,
+            "max_tracks_per_tick": 4,
+            "query_interval_ms": 250,
+            "event_cooldown_ms": 2000,
+            "recognition_runs_in_executor": True,
+        },
+    }
+    scene_result = {
+        "status": "passed",
+        "passed": True,
+        "scene_id": "scene_galbot",
+        "teach_crop_hash": "scene_crop_hash",
+        "teach_crop_path_or_artifact_ref": "runtime/memory/artifacts/scene.jpg",
+        "selected_window": {
+            "scene": "pic_teach_scene_galbot",
+            "frame": str(data_dir / "pic_teach_scene_galbot" / "img_000.jpeg"),
+        },
+        "events": [
+            {
+                "event": "scene_activated",
+                "event_id": "evt_scene",
+                "evidence": {"memory_match_id": "match_scene"},
+            }
+        ],
+    }
+
+    def fake_execute(**_kwargs):
+        return {
+            "self_smoke": self_result,
+            "scene_smoke": scene_result,
+            "third_person_probe": third_person_result,
+            "api_response_records": [],
+            "botified_frame_records": [],
+        }
+
+    monkeypatch.setattr(module, "_execute_local_smoke", fake_execute)
+
+    exit_code = module.main(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--out",
+            str(out),
+            "--camera",
+            "front",
+            "--local-smoke",
+            "--embedding-backend",
+            "local",
+            "--person-model-path",
+            str(person_model),
+            "--scene-model-path",
+            str(scene_model),
+            "--inference-backend",
+            "ultralytics",
+            "--pose-model-path",
+            str(pose_model),
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    visual_evidence_index = report["visual_evidence_index"]
+    overlays_by_assertion = {
+        item["assertion_id"]: item
+        for item in visual_evidence_index
+        if item["kind"] == "image_overlay"
+    }
+    assert set(overlays_by_assertion) == {
+        "self_introduction_known_person",
+        "third_person_pose_pointing",
+        "teach_scene_scene_activated",
+    }
+    assert (
+        overlays_by_assertion["self_introduction_known_person"]["report_section"]
+        == "self_smoke"
+    )
+    third_overlay = overlays_by_assertion["third_person_pose_pointing"]
+    assert third_overlay["report_section"] == "third_person_probe"
+    assert third_overlay["request_snapshot_ref"] == "memory_frame:front:42:1000"
+    assert third_overlay["source_frame_ref"] == "front:42:1000"
+    assert third_overlay["candidate_score"] == 0.93
+    assert third_overlay["target_bbox_xyxy"] == [144.0, 80.0, 360.0, 650.0]
+    assert third_overlay["pose_stability_window"]["selected_count"] == 2
+    assert (
+        overlays_by_assertion["teach_scene_scene_activated"]["report_section"]
+        == "scene_smoke"
+    )
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["artifact_skeleton"]["passed"] is True
+    for item in overlays_by_assertion.values():
+        image_path = out / item["path"]
+        assert image_path.is_file()
+        _assert_image_verifies(image_path)
+
+    index_html = (out / "visual-evidence" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "third_person_probe" in index_html
+    assert "third-person-pose-pointing.jpg" in index_html
+    assert "object_unsupported_no_write" not in index_html
+
+
 def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
     tmp_path: Path,
     monkeypatch,
