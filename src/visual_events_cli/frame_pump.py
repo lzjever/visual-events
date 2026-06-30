@@ -63,7 +63,7 @@ class FramePump:
         self._stale_after_ms = int(stale_after_ms)
         self._clock_ms = clock_ms or _wall_clock_ms
         self._next_frame_id = 1
-        self._botified_mapper = BotifiedEventMapper()
+        self._botified_mapper = BotifiedEventMapper(clock_ms=self._clock_ms)
         self._last_metadata: dict[str, Any] | None = None
         self._last_fresh_publish_timestamp_ms: int | None = None
         self._last_sent_metadata: dict[str, Any] | None = None

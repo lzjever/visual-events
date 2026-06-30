@@ -2015,12 +2015,14 @@ class _CliBotifiedProjectionRecorder:
         self._writer = BotifiedStdoutWriter(stream=self._stream, max_queue_size=64)
         self._slot = LatestFrameSlot()
         self._service_client = _StaticVisualStateServiceClient()
+        self._clock_ms = 0
         self._pump = FramePump(
             latest_frame_slot=self._slot,
             service_client=self._service_client,
             gaze_publisher=_NoopGazePublisher(),
             head_motion_provider=lambda: HeadMotion(state="stationary"),
             botified_writer=self._writer,
+            clock_ms=lambda: self._clock_ms,
         )
 
     def record_visual_state(
@@ -2037,12 +2039,10 @@ class _CliBotifiedProjectionRecorder:
 
         self._service_client.visual_state = visual_state
         self._slot.push(_input_frame_from_visual_state(visual_state))
+        frame_timestamp_ms = _int_value(visual_state.get("frame_timestamp_ms"), 0)
+        self._clock_ms = frame_timestamp_ms
         stream_position = self._stream.tell()
-        asyncio.run(
-            self._pump.process_one(
-                now_ms=_int_value(visual_state.get("frame_timestamp_ms"), 0)
-            )
-        )
+        asyncio.run(self._pump.process_one(now_ms=frame_timestamp_ms))
         self._writer.drain_available()
 
         self._stream.seek(stream_position)

@@ -580,6 +580,39 @@ async def test_process_one_uses_clock_after_service_response_for_publish_timesta
 
 
 @pytest.mark.asyncio
+async def test_botified_visual_context_uses_frame_pump_clock_after_service_response():
+    module = import_frame_pump()
+    slot = module.LatestFrameSlot()
+    botified = FakeBotifiedWriter()
+    frame_timestamp_ms = 1710000000000
+    observed_ms = frame_timestamp_ms + 82
+    event = semantic_event(event_id="front:evt_clock", event="person_waving")
+    event["timestamp_ms"] = frame_timestamp_ms + 40
+    state = load_visual_state_tracking(
+        frame_id=1,
+        frame_timestamp_ms=frame_timestamp_ms,
+        semantic_events=[event],
+    )
+    service = FakeServiceClient([service_result(state)])
+    pump = make_pump(
+        module,
+        slot=slot,
+        service=service,
+        botified=botified,
+        clock_ms=lambda: observed_ms,
+    )
+
+    slot.push(make_frame(module, timestamp_ms=frame_timestamp_ms))
+    await pump.process_one(now_ms=frame_timestamp_ms)
+
+    assert len(botified.frames) == 1
+    payload = parse_botified_payload(botified.frames[0])
+    context = parse_visual_context(payload)
+    assert context["current_scene"]["frame_age_ms"] == 82
+    assert context["event_target"]["event_age_ms"] == 42
+
+
+@pytest.mark.asyncio
 async def test_current_visual_snapshot_uses_latest_service_visual_state_summary():
     module = import_frame_pump()
     slot = module.LatestFrameSlot()

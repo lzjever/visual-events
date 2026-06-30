@@ -73,6 +73,15 @@ def _records_by_scene(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return {record["scene"]: record for record in records}
 
 
+def _parse_botified_visual_context(payload: dict[str, Any]) -> dict[str, Any]:
+    request = payload["request"]
+    marker = "visual_context="
+    start = request.index(marker) + len(marker)
+    wrapper, end = json.JSONDecoder().raw_decode(request[start:])
+    assert request[start + end :].strip() == ""
+    return wrapper["visual_context"]
+
+
 def _pose_pointing_scoring(*, score_margin: float = 0.5) -> dict[str, Any]:
     return {
         "arm_side": "left",
@@ -1154,8 +1163,28 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert any(
         "visual_context=" in frame["payload"]["request"] for frame in botified_frames
     )
+    botified_context_pairs = [
+        (frame, _parse_botified_visual_context(frame["payload"]))
+        for frame in botified_frames
+        if "visual_context=" in frame["payload"]["request"]
+    ]
+    assert botified_context_pairs
+    assert all(
+        0 <= context["current_scene"]["frame_age_ms"] < 5000
+        for _frame, context in botified_context_pairs
+    )
+    assert all(
+        0 <= context["event_target"]["event_age_ms"] < 5000
+        for _frame, context in botified_context_pairs
+    )
     event_names = {frame["event"] for frame in botified_frames}
     assert {"known_person_present", "scene_activated"} <= event_names
+    waving_context = next(
+        context
+        for frame, context in botified_context_pairs
+        if frame["event"] == "person_waving"
+    )
+    assert waving_context["trigger_evidence"] == {"wave_duration_ms": 900}
 
 
 def test_actual_api_response_gate_fails_identify_current_failure(
