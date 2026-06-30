@@ -109,13 +109,35 @@ def test_pose_pointing_resolves_third_person_candidate() -> None:
     assert scoring["checks"]["margin_ok"] is True
     candidate_scores = scoring["candidate_scores"]
     assert candidate_scores[0]["track_id"] == 2
+    assert candidate_scores[0]["bbox_xyxy"] == [500.0, 170.0, 650.0, 420.0]
     assert {
         "score",
         "arm_side",
+        "bbox_xyxy",
         "perpendicular_distance",
         "ray_intersects_bbox",
     } <= set(candidate_scores[0])
     assert preview.evidence["pose_pointing_scoring"] == scoring
+    visual = preview.evidence["pose_visual_evidence"]
+    assert visual["coordinate_space"] == "source_frame"
+    assert visual["introducer_track_id"] == 1
+    assert visual["introducer_bbox_xyxy"] == [100.0, 100.0, 300.0, 500.0]
+    assert visual["target_track_id"] == 2
+    assert visual["target_bbox_xyxy"] == [500.0, 170.0, 650.0, 420.0]
+    assert visual["arm_side"] == "left"
+    assert visual["shoulder_xy"] == [180.0, 220.0]
+    assert visual["elbow_xy"] == [300.0, 250.0]
+    assert visual["wrist_xy"] == [380.0, 260.0]
+    assert visual["ray_start_xy"] == [380.0, 260.0]
+    assert visual["ray_end_xy"][0] > visual["ray_start_xy"][0]
+    assert visual["candidate_scores"][0]["track_id"] == 2
+    assert visual["candidate_scores"][0]["bbox_xyxy"] == [
+        500.0,
+        170.0,
+        650.0,
+        420.0,
+    ]
+    assert preview.candidates[0].evidence["pose_visual_evidence"] == visual
 
 
 def test_pose_pointing_missing_keypoints_is_pose_unclear() -> None:
@@ -132,6 +154,14 @@ def test_pose_pointing_missing_keypoints_is_pose_unclear() -> None:
     assert preview.status == "ambiguous"
     assert preview.ambiguity_type == "pose_unclear"
     assert preview.candidates == []
+    visual = preview.evidence["pose_visual_evidence"]
+    assert visual["coordinate_space"] == "source_frame"
+    assert visual["introducer_track_id"] == 1
+    assert visual["introducer_bbox_xyxy"] == [100.0, 100.0, 300.0, 500.0]
+    assert visual["ambiguity_type"] == "pose_unclear"
+    assert visual["candidate_scores"] == []
+    assert "target_track_id" not in visual
+    assert "target_bbox_xyxy" not in visual
 
 
 def test_pose_pointing_close_candidates_are_ambiguous() -> None:
@@ -166,12 +196,22 @@ def test_pose_pointing_close_candidates_are_ambiguous() -> None:
             "track_id",
             "score",
             "arm_side",
+            "bbox_xyxy",
             "perpendicular_distance",
             "ray_intersects_bbox",
         }
         <= set(item)
         for item in scoring["candidate_scores"][:2]
     )
+    visual = preview.evidence["pose_visual_evidence"]
+    assert visual["introducer_track_id"] == 1
+    assert visual["introducer_bbox_xyxy"] == [100.0, 100.0, 300.0, 500.0]
+    assert visual["arm_side"] == "left"
+    assert visual["ambiguity_type"] == "multiple_candidates"
+    assert "target_track_id" not in visual
+    assert "target_bbox_xyxy" not in visual
+    assert {item["track_id"] for item in visual["candidate_scores"][:2]} == {2, 3}
+    assert all("bbox_xyxy" in item for item in visual["candidate_scores"][:2])
 
 
 def test_pose_pointing_same_ray_near_and_far_hits_are_ambiguous() -> None:

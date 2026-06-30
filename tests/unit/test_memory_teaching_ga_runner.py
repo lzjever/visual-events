@@ -363,6 +363,36 @@ def test_teach_person_helper_keeps_non_anonymous_409_failed() -> None:
     ]
 
 
+def test_teach_person_report_fields_promote_person_visual_evidence() -> None:
+    person_visual_evidence = {
+        "source_frame_ref": "front:42:1000",
+        "source_bbox_xyxy": [10, 20, 120, 180],
+        "embedding_crop_path": "runtime/memory/artifacts/person.jpg",
+        "face_detection": {
+            "coordinate_space": "crop",
+            "face_bbox_xyxy": [20, 30, 80, 90],
+            "score": 0.97,
+            "source": "local_embedding_scrfd",
+        },
+    }
+
+    fields = module._teach_person_report_fields(
+        {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "person_id": "person_123",
+                "evidence": {
+                    "crop_hash": "crop-hash",
+                    "person_visual_evidence": person_visual_evidence,
+                },
+            },
+        }
+    )
+
+    assert fields == {"person_visual_evidence": person_visual_evidence}
+
+
 def test_memory_e2e_runner_generates_public_rest_payloads_without_low_level_fields() -> None:
     payloads = [
         memory_e2e.self_introduction_payload(
@@ -1653,6 +1683,19 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
                         "crop_path_or_artifact_ref": (
                             "runtime/memory/artifacts/person_123.jpg"
                         ),
+                        "person_visual_evidence": {
+                            "source_frame_ref": "front:1:1000",
+                            "source_bbox_xyxy": [30, 40, 140, 180],
+                            "embedding_crop_path": (
+                                "runtime/memory/artifacts/person_123.jpg"
+                            ),
+                            "face_detection": {
+                                "coordinate_space": "crop",
+                                "face_bbox_xyxy": [10, 12, 80, 90],
+                                "score": 0.96,
+                                "source": "local_embedding_scrfd",
+                            },
+                        },
                         "pose_pointing_scoring": _pose_pointing_scoring(
                             score_margin=0.5
                         ),
@@ -1719,6 +1762,7 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
         score_margin=0.5
     )
     assert result["person_id"] == "person_123"
+    assert result["person_visual_evidence"]["face_detection"]["score"] == 0.96
     assert result["stored_embedding_source_track_ref"] == "front:track:8"
     assert result["stored_crop_hash"] == "crop-hash-123"
     assert (

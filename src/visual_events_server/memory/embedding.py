@@ -18,6 +18,7 @@ class EmbeddingResult:
     embedding_model: str
     embedding_version: str
     quality: float
+    metadata: dict[str, Any] | None = None
 
 
 class EmbeddingUnavailable(RuntimeError):
@@ -129,7 +130,7 @@ class LocalEmbeddingBackend:
                 "embedding_runtime_error",
                 f"person embedding inference failed: {exc}",
             ) from exc
-        vector, quality = _coerce_loader_output(
+        vector, quality, metadata = _coerce_loader_output(
             output,
             expected_dim=self.person_dim,
             label="person",
@@ -140,6 +141,7 @@ class LocalEmbeddingBackend:
             embedding_model=self.person_model,
             embedding_version=self.person_version,
             quality=quality,
+            metadata=metadata,
         )
 
     def embed_scene(self, image_or_crop: bytes) -> EmbeddingResult:
@@ -152,7 +154,7 @@ class LocalEmbeddingBackend:
                 "embedding_runtime_error",
                 f"scene embedding inference failed: {exc}",
             ) from exc
-        vector, quality = _coerce_loader_output(
+        vector, quality, metadata = _coerce_loader_output(
             output,
             expected_dim=self.scene_dim,
             label="scene",
@@ -163,6 +165,7 @@ class LocalEmbeddingBackend:
             embedding_model=self.scene_model,
             embedding_version=self.scene_version,
             quality=quality,
+            metadata=metadata,
         )
 
 
@@ -220,6 +223,7 @@ class _LetterboxTransform:
 class _LoaderEmbedding:
     vector: list[float]
     quality: float = 1.0
+    metadata: dict[str, Any] | None = None
 
 
 class _OnnxLocalEmbeddingLoader:
@@ -288,6 +292,9 @@ class _OnnxLocalEmbeddingLoader:
                 label="ArcFace recognizer",
             ),
             quality=face.score,
+            metadata={
+                "face_detection": _face_detection_metadata(face),
+            },
         )
 
     def embed_scene(self, image_or_crop: bytes) -> _LoaderEmbedding:
@@ -969,8 +976,12 @@ def _coerce_loader_output(
     *,
     expected_dim: int,
     label: str,
-) -> tuple[tuple[float, ...], float]:
-    vector_like = getattr(output, "vector", output)
+) -> tuple[tuple[float, ...], float, dict[str, Any] | None]:
+    vector_like = (
+        output["vector"]
+        if isinstance(output, dict) and "vector" in output
+        else getattr(output, "vector", output)
+    )
     try:
         vector = _flatten_numeric_vector(vector_like)
     except (TypeError, ValueError) as exc:
@@ -992,13 +1003,46 @@ def _coerce_loader_output(
             f"{label} embedding inference produced an invalid vector: {exc}",
         ) from exc
 
-    quality = float(getattr(output, "quality", 1.0))
+    quality_like = (
+        output.get("quality", 1.0)
+        if isinstance(output, dict)
+        else getattr(output, "quality", 1.0)
+    )
+    quality = float(quality_like)
     if not math.isfinite(quality) or quality < 0.0:
         raise EmbeddingUnavailable(
             "embedding_runtime_error",
             f"{label} embedding inference produced invalid quality",
         )
-    return normalized, min(quality, 1.0)
+    return normalized, min(quality, 1.0), _coerce_loader_metadata(output)
+
+
+def _coerce_loader_metadata(output: Any) -> dict[str, Any] | None:
+    if isinstance(output, dict):
+        raw = output.get("metadata")
+        if raw is None:
+            raw = output.get("evidence")
+    else:
+        raw = getattr(output, "metadata", None)
+        if raw is None:
+            raw = getattr(output, "evidence", None)
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return dict(raw)
+
+
+def _face_detection_metadata(face: _DetectedFace) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "coordinate_space": "crop",
+        "face_bbox_xyxy": [float(value) for value in face.bbox],
+        "score": float(face.score),
+        "source": "local_embedding_scrfd",
+    }
+    if face.landmarks is not None:
+        metadata["landmarks_5"] = [
+            [float(x), float(y)] for x, y in face.landmarks
+        ]
+    return metadata
 
 
 def _flatten_numeric_vector(value: Any) -> list[float]:

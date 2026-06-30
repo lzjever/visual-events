@@ -131,6 +131,13 @@ class _ExternalRefDecision:
     should_link: bool
 
 
+@dataclass(frozen=True)
+class _PersonEmbeddingInputCandidate:
+    payload: bytes
+    crop_box_xyxy: tuple[float, float, float, float]
+    crop_box_coordinate_space: str
+
+
 class AppMemoryService:
     def __init__(
         self,
@@ -346,8 +353,9 @@ class AppMemoryService:
             )
             embedding: EmbeddingResult | None = None
             embedding_bytes: bytes | None = None
+            embedding_candidate: _PersonEmbeddingInputCandidate | None = None
             first_no_usable_face: MemoryServiceError | None = None
-            for candidate_bytes in _person_embedding_input_candidates(
+            for candidate in _person_embedding_input_candidate_records(
                 cached.frame.jpeg_bytes,
                 target,
                 tracks=(
@@ -356,6 +364,7 @@ class AppMemoryService:
                     else None
                 ),
             ):
+                candidate_bytes = candidate.payload
                 try:
                     embedding = await self._run_teach_embedding(
                         self.embedding_backend.embed_person,
@@ -368,8 +377,13 @@ class AppMemoryService:
                         first_no_usable_face = exc
                     continue
                 embedding_bytes = candidate_bytes
+                embedding_candidate = candidate
                 break
-            if embedding is None or embedding_bytes is None:
+            if (
+                embedding is None
+                or embedding_bytes is None
+                or embedding_candidate is None
+            ):
                 if first_no_usable_face is not None:
                     raise first_no_usable_face
                 raise MemoryServiceError(
@@ -468,6 +482,9 @@ class AppMemoryService:
                             anonymous_match,
                             cached,
                             target,
+                            crop_hash=_sha256_hex(embedding_bytes),
+                            embedding=embedding,
+                            person_embedding_candidate=embedding_candidate,
                             interaction_snapshot=interaction_snapshot,
                         ),
                         "store_delta": self._store_delta(store_before),
@@ -513,6 +530,8 @@ class AppMemoryService:
                     target,
                     crop_hash=crop_hash,
                     crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                    embedding=embedding,
+                    person_embedding_candidate=embedding_candidate,
                     interaction_snapshot=interaction_snapshot,
                 ),
             }
@@ -1305,11 +1324,30 @@ class AppMemoryService:
         evidence = dict(base_evidence)
         evidence.update(selected_preview_evidence)
         evidence["pose_stability_window"] = pose_window
+        introducer_ref = f"{camera}:track:{introducer_track_id}"
+        evidence = _with_pose_visual_service_evidence(
+            evidence,
+            introducer_ref=introducer_ref,
+            target_ref=None,
+            pose_stability_window=pose_window,
+            clear_target=selected_candidate is None,
+        )
         if selected_candidate is None:
             return None, ambiguity_type, interaction_snapshot, evidence
 
         target_evidence = dict(selected_candidate.evidence or selected_preview_evidence)
         target_evidence["pose_stability_window"] = pose_window
+        target_ref = (
+            f"{camera}:track:{selected_candidate.track_id}"
+            if selected_candidate.track_id is not None
+            else None
+        )
+        target_evidence = _with_pose_visual_service_evidence(
+            target_evidence,
+            introducer_ref=introducer_ref,
+            target_ref=target_ref,
+            pose_stability_window=pose_window,
+        )
         return (
             ResolvedTarget(
                 source_target_mode="pose_pointing_to_person",
@@ -1862,11 +1900,19 @@ class AppMemoryService:
         cached: CachedFrame,
         target: ResolvedTarget,
         *,
+        crop_hash: str | None = None,
+        crop_path_or_artifact_ref: str | None = None,
+        embedding: EmbeddingResult | None = None,
+        person_embedding_candidate: _PersonEmbeddingInputCandidate | None = None,
         interaction_snapshot: RequestInteractionSnapshot | None = None,
     ) -> dict[str, Any]:
         evidence = self._target_evidence(
             cached,
             target,
+            crop_hash=crop_hash,
+            crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+            embedding=embedding,
+            person_embedding_candidate=person_embedding_candidate,
             interaction_snapshot=interaction_snapshot,
         )
         evidence.update(
@@ -2007,6 +2053,8 @@ class AppMemoryService:
         *,
         crop_hash: str | None = None,
         crop_path_or_artifact_ref: str | None = None,
+        embedding: EmbeddingResult | None = None,
+        person_embedding_candidate: _PersonEmbeddingInputCandidate | None = None,
         interaction_snapshot: RequestInteractionSnapshot | None = None,
     ) -> dict[str, Any]:
         evidence = self._request_evidence(
@@ -2018,6 +2066,7 @@ class AppMemoryService:
         if source_track_ref is not None:
             evidence["source_track_ref"] = source_track_ref
         evidence["resolver_target_ref"] = _resolver_target_ref(cached, target)
+        introducer_ref: str | None = None
         if target.source_target_mode == "pose_pointing_to_person":
             introducer_ref = (
                 f"{cached.frame.camera}:track:"
@@ -2029,10 +2078,30 @@ class AppMemoryService:
                 evidence["introducer_ref"] = introducer_ref
         if target.evidence:
             evidence.update(target.evidence)
+        if target.source_target_mode == "pose_pointing_to_person":
+            evidence = _with_pose_visual_service_evidence(
+                evidence,
+                introducer_ref=introducer_ref,
+                target_ref=evidence["resolver_target_ref"],
+                pose_stability_window=evidence.get("pose_stability_window"),
+            )
         if crop_hash is not None:
             evidence["crop_hash"] = crop_hash
         if crop_path_or_artifact_ref is not None:
             evidence["crop_path_or_artifact_ref"] = crop_path_or_artifact_ref
+        if (
+            crop_hash is not None
+            and target.target_type in {"person", "region"}
+            and person_embedding_candidate is not None
+        ):
+            evidence["person_visual_evidence"] = _person_visual_evidence(
+                source_frame_ref=str(evidence["source_frame_ref"]),
+                target=target,
+                candidate=person_embedding_candidate,
+                crop_hash=crop_hash,
+                crop_path_or_artifact_ref=crop_path_or_artifact_ref,
+                embedding=embedding,
+            )
         return evidence
 
     def _pose_pointing_introducer_ref(self, cached: CachedFrame) -> str | None:
@@ -2062,6 +2131,96 @@ class AppMemoryService:
         if getattr(preview, "evidence", None):
             evidence.update(preview.evidence)
         return evidence
+
+
+def _person_visual_evidence(
+    *,
+    source_frame_ref: str,
+    target: ResolvedTarget,
+    candidate: _PersonEmbeddingInputCandidate,
+    crop_hash: str,
+    crop_path_or_artifact_ref: str | None,
+    embedding: EmbeddingResult | None,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "source_frame_ref": source_frame_ref,
+        "source_bbox_xyxy": [float(value) for value in target.bbox_xyxy],
+        "source_bbox_coordinate_space": "source_frame",
+        "crop_box_xyxy": [float(value) for value in candidate.crop_box_xyxy],
+        "crop_box_coordinate_space": candidate.crop_box_coordinate_space,
+        "embedding_crop_hash": crop_hash,
+    }
+    if crop_path_or_artifact_ref is not None:
+        evidence["embedding_crop_path"] = crop_path_or_artifact_ref
+    face_detection = _embedding_face_detection(embedding)
+    if face_detection is not None:
+        evidence["face_detection"] = face_detection
+    return evidence
+
+
+def _embedding_face_detection(
+    embedding: EmbeddingResult | None,
+) -> dict[str, Any] | None:
+    if embedding is None or not isinstance(embedding.metadata, dict):
+        return None
+    raw = embedding.metadata.get("face_detection")
+    if not isinstance(raw, dict):
+        return None
+
+    coordinate_space = raw.get("coordinate_space")
+    bbox = _finite_float_list(raw.get("face_bbox_xyxy"), length=4)
+    score = _finite_float(raw.get("score"))
+    if not isinstance(coordinate_space, str) or not coordinate_space or bbox is None:
+        return None
+    result: dict[str, Any] = {
+        "coordinate_space": coordinate_space,
+        "face_bbox_xyxy": bbox,
+    }
+    landmarks = _finite_point_list(raw.get("landmarks_5"), length=5)
+    if landmarks is not None:
+        result["landmarks_5"] = landmarks
+    if score is not None:
+        result["score"] = score
+    source = raw.get("source")
+    if isinstance(source, str) and source:
+        result["source"] = source
+    return result
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _finite_float_list(value: Any, *, length: int) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        return None
+    result: list[float] = []
+    for item in value:
+        number = _finite_float(item)
+        if number is None:
+            return None
+        result.append(number)
+    return result
+
+
+def _finite_point_list(value: Any, *, length: int) -> list[list[float]] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        return None
+    result: list[list[float]] = []
+    for point in value:
+        xy = _finite_float_list(point, length=2)
+        if xy is None:
+            return None
+        result.append(xy)
+    return result
 
 
 def _target_request(request: dict[str, Any]) -> TargetRequest:
@@ -2316,7 +2475,29 @@ def _person_embedding_input_candidates(
     *,
     tracks: Iterable[TrackSnapshot] | None = None,
 ) -> Iterator[bytes]:
-    yield _person_embedding_bytes(jpeg_bytes, target)
+    for candidate in _person_embedding_input_candidate_records(
+        jpeg_bytes,
+        target,
+        tracks=tracks,
+    ):
+        yield candidate.payload
+
+
+def _person_embedding_input_candidate_records(
+    jpeg_bytes: bytes,
+    target: ResolvedTarget,
+    *,
+    tracks: Iterable[TrackSnapshot] | None = None,
+) -> Iterator[_PersonEmbeddingInputCandidate]:
+    yield _PersonEmbeddingInputCandidate(
+        payload=_person_embedding_bytes(jpeg_bytes, target),
+        crop_box_xyxy=_target_crop_box_for_jpeg(
+            jpeg_bytes,
+            target,
+            margin_ratio=_PERSON_EMBEDDING_CROP_MARGIN_RATIO,
+        ),
+        crop_box_coordinate_space="source_frame",
+    )
     if target.target_type != "person":
         return
 
@@ -2377,7 +2558,46 @@ def _person_embedding_input_candidates(
 
     buffer = BytesIO()
     masked.save(buffer, format="JPEG", quality=95)
-    yield buffer.getvalue()
+    yield _PersonEmbeddingInputCandidate(
+        payload=buffer.getvalue(),
+        crop_box_xyxy=(0.0, 0.0, float(source.width), float(source.height)),
+        crop_box_coordinate_space="source_frame",
+    )
+
+
+def _target_crop_box_for_jpeg(
+    jpeg_bytes: bytes,
+    target: ResolvedTarget,
+    *,
+    margin_ratio: float,
+) -> tuple[float, float, float, float]:
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError as exc:
+        raise MemoryServiceError(
+            "image_crop_unavailable",
+            "Pillow is required to inspect memory target images",
+            status_code=503,
+        ) from exc
+
+    try:
+        with Image.open(BytesIO(jpeg_bytes)) as image:
+            image_width, image_height = image.size
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise MemoryServiceError(
+            "invalid_frame_image",
+            "cached frame JPEG could not be decoded",
+        ) from exc
+
+    return tuple(
+        float(value)
+        for value in _target_crop_box(
+            target,
+            image_width=image_width,
+            image_height=image_height,
+            margin_ratio=margin_ratio,
+        )
+    )
 
 
 def _crop_target_jpeg(
@@ -2474,6 +2694,36 @@ def _candidate_to_dict(candidate: Any) -> dict[str, Any]:
     evidence = getattr(candidate, "evidence", None)
     if evidence:
         result["evidence"] = evidence
+    return result
+
+
+def _with_pose_visual_service_evidence(
+    evidence: dict[str, Any],
+    *,
+    introducer_ref: str | None,
+    target_ref: str | None,
+    pose_stability_window: dict[str, Any] | None,
+    clear_target: bool = False,
+) -> dict[str, Any]:
+    visual = evidence.get("pose_visual_evidence")
+    if not isinstance(visual, dict):
+        return evidence
+
+    updated = dict(visual)
+    if introducer_ref is not None:
+        updated["introducer_ref"] = introducer_ref
+    if clear_target:
+        for key in ("target_ref", "target_track_id", "target_bbox_xyxy"):
+            updated.pop(key, None)
+    elif target_ref is not None and (
+        "target_track_id" in updated or "target_bbox_xyxy" in updated
+    ):
+        updated["target_ref"] = target_ref
+    if pose_stability_window is not None:
+        updated["pose_stability_window"] = pose_stability_window
+
+    result = dict(evidence)
+    result["pose_visual_evidence"] = updated
     return result
 
 

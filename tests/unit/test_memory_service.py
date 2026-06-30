@@ -160,6 +160,38 @@ class RecordingEmbeddingBackend(FakeEmbeddingBackend):
         return super().embed_scene(image_or_crop)
 
 
+class FaceMetadataEmbeddingBackend(FakeEmbeddingBackend):
+    def __init__(self, *, person_vector: tuple[float, ...]) -> None:
+        super().__init__(person_dim=len(person_vector), scene_dim=8)
+        self.person_vector = person_vector
+        self.person_inputs: list[bytes] = []
+
+    def embed_person(self, image_crop: bytes):
+        self.person_inputs.append(image_crop)
+        return EmbeddingResult(
+            vector=self.person_vector,
+            embedding_type="face",
+            embedding_model="local-face",
+            embedding_version="face-v1",
+            quality=0.91,
+            metadata={
+                "face_detection": {
+                    "coordinate_space": "crop",
+                    "face_bbox_xyxy": [20.0, 30.0, 120.0, 150.0],
+                    "landmarks_5": [
+                        [45.0, 70.0],
+                        [92.0, 70.0],
+                        [68.0, 96.0],
+                        [50.0, 128.0],
+                        [88.0, 128.0],
+                    ],
+                    "score": 0.91,
+                    "source": "local_embedding_scrfd",
+                }
+            },
+        )
+
+
 def _first_vector(
     outcomes: list[tuple[float, ...] | EmbeddingUnavailable],
 ) -> tuple[float, ...]:
@@ -796,6 +828,56 @@ async def test_teach_person_persists_embedding_provenance_for_resolved_target(tm
 
 
 @pytest.mark.asyncio
+async def test_teach_person_response_includes_minimal_person_visual_evidence(
+    tmp_path,
+):
+    vector = _unit_vector(0)
+    backend = FaceMetadataEmbeddingBackend(person_vector=vector)
+    subject = service(tmp_path, embedding_backend=backend)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame(),
+        visual_state=visual_state(),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    backend.person_inputs.clear()
+
+    person = await subject.teach_person(
+        {
+            "camera": "front",
+            "target": {"mode": "track_id", "track_id": 7},
+            "profile": {"display_name": "张三"},
+        }
+    )
+
+    evidence = person["evidence"]["person_visual_evidence"]
+    assert evidence["source_frame_ref"] == "front:1:1000"
+    assert evidence["source_bbox_xyxy"] == [300.0, 100.0, 700.0, 650.0]
+    assert evidence["source_bbox_coordinate_space"] == "source_frame"
+    assert evidence["crop_box_xyxy"] == [260.0, 45.0, 740.0, 705.0]
+    assert evidence["crop_box_coordinate_space"] == "source_frame"
+    assert evidence["embedding_crop_hash"] == hashlib.sha256(
+        backend.person_inputs[0]
+    ).hexdigest()
+    assert evidence["embedding_crop_path"] == person["evidence"][
+        "crop_path_or_artifact_ref"
+    ]
+    assert evidence["face_detection"] == {
+        "coordinate_space": "crop",
+        "face_bbox_xyxy": [20.0, 30.0, 120.0, 150.0],
+        "landmarks_5": [
+            [45.0, 70.0],
+            [92.0, 70.0],
+            [68.0, 96.0],
+            [50.0, 128.0],
+            [88.0, 128.0],
+        ],
+        "score": 0.91,
+        "source": "local_embedding_scrfd",
+    }
+
+
+@pytest.mark.asyncio
 async def test_teach_person_duplicate_same_display_name_updates_metadata_without_new_embedding_or_artifact(
     tmp_path,
 ):
@@ -1077,7 +1159,7 @@ async def test_teach_person_duplicate_active_anonymous_requires_merge_without_wr
     tmp_path,
 ):
     vector = _unit_vector(0)
-    backend = SequencePersonEmbeddingBackend(person_vectors=[vector])
+    backend = FaceMetadataEmbeddingBackend(person_vector=vector)
     subject = service(tmp_path, embedding_backend=backend)
     subject.store.create_anonymous_profile(
         anonymous_id="anon_1",
@@ -1091,8 +1173,8 @@ async def test_teach_person_duplicate_active_anonymous_requires_merge_without_wr
         result=EmbeddingResult(
             vector=vector,
             embedding_type="face",
-            embedding_model=backend.person_model,
-            embedding_version=backend.model_version,
+            embedding_model="local-face",
+            embedding_version="face-v1",
             quality=1.0,
         ),
         source_target_type="recognition_track",
@@ -1122,9 +1204,35 @@ async def test_teach_person_duplicate_active_anonymous_requires_merge_without_wr
     assert exc.value.details["outcome"] == "merge_anonymous_required"
     assert exc.value.details["anonymous_id"] == "anon_1"
     assert exc.value.details["evidence"]["matched_type"] == "anonymous_person"
+    visual_evidence = exc.value.details["evidence"]["person_visual_evidence"]
+    assert visual_evidence["source_frame_ref"] == "front:1:1000"
+    assert visual_evidence["source_bbox_xyxy"] == [300.0, 100.0, 700.0, 650.0]
+    assert visual_evidence["source_bbox_coordinate_space"] == "source_frame"
+    assert visual_evidence["crop_box_xyxy"] == [260.0, 45.0, 740.0, 705.0]
+    assert visual_evidence["crop_box_coordinate_space"] == "source_frame"
+    assert visual_evidence["embedding_crop_hash"] == hashlib.sha256(
+        backend.person_inputs[0]
+    ).hexdigest()
+    assert "embedding_crop_path" not in visual_evidence
+    assert visual_evidence["face_detection"] == {
+        "coordinate_space": "crop",
+        "face_bbox_xyxy": [20.0, 30.0, 120.0, 150.0],
+        "landmarks_5": [
+            [45.0, 70.0],
+            [92.0, 70.0],
+            [68.0, 96.0],
+            [50.0, 128.0],
+            [88.0, 128.0],
+        ],
+        "score": 0.91,
+        "source": "local_embedding_scrfd",
+    }
     _assert_zero_store_delta(exc.value.details["store_delta"])
     assert _store_counts(subject.store) == before_counts
     assert _count_rows(subject.store, "person_profiles") == 0
+    assert _count_rows(subject.store, "person_embeddings") == before_counts[
+        "person_embeddings"
+    ]
     if artifact_dir.exists():
         assert [path for path in artifact_dir.rglob("*") if path.is_file()] == []
 
@@ -1922,10 +2030,36 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
         }
     ]
     assert pose_window["failure_reason"] is None
+    preview_visual = preview["evidence"]["pose_visual_evidence"]
+    assert preview_visual["coordinate_space"] == "source_frame"
+    assert preview_visual["introducer_ref"] == "front:track:7"
+    assert preview_visual["introducer_track_id"] == 7
+    assert preview_visual["introducer_bbox_xyxy"] == [300.0, 100.0, 500.0, 650.0]
+    assert preview_visual["target_ref"] == "front:track:8"
+    assert preview_visual["target_track_id"] == 8
+    assert preview_visual["target_bbox_xyxy"] == [720.0, 190.0, 920.0, 390.0]
+    assert preview_visual["arm_side"] == "left"
+    assert preview_visual["shoulder_xy"] == [420.0, 240.0]
+    assert preview_visual["elbow_xy"] == [520.0, 260.0]
+    assert preview_visual["wrist_xy"] == [620.0, 275.0]
+    assert preview_visual["ray_start_xy"] == [620.0, 275.0]
+    assert preview_visual["ray_end_xy"][0] > preview_visual["ray_start_xy"][0]
+    assert preview_visual["candidate_scores"][0]["track_id"] == 8
+    assert preview_visual["candidate_scores"][0]["bbox_xyxy"] == [
+        720.0,
+        190.0,
+        920.0,
+        390.0,
+    ]
+    assert preview_visual["pose_stability_window"] == pose_window
     assert preview["candidates"][0]["evidence"]["pose_pointing_scoring"] == (
         preview_scoring
     )
     assert preview["candidates"][0]["evidence"]["pose_stability_window"] == pose_window
+    assert (
+        preview["candidates"][0]["evidence"]["pose_visual_evidence"]
+        == preview_visual
+    )
 
     person = await subject.teach_person(
         {
@@ -1966,6 +2100,7 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
     assert person["evidence"]["introducer_ref"] == "front:track:7"
     assert person["evidence"]["pose_pointing_scoring"] == preview_scoring
     assert person["evidence"]["pose_stability_window"] == pose_window
+    assert person["evidence"]["pose_visual_evidence"] == preview_visual
     row = subject.store.connection.execute(
         "SELECT source_target_type FROM person_embeddings WHERE embedding_id = ?",
         (matches[0].embedding_id,),
@@ -2239,6 +2374,16 @@ async def test_third_person_introduction_pose_unclear_does_not_write(tmp_path):
 
     assert preview["status"] == "ambiguous"
     assert preview["ambiguity_type"] == "pose_unclear"
+    pose_visual = preview["evidence"]["pose_visual_evidence"]
+    assert pose_visual["introducer_ref"] == "front:track:7"
+    assert pose_visual["introducer_track_id"] == 7
+    assert pose_visual["introducer_bbox_xyxy"] == [300.0, 100.0, 500.0, 650.0]
+    assert pose_visual["ambiguity_type"] == "pose_unclear"
+    assert pose_visual["candidate_scores"] == []
+    assert pose_visual["pose_stability_window"]["failure_reason"] == "pose_unclear"
+    assert "target_ref" not in pose_visual
+    assert "target_track_id" not in pose_visual
+    assert "target_bbox_xyxy" not in pose_visual
     _assert_zero_store_delta(preview["store_delta"])
     _assert_allowed_ambiguity(preview)
 
@@ -2340,6 +2485,19 @@ async def test_third_person_introduction_multiple_pointing_candidates_does_not_w
     assert preview_scoring["checks"]["keypoints_ok"] is True
     assert preview_scoring["checks"]["margin_ok"] is False
     assert len(preview_scoring["candidate_scores"]) >= 2
+    pose_visual = preview["evidence"]["pose_visual_evidence"]
+    assert pose_visual["introducer_ref"] == "front:track:7"
+    assert pose_visual["introducer_track_id"] == 7
+    assert pose_visual["ambiguity_type"] == "multiple_candidates"
+    assert "target_ref" not in pose_visual
+    assert "target_track_id" not in pose_visual
+    assert "target_bbox_xyxy" not in pose_visual
+    assert {item["track_id"] for item in pose_visual["candidate_scores"][:2]} == {8, 9}
+    assert all("bbox_xyxy" in item for item in pose_visual["candidate_scores"][:2])
+    assert (
+        pose_visual["pose_stability_window"]["failure_reason"]
+        == "multiple_candidates"
+    )
     _assert_allowed_ambiguity(preview)
 
     with pytest.raises(MemoryServiceError) as exc:

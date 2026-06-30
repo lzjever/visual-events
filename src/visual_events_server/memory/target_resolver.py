@@ -50,6 +50,9 @@ class _PointingArm:
     side: str
     origin: tuple[float, float]
     direction: tuple[float, float]
+    shoulder: tuple[float, float]
+    elbow: tuple[float, float]
+    wrist: tuple[float, float]
     keypoint_confidences: dict[str, float]
 
 
@@ -213,6 +216,14 @@ class TargetResolver:
                 status="ambiguous",
                 candidates=[],
                 ambiguity_type="no_active_interaction_target",
+                evidence={
+                    "pose_visual_evidence": {
+                        "coordinate_space": "source_frame",
+                        "introducer_track_id": introducer_track_id,
+                        "ambiguity_type": "no_active_interaction_target",
+                        "candidate_scores": [],
+                    }
+                },
             )
 
         arms = _pointing_arms(introducer)
@@ -221,6 +232,17 @@ class TargetResolver:
                 status="ambiguous",
                 candidates=[],
                 ambiguity_type="pose_unclear",
+                evidence={
+                    "pose_visual_evidence": _pose_visual_evidence(
+                        introducer=introducer,
+                        selected_track=None,
+                        arm=None,
+                        score_entries=[],
+                        image_width=image_width,
+                        image_height=image_height,
+                        ambiguity_type="pose_unclear",
+                    )
+                },
             )
 
         candidate_tracks = [
@@ -247,7 +269,16 @@ class TargetResolver:
                     margin_ok=False,
                     checks={"multiple_ray_hits": True},
                 )
-                evidence = _pose_pointing_evidence(scoring)
+                evidence = _pose_pointing_evidence(
+                    scoring=scoring,
+                    introducer=introducer,
+                    selected_track=None,
+                    arm=arm,
+                    score_entries=score_entries,
+                    image_width=image_width,
+                    image_height=image_height,
+                    ambiguity_type="multiple_candidates",
+                )
                 candidates = [
                     self._candidate_from_track(
                         track,
@@ -287,7 +318,16 @@ class TargetResolver:
                 status="not_found",
                 candidates=[],
                 ambiguity_type="target_unclear",
-                evidence=_pose_pointing_evidence(scoring),
+                evidence=_pose_pointing_evidence(
+                    scoring=scoring,
+                    introducer=introducer,
+                    selected_track=None,
+                    arm=arm,
+                    score_entries=score_entries,
+                    image_width=image_width,
+                    image_height=image_height,
+                    ambiguity_type="target_unclear",
+                ),
             )
 
         selected_arm = positive_entries[0].arm
@@ -306,7 +346,16 @@ class TargetResolver:
                     ambiguous_score_margin=self.ambiguous_score_margin,
                     margin_ok=margin_ok,
                 )
-                evidence = _pose_pointing_evidence(scoring)
+                evidence = _pose_pointing_evidence(
+                    scoring=scoring,
+                    introducer=introducer,
+                    selected_track=None,
+                    arm=selected_arm,
+                    score_entries=score_entries,
+                    image_width=image_width,
+                    image_height=image_height,
+                    ambiguity_type="multiple_candidates",
+                )
                 candidates = [
                     self._candidate_from_track(
                         entry.track,
@@ -332,8 +381,17 @@ class TargetResolver:
             ambiguous_score_margin=self.ambiguous_score_margin,
             margin_ok=margin_ok,
         )
-        evidence = _pose_pointing_evidence(scoring)
         selected = positive_entries[0]
+        evidence = _pose_pointing_evidence(
+            scoring=scoring,
+            introducer=introducer,
+            selected_track=selected.track,
+            arm=selected_arm,
+            score_entries=score_entries,
+            image_width=image_width,
+            image_height=image_height,
+            ambiguity_type=None,
+        )
         return TargetPreview(
             status="resolved",
             candidates=[
@@ -759,6 +817,9 @@ def _pointing_arms(
                 side=side,
                 origin=(float(wrist.x), float(wrist.y)),
                 direction=direction,
+                shoulder=(float(shoulder.x), float(shoulder.y)),
+                elbow=(float(elbow.x), float(elbow.y)),
+                wrist=(float(wrist.x), float(wrist.y)),
                 keypoint_confidences={
                     shoulder.name: float(shoulder.confidence),
                     elbow.name: float(elbow.confidence),
@@ -818,8 +879,86 @@ def _pose_score_margin(score_entries: list[_PoseCandidateScore]) -> float | None
     return float(score_entries[0].score) - float(score_entries[1].score)
 
 
-def _pose_pointing_evidence(scoring: dict[str, Any]) -> dict[str, Any]:
-    return {"pose_pointing_scoring": scoring}
+def _pose_pointing_evidence(
+    *,
+    scoring: dict[str, Any],
+    introducer: TrackSnapshot,
+    selected_track: TrackSnapshot | None,
+    arm: _PointingArm,
+    score_entries: list[_PoseCandidateScore],
+    image_width: int,
+    image_height: int,
+    ambiguity_type: str | None,
+) -> dict[str, Any]:
+    return {
+        "pose_pointing_scoring": scoring,
+        "pose_visual_evidence": _pose_visual_evidence(
+            introducer=introducer,
+            selected_track=selected_track,
+            arm=arm,
+            score_entries=score_entries,
+            image_width=image_width,
+            image_height=image_height,
+            ambiguity_type=ambiguity_type,
+        ),
+    }
+
+
+def _pose_visual_evidence(
+    *,
+    introducer: TrackSnapshot,
+    selected_track: TrackSnapshot | None,
+    arm: _PointingArm | None,
+    score_entries: list[_PoseCandidateScore],
+    image_width: int,
+    image_height: int,
+    ambiguity_type: str | None,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "coordinate_space": "source_frame",
+        "introducer_track_id": introducer.track_id,
+        "introducer_bbox_xyxy": _bbox_xyxy_list(introducer.bbox_xyxy),
+        "candidate_scores": [
+            _pose_candidate_score_evidence(entry) for entry in score_entries
+        ],
+    }
+    if ambiguity_type is not None:
+        evidence["ambiguity_type"] = ambiguity_type
+    if selected_track is not None:
+        evidence["target_track_id"] = selected_track.track_id
+        evidence["target_bbox_xyxy"] = _bbox_xyxy_list(selected_track.bbox_xyxy)
+    if arm is not None:
+        evidence.update(
+            {
+                "arm_side": arm.side,
+                "shoulder_xy": _xy_list(arm.shoulder),
+                "elbow_xy": _xy_list(arm.elbow),
+                "wrist_xy": _xy_list(arm.wrist),
+                "ray_start_xy": _xy_list(arm.origin),
+                "ray_end_xy": _xy_list(
+                    _ray_end_xy(
+                        arm.origin,
+                        arm.direction,
+                        image_width=image_width,
+                        image_height=image_height,
+                    )
+                ),
+            }
+        )
+    return evidence
+
+
+def _pose_candidate_score_evidence(
+    entry: _PoseCandidateScore,
+) -> dict[str, Any]:
+    return {
+        "track_id": entry.track.track_id,
+        "bbox_xyxy": _bbox_xyxy_list(entry.track.bbox_xyxy),
+        "score": float(entry.score),
+        "arm_side": entry.arm.side,
+        "perpendicular_distance": float(entry.perpendicular_distance),
+        "ray_intersects_bbox": bool(entry.ray_intersects_bbox),
+    }
 
 
 def _pose_pointing_scoring_evidence(
@@ -839,14 +978,7 @@ def _pose_pointing_scoring_evidence(
         "keypoint_confidences": arm.keypoint_confidences,
         "arm_vector": [float(arm.direction[0]), float(arm.direction[1])],
         "candidate_scores": [
-            {
-                "track_id": entry.track.track_id,
-                "score": float(entry.score),
-                "arm_side": entry.arm.side,
-                "perpendicular_distance": float(entry.perpendicular_distance),
-                "ray_intersects_bbox": bool(entry.ray_intersects_bbox),
-            }
-            for entry in score_entries
+            _pose_candidate_score_evidence(entry) for entry in score_entries
         ],
         "score_margin": None if score_margin is None else float(score_margin),
         "ambiguous_score_margin": float(ambiguous_score_margin),
@@ -912,6 +1044,34 @@ def _ray_intersects_bbox(
     return t_max >= 0.0
 
 
+def _ray_end_xy(
+    origin: tuple[float, float],
+    direction: tuple[float, float],
+    *,
+    image_width: int,
+    image_height: int,
+) -> tuple[float, float]:
+    ox, oy = origin
+    dx, dy = direction
+    candidates: list[float] = []
+    if dx > 0.0:
+        candidates.append((float(image_width) - ox) / dx)
+    elif dx < 0.0:
+        candidates.append((0.0 - ox) / dx)
+    if dy > 0.0:
+        candidates.append((float(image_height) - oy) / dy)
+    elif dy < 0.0:
+        candidates.append((0.0 - oy) / dy)
+    positive = [t for t in candidates if isfinite(t) and t >= 0.0]
+    if not positive:
+        return origin
+    t = min(positive)
+    return (
+        max(0.0, min(float(image_width), ox + (dx * t))),
+        max(0.0, min(float(image_height), oy + (dy * t))),
+    )
+
+
 def _person_pointing_target(bbox: BBoxXYXY) -> tuple[float, float]:
     x1, y1, x2, y2 = bbox
     return ((float(x1) + float(x2)) / 2.0, float(y1) + (_bbox_height(bbox) * 0.45))
@@ -948,6 +1108,14 @@ def _bbox_width(bbox: BBoxXYXY) -> float:
 def _bbox_height(bbox: BBoxXYXY) -> float:
     _, y1, _, y2 = bbox
     return max(0.0, float(y2) - float(y1))
+
+
+def _bbox_xyxy_list(bbox: BBoxXYXY) -> list[float]:
+    return [float(value) for value in bbox]
+
+
+def _xy_list(point: tuple[float, float]) -> list[float]:
+    return [float(point[0]), float(point[1])]
 
 
 def _clamp_confidence(value: float) -> float:

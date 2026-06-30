@@ -71,6 +71,30 @@ class StubLocalLoader:
         return [0.0, 6.0, 8.0, 0.0]
 
 
+class MetadataLocalLoader(StubLocalLoader):
+    def embed_person(self, image_crop: bytes):
+        self.person_calls.append(image_crop)
+        return {
+            "vector": [3.0, 4.0, 0.0],
+            "quality": 0.87,
+            "metadata": {
+                "face_detection": {
+                    "coordinate_space": "crop",
+                    "face_bbox_xyxy": [11.0, 12.0, 51.0, 62.0],
+                    "landmarks_5": [
+                        [20.0, 30.0],
+                        [40.0, 30.0],
+                        [30.0, 42.0],
+                        [22.0, 54.0],
+                        [38.0, 54.0],
+                    ],
+                    "score": 0.87,
+                    "source": "local_embedding_scrfd",
+                }
+            },
+        }
+
+
 class NoFaceLocalLoader:
     def embed_person(self, image_crop: bytes) -> list[float]:
         raise EmbeddingUnavailable("no_usable_face", "no usable face detected")
@@ -122,6 +146,53 @@ def test_local_embedding_backend_normalizes_stub_loader_outputs(tmp_path: Path) 
     )
     assert loader.person_calls == [b"person-jpeg"]
     assert loader.scene_calls == [b"scene-jpeg"]
+
+
+def test_local_embedding_backend_preserves_person_face_metadata(
+    tmp_path: Path,
+) -> None:
+    person_bundle = _write_bundle(
+        tmp_path,
+        "person",
+        model_name="local-face",
+        version="face-v1",
+        dim=3,
+        files={"detector": "detector.onnx", "recognizer": "recognizer.onnx"},
+    )
+    scene_bundle = _write_bundle(
+        tmp_path,
+        "scene",
+        model_name="local-scene",
+        version="scene-v2",
+        dim=4,
+        files={"model": "scene.onnx"},
+    )
+    loader = MetadataLocalLoader()
+    backend = LocalEmbeddingBackend(
+        person_model_path=person_bundle,
+        scene_model_path=scene_bundle,
+        loader=loader,
+    )
+
+    person = backend.embed_person(b"person-jpeg")
+
+    assert person.vector == (0.6, 0.8, 0.0)
+    assert person.quality == pytest.approx(0.87)
+    assert person.metadata == {
+        "face_detection": {
+            "coordinate_space": "crop",
+            "face_bbox_xyxy": [11.0, 12.0, 51.0, 62.0],
+            "landmarks_5": [
+                [20.0, 30.0],
+                [40.0, 30.0],
+                [30.0, 42.0],
+                [22.0, 54.0],
+                [38.0, 54.0],
+            ],
+            "score": 0.87,
+            "source": "local_embedding_scrfd",
+        }
+    }
 
 
 def test_local_embedding_backend_propagates_no_usable_face(tmp_path: Path) -> None:
@@ -474,6 +545,21 @@ def test_onnx_face_loader_letterboxes_scrfd_and_aligns_arcface_input(
 
     assert embedding.vector == [1.0, 2.0, 2.0]
     assert embedding.quality == pytest.approx(0.95)
+    face_detection = embedding.metadata["face_detection"]
+    assert face_detection["coordinate_space"] == "crop"
+    assert face_detection["face_bbox_xyxy"] == pytest.approx([32.0, 0.0, 96.0, 64.0])
+    np.testing.assert_allclose(
+        face_detection["landmarks_5"],
+        [
+            [48.0, 16.0],
+            [80.0, 16.0],
+            [64.0, 32.0],
+            [48.0, 48.0],
+            [80.0, 48.0],
+        ],
+    )
+    assert face_detection["score"] == pytest.approx(0.95)
+    assert face_detection["source"] == "local_embedding_scrfd"
     assert len(recognizer.calls) == 1
     aligned = recognizer.calls[0]["feeds"]["arcface_input"]
     assert aligned.shape == (1, 3, 112, 112)
