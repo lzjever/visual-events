@@ -3712,6 +3712,371 @@ def test_enrich_visual_state_event_identities_skips_memory_events(tmp_path) -> N
     ]
 
 
+def test_enrich_visual_state_event_identities_cache_hit_for_non_recall_event(
+    tmp_path,
+) -> None:
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    subject._identity_overlay.put_known_person(  # noqa: SLF001
+        connection_id="ws_1",
+        camera="front",
+        track_id=7,
+        person_profile={
+            "person_id": "person_seeded",
+            "display_name": "张三",
+            "description": "",
+            "tags": [],
+        },
+        match=_memory_match(score=0.91),
+    )
+    state = visual_state()
+    event = {
+        "type": "semantic_event",
+        "event_id": "front:attention_changed",
+        "event": "attention_target_changed",
+        "camera": "front",
+        "track_id": 7,
+    }
+    state["semantic_events"] = [event]
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+
+    assert event["identity_context"]["status"] == "known_person"
+    assert event["identity_context"]["source"] == "cache"
+    assert event["identity_context"]["person"]["person_id"] == "person_seeded"
+    assert subject._pending_event_identity_recalls == {}  # noqa: SLF001
+    assert backend.person_inputs == []
+
+
+@pytest.mark.asyncio
+async def test_event_identity_recall_cache_miss_updates_overlay_without_event_or_writes(
+    tmp_path,
+) -> None:
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_known_active_target(subject, backend, person_id="person_known")
+    backend.person_inputs.clear()
+    frame_message = frame()
+    state = visual_state()
+    event = {
+        "type": "semantic_event",
+        "event_id": "front:evt_recall_known",
+        "event": "person_waving",
+        "camera": "front",
+        "track_id": 7,
+        "confidence": 0.86,
+    }
+    state["semantic_events"] = [event]
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=state,
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    before_counts = _store_counts(subject.store)
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+
+    assert "identity_context" not in event
+    assert len(subject._pending_event_identity_recalls) == 1  # noqa: SLF001
+    await _wait_for_event_identity_recall_idle(subject)
+
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+    identity = projected["tracks"][0]["identity"]
+    assert identity["status"] == "known_person"
+    assert identity["source"] == "event_recall"
+    assert identity["person"]["person_id"] == "person_known"
+    assert len(backend.person_inputs) == 1
+    assert _store_counts(subject.store) == before_counts
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=1,
+            frame_timestamp_ms=1_000,
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_identity_recall_familiar_unknown_is_read_only(tmp_path) -> None:
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_familiar_unknown_active_target(subject, backend, anonymous_id="anon_known")
+    backend.person_inputs.clear()
+    frame_message = frame()
+    state = visual_state()
+    event = {
+        "type": "semantic_event",
+        "event_id": "front:evt_recall_familiar",
+        "event": "person_approaching_robot",
+        "camera": "front",
+        "track_id": 7,
+        "confidence": 0.81,
+    }
+    state["semantic_events"] = [event]
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=state,
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    before_counts = _store_counts(subject.store)
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+    await _wait_for_event_identity_recall_idle(subject)
+
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+    identity = projected["tracks"][0]["identity"]
+    assert identity["status"] == "familiar_unknown"
+    assert identity["source"] == "event_recall"
+    assert identity["anonymous_person"]["anonymous_id"] == "anon_known"
+    assert len(backend.person_inputs) == 1
+    assert _store_counts(subject.store) == before_counts
+
+
+@pytest.mark.asyncio
+async def test_event_identity_recall_dedupes_same_track_events(tmp_path) -> None:
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_known_active_target(subject, backend)
+    backend.person_inputs.clear()
+    frame_message = frame()
+    state = visual_state()
+    state["semantic_events"] = [
+        {"event": "person_waving", "track_id": 7, "event_id": "first"},
+        {"event": "person_approaching_robot", "track_id": 7, "event_id": "second"},
+    ]
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=state,
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+
+    assert len(subject._pending_event_identity_recalls) == 1  # noqa: SLF001
+    await _wait_for_event_identity_recall_idle(subject)
+    assert len(backend.person_inputs) == 1
+
+
+@pytest.mark.asyncio
+async def test_event_identity_recall_skips_non_eligible_events_and_tracks(
+    tmp_path,
+) -> None:
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    frame_message = frame()
+    state = visual_state()
+    state["tracks"] = [
+        {**state["tracks"][0], "track_id": 7},
+        {**state["tracks"][0], "track_id": 8, "lost_ms": 500},
+        {**state["tracks"][0], "track_id": 9, "class": "chair"},
+    ]
+    state["semantic_events"] = [
+        {"event": "known_person_present", "track_id": 7, "event_id": "memory"},
+        {"event": "person_left", "track_id": 7, "event_id": "left"},
+        {"event": "person_waving", "event_id": "missing"},
+        {"event": "person_waving", "track_id": "7", "event_id": "string_track"},
+        {"event": "person_waving", "track_id": 8, "event_id": "lost_track"},
+        {"event": "person_waving", "track_id": 9, "event_id": "non_person_track"},
+    ]
+    snapshot = memory_snapshot_with_tracks(
+        [
+            person_track(7, frame_message=frame_message),
+            person_track(8, lost_ms=500, frame_message=frame_message),
+            person_track(9, class_name="chair", frame_message=frame_message),
+        ],
+        frame_message=frame_message,
+    )
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=state,
+        snapshot=snapshot,
+    )
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+    await _wait_for_event_identity_recall_idle(subject)
+
+    assert backend.person_inputs == []
+    assert all("identity_context" not in event for event in state["semantic_events"])
+
+
+@pytest.mark.asyncio
+async def test_event_identity_recall_skips_when_periodic_query_in_flight(
+    tmp_path,
+) -> None:
+    backend = RecordingEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    frame_message = frame()
+    state = visual_state()
+    state["semantic_events"] = [
+        {"event": "person_waving", "track_id": 7, "event_id": "blocked"}
+    ]
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=state,
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    pending = asyncio.get_running_loop().create_future()
+    subject._pending_queries_by_stream[("ws_1", "front")] = pending  # noqa: SLF001
+
+    try:
+        subject.enrich_visual_state_event_identities(
+            connection_id="ws_1",
+            visual_state=state,
+        )
+
+        assert subject._pending_event_identity_recalls == {}  # noqa: SLF001
+        assert backend.person_inputs == []
+    finally:
+        subject._pending_queries_by_stream.pop(("ws_1", "front"), None)  # noqa: SLF001
+        pending.cancel()
+
+
+@pytest.mark.asyncio
+async def test_event_identity_recall_failure_cleans_in_flight_and_can_retry(
+    tmp_path,
+) -> None:
+    backend = ScriptedPersonEmbeddingBackend(
+        person_outcomes=[
+            EmbeddingUnavailable("model_unavailable", "face model unavailable"),
+            _unit_vector(0),
+        ]
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    frame_message = frame()
+    state = visual_state()
+    state["semantic_events"] = [
+        {"event": "person_waving", "track_id": 7, "event_id": "retry"}
+    ]
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=state,
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+    await _wait_for_event_identity_recall_idle(subject)
+
+    assert subject._pending_event_identity_recalls == {}  # noqa: SLF001
+    assert "identity_context" not in state["semantic_events"][0]
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=1,
+            frame_timestamp_ms=1_000,
+        )
+        == []
+    )
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+    assert projected["tracks"][0]["identity"]["status"] == "unavailable"
+
+    state["semantic_events"] = [
+        {"event": "person_waving", "track_id": 7, "event_id": "retry_again"}
+    ]
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+    await _wait_for_event_identity_recall_idle(subject)
+
+    assert subject._pending_event_identity_recalls == {}  # noqa: SLF001
+    assert len(backend.person_inputs) == 2
+
+
+@pytest.mark.asyncio
+async def test_event_identity_recall_drops_result_when_latest_track_is_not_visible(
+    tmp_path,
+) -> None:
+    backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_known_active_target(subject, backend)
+    backend.block_queries = True
+    frame_message = frame(frame_id=1, timestamp_ms=1_000)
+    state = visual_state(frame_id=1, timestamp_ms=1_000)
+    state["semantic_events"] = [
+        {"event": "person_waving", "track_id": 7, "event_id": "late"}
+    ]
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=state,
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+
+    subject.enrich_visual_state_event_identities(
+        connection_id="ws_1",
+        visual_state=state,
+    )
+    assert await asyncio.to_thread(backend.entered.wait, 1.0)
+
+    lost_frame = frame(frame_id=2, timestamp_ms=1_100)
+    lost_state = visual_state(frame_id=2, timestamp_ms=1_100)
+    lost_state["tracks"][0]["lost_ms"] = 500
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=lost_frame,
+        state=lost_state,
+        snapshot=memory_snapshot(frame_message=lost_frame, lost_ms=500),
+    )
+    backend.release.set()
+    await _wait_for_event_identity_recall_idle(subject)
+
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=lost_state,
+    )
+    assert projected["tracks"] == []
+    visible_again = visual_state(frame_id=3, timestamp_ms=1_200)
+    visible_again_identity = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visible_again,
+    )["tracks"][0]["identity"]
+    assert visible_again_identity["status"] == "pending"
+
+
 @pytest.mark.asyncio
 async def test_familiar_anonymous_overlay_requires_seen_count_duration_and_score(tmp_path):
     now = 10_000
@@ -4333,6 +4698,19 @@ async def _wait_for_memory_query_idle(
             return
         await asyncio.sleep(0.05)
     raise AssertionError("memory query did not become idle")
+
+
+async def _wait_for_event_identity_recall_idle(subject: AppMemoryService) -> None:
+    for _ in range(20):
+        pending = list(subject._pending_event_identity_recalls.values())  # noqa: SLF001
+        if not pending:
+            return
+        await asyncio.gather(
+            *(asyncio.shield(future) for future in pending),
+            return_exceptions=True,
+        )
+        await asyncio.sleep(0)
+    raise AssertionError("event identity recall did not become idle")
 
 
 async def _drain_memory_events(

@@ -68,10 +68,20 @@ _MEMORY_SEMANTIC_EVENTS = frozenset(
         "scene_activated",
     }
 )
+_EVENT_IDENTITY_RECALL_EVENTS = frozenset(
+    {
+        "person_appeared",
+        "person_passing_by",
+        "person_approaching_robot",
+        "person_stopped_near_robot",
+        "person_waving",
+    }
+)
 _RECOGNITION_ELIGIBILITY_POLICY = (
     "class_name == 'person' and lost_ms == 0 and hits > 0"
 )
 _StreamKey = tuple[str, str]
+_EventRecallKey = tuple[str, str, int]
 
 
 class MemoryServiceError(RuntimeError):
@@ -237,6 +247,10 @@ class AppMemoryService:
             _StreamKey,
             asyncio.Future[list[dict[str, Any]]],
         ] = {}
+        self._pending_event_identity_recalls: dict[
+            _EventRecallKey,
+            asyncio.Future[None],
+        ] = {}
         self._query_state_lock = threading.Lock()
         self._recognition_report_lock = threading.Lock()
         self._latest_recognition_report: _RecognitionTickReport | None = None
@@ -268,6 +282,7 @@ class AppMemoryService:
                 self._closed = True
             await self._wait_for_active_teach_requests()
             await self._wait_for_pending_queries()
+            await self._wait_for_pending_event_identity_recalls()
             self._teach_embedding_executor.shutdown(wait=False, cancel_futures=True)
             await self._wait_for_teach_embedding_futures()
             self._teach_embedding_executor.shutdown(wait=True, cancel_futures=True)
@@ -385,6 +400,127 @@ class AppMemoryService:
             )
             if identity is not None:
                 event["identity_context"] = identity
+                continue
+            if event.get("event") not in _EVENT_IDENTITY_RECALL_EVENTS:
+                continue
+            self._schedule_event_identity_recall(
+                connection_id=connection_id,
+                camera=camera,
+                track_id=track_id,
+            )
+
+    def _schedule_event_identity_recall(
+        self,
+        *,
+        connection_id: str,
+        camera: str,
+        track_id: int,
+    ) -> None:
+        stream_key = _stream_key(connection_id, camera)
+        pending_query = self._pending_queries_by_stream.get(stream_key)
+        if pending_query is not None and not pending_query.done():
+            return
+
+        recall_key = (connection_id, camera, track_id)
+        pending_recall = self._pending_event_identity_recalls.get(recall_key)
+        if pending_recall is not None:
+            if pending_recall.done():
+                self._finish_event_identity_recall(recall_key, pending_recall)
+            else:
+                return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        future = loop.run_in_executor(
+            None,
+            self._run_event_identity_recall,
+            connection_id,
+            camera,
+            track_id,
+        )
+        self._pending_event_identity_recalls[recall_key] = future
+        future.add_done_callback(
+            lambda completed, key=recall_key: self._finish_event_identity_recall(
+                key,
+                completed,
+            )
+        )
+
+    def _finish_event_identity_recall(
+        self,
+        recall_key: _EventRecallKey,
+        future: asyncio.Future[None],
+    ) -> None:
+        try:
+            future.result()
+        except Exception:
+            _LOGGER.exception(
+                "event identity recall failed for camera %s track %s",
+                recall_key[1],
+                recall_key[2],
+            )
+        if self._pending_event_identity_recalls.get(recall_key) is future:
+            self._pending_event_identity_recalls.pop(recall_key, None)
+
+    def _run_event_identity_recall(
+        self,
+        connection_id: str,
+        camera: str,
+        track_id: int,
+    ) -> None:
+        try:
+            cached = self._cache.get_fresh_for_stream(connection_id, camera)
+            target = self._resolve_event_recall_target(cached, track_id)
+            if target is None:
+                return
+            result = self._identify_person_target(
+                cached,
+                target,
+                source="event_recall",
+                include_anonymous=True,
+            )
+            latest = self._cache.get_fresh_for_stream(connection_id, camera)
+            if not _cached_visible_person_track(latest, track_id):
+                return
+            self._put_identity_overlay_result(
+                latest,
+                target,
+                result,
+                source="event_recall",
+            )
+        except FrameCacheError:
+            return
+
+    def _resolve_event_recall_target(
+        self,
+        cached: CachedFrame,
+        track_id: int,
+    ) -> ResolvedTarget | None:
+        snapshot = cached.memory_snapshot
+        if snapshot is None:
+            return None
+        try:
+            resolved = self._resolver.resolve(
+                TargetRequest(mode="track_id", track_id=track_id),
+                image_width=snapshot.image_size[0],
+                image_height=snapshot.image_size[1],
+                tracks=snapshot.tracks,
+                attention=snapshot.attention,
+            )
+        except TargetResolveError:
+            return None
+        if resolved.target_type != "person":
+            return None
+        return ResolvedTarget(
+            source_target_mode="track_id",
+            target_type=resolved.target_type,
+            bbox_xyxy=resolved.bbox_xyxy,
+            track_id=resolved.track_id,
+            quality=resolved.quality,
+        )
 
     async def identify_current(self, request: dict[str, Any]) -> dict[str, Any]:
         camera = _required_text(request, "camera")
@@ -1096,6 +1232,15 @@ class AppMemoryService:
                 return_exceptions=True,
             )
         self._pending_queries_by_stream.clear()
+
+    async def _wait_for_pending_event_identity_recalls(self) -> None:
+        pending = list(self._pending_event_identity_recalls.values())
+        if pending:
+            await asyncio.gather(
+                *(asyncio.shield(future) for future in pending),
+                return_exceptions=True,
+            )
+        self._pending_event_identity_recalls.clear()
 
     async def _drain_pending_query_for_stream(
         self,
@@ -2938,6 +3083,10 @@ def _visible_person_track(
         ):
             return track
     return None
+
+
+def _cached_visible_person_track(cached: CachedFrame, track_id: int) -> bool:
+    return track_id in set(_visible_person_track_ids(cached.visual_state))
 
 
 def _source_frame_ref(cached: CachedFrame) -> str:
