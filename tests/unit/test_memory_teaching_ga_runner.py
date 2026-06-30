@@ -232,6 +232,103 @@ def test_des_txt_without_transcript_does_not_fallback_to_teach_payload(
     assert records == []
 
 
+def test_unsupported_scene_transcript_interaction_fails_mapping_check(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    _make_scene(data_dir, "pic_teach_me", transcript_text="请你记住我，我是小李飞刀")
+    _make_scene(data_dir, "pic_teach_person", transcript_text="这是彭刚，请你记住")
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        transcript_text="这是银河通用的办公室，请你记住",
+    )
+    _make_scene(data_dir, "pic_teach_item_phone", transcript_text="这是手机，请你记住")
+    _make_scene(
+        data_dir,
+        "pic_teach_new_case",
+        transcript_text="这是新增交互，请你记住",
+    )
+
+    report = module.run_dry_run(
+        data_dir=data_dir,
+        out=tmp_path / "artifacts" / "memory-teaching-ga",
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    mapping_check = checks["all_transcript_interactions_mapped"]
+    missing_path = str(data_dir / "pic_teach_new_case" / "img_000.transcript")
+    assert report["ok"] is False
+    assert mapping_check["passed"] is False
+    assert mapping_check["details"]["discovered_count"] == 5
+    assert mapping_check["details"]["mapped_count"] == 4
+    assert mapping_check["details"]["missing_source_text_paths"] == [missing_path]
+    assert mapping_check["details"]["extra_source_text_paths"] == []
+
+
+def test_second_same_scene_transcript_interaction_fails_mapping_check(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    scene_dir = _make_scene(
+        data_dir,
+        "pic_teach_me",
+        transcript_text="请你记住我，我是小李飞刀",
+    )
+    (scene_dir / "img_001.jpeg").write_bytes(b"jpeg")
+    (scene_dir / "img_001.transcript").write_text(
+        "请你也记住我，我是第二个样例",
+        encoding="utf-8",
+    )
+    _make_scene(data_dir, "pic_teach_person", transcript_text="这是彭刚，请你记住")
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        transcript_text="这是银河通用的办公室，请你记住",
+    )
+    _make_scene(data_dir, "pic_teach_item_phone", transcript_text="这是手机，请你记住")
+
+    report = module.run_dry_run(
+        data_dir=data_dir,
+        out=tmp_path / "artifacts" / "memory-teaching-ga",
+    )
+
+    checks = {check["name"]: check for check in report["checks"]}
+    mapping_check = checks["all_transcript_interactions_mapped"]
+    missing_path = str(data_dir / "pic_teach_me" / "img_001.transcript")
+    assert report["ok"] is False
+    assert mapping_check["passed"] is False
+    assert mapping_check["details"]["discovered_count"] == 5
+    assert mapping_check["details"]["mapped_count"] == 4
+    assert mapping_check["details"]["missing_source_text_paths"] == [missing_path]
+    assert mapping_check["details"]["extra_source_text_paths"] == []
+
+
+def test_duplicate_mapped_transcript_source_path_fails_mapping_check(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    _make_scene(data_dir, "pic_teach_me", transcript_text="请你记住我，我是小李飞刀")
+    scenes = module.discover_scene_dirs(data_dir)
+    source_text_path = str(data_dir / "pic_teach_me" / "img_000.transcript")
+
+    mapping_check = module._all_transcript_interactions_mapped_check(  # noqa: SLF001
+        scenes=scenes,
+        payload_records=[
+            {"source_text_path": source_text_path},
+            {"source_text_path": source_text_path},
+        ],
+    )
+
+    assert mapping_check["passed"] is False
+    assert mapping_check["details"] == {
+        "discovered_count": 1,
+        "mapped_count": 2,
+        "missing_source_text_paths": [],
+        "extra_source_text_paths": [],
+    }
+
+
 def test_generated_payloads_parse_with_public_memory_api_contract(
     tmp_path: Path,
 ) -> None:
@@ -650,6 +747,13 @@ def test_dry_run_writes_minimal_artifact_skeleton_and_evidence_index(
     assert report["visual_evidence_index"]
     checks = {check["name"]: check for check in report["checks"]}
     assert checks["expected_teach_transcript_payloads"]["passed"] is True
+    assert checks["all_transcript_interactions_mapped"]["passed"] is True
+    assert checks["all_transcript_interactions_mapped"]["details"] == {
+        "discovered_count": 4,
+        "mapped_count": 4,
+        "missing_source_text_paths": [],
+        "extra_source_text_paths": [],
+    }
     scene_reports = {scene["name"]: scene for scene in report["scenes"]}
     assert scene_reports["pic_teach_me"]["transcript_count"] == 1
     assert scene_reports["pic_teach_me"]["transcript_paths"] == [
@@ -827,6 +931,13 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
         _assert_image_verifies(image_path)
 
     checks = {check["name"]: check for check in report["checks"]}
+    assert checks["all_transcript_interactions_mapped"]["passed"] is True
+    assert checks["all_transcript_interactions_mapped"]["details"] == {
+        "discovered_count": 4,
+        "mapped_count": 4,
+        "missing_source_text_paths": [],
+        "extra_source_text_paths": [],
+    }
     assert checks["all_scenes_replayed"]["passed"] is True
     assert checks["actual_api_responses"]["passed"] is True
     assert checks["cli_projection_botified_frames"]["passed"] is True
@@ -1929,6 +2040,13 @@ def test_local_smoke_report_fails_insufficient_third_person_without_models(
         assert module.find_forbidden_agent_payload_fields(record["payload"]) == []
 
     checks = {check["name"]: check for check in report["checks"]}
+    assert checks["all_transcript_interactions_mapped"]["passed"] is True
+    assert checks["all_transcript_interactions_mapped"]["details"] == {
+        "discovered_count": 3,
+        "mapped_count": 3,
+        "missing_source_text_paths": [],
+        "extra_source_text_paths": [],
+    }
     assert checks["self_local_smoke"]["passed"] is True
     assert checks["scene_local_smoke"]["passed"] is True
     assert checks["third_person_local_probe"]["passed"] is False

@@ -4109,6 +4109,10 @@ def _build_checks(
                 "missing": sorted(expected_teach_scenes - actual_teach_scenes),
             },
         },
+        _all_transcript_interactions_mapped_check(
+            scenes=scenes,
+            payload_records=payload_records,
+        ),
         {
             "name": "agent_payload_forbidden_fields_absent",
             "passed": all(not fields for fields in forbidden_payload_fields.values()),
@@ -4206,6 +4210,10 @@ def _build_actual_checks(
                 "missing": sorted(expected_teach_scenes - actual_teach_scenes),
             },
         },
+        _all_transcript_interactions_mapped_check(
+            scenes=scenes,
+            payload_records=payload_records,
+        ),
         {
             "name": "agent_payload_forbidden_fields_absent",
             "passed": all(not fields for fields in forbidden_payload_fields.values()),
@@ -4341,6 +4349,10 @@ def _build_local_smoke_checks(
                 "missing": sorted(expected_teach_scenes - actual_teach_scenes),
             },
         },
+        _all_transcript_interactions_mapped_check(
+            scenes=scenes,
+            payload_records=payload_records,
+        ),
         {
             "name": "agent_payload_forbidden_fields_absent",
             "passed": all(not fields for fields in forbidden_payload_fields.values()),
@@ -4377,6 +4389,46 @@ def _build_local_smoke_checks(
             },
         },
     ]
+
+
+def _all_transcript_interactions_mapped_check(
+    *,
+    scenes: list[SceneDir],
+    payload_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    discovered_source_text_paths = _discovered_interaction_source_text_paths(scenes)
+    mapped_source_text_paths = _mapped_record_source_text_paths(payload_records)
+    discovered = set(discovered_source_text_paths)
+    mapped = set(mapped_source_text_paths)
+    missing = sorted(discovered - mapped)
+    extra = sorted(mapped - discovered)
+    return {
+        "name": "all_transcript_interactions_mapped",
+        "passed": discovered_source_text_paths == mapped_source_text_paths,
+        "details": {
+            "discovered_count": len(discovered_source_text_paths),
+            "mapped_count": len(mapped_source_text_paths),
+            "missing_source_text_paths": missing,
+            "extra_source_text_paths": extra,
+        },
+    }
+
+
+def _discovered_interaction_source_text_paths(scenes: list[SceneDir]) -> list[str]:
+    return sorted(
+        str(interaction.source_text_path)
+        for scene in scenes
+        for interaction in scene.interactions
+    )
+
+
+def _mapped_record_source_text_paths(payload_records: list[dict[str, Any]]) -> list[str]:
+    return sorted(
+        source_text_path
+        for record in payload_records
+        if isinstance(source_text_path := record.get("source_text_path"), str)
+        and source_text_path
+    )
 
 
 def _scene_report(scene: SceneDir) -> dict[str, Any]:
