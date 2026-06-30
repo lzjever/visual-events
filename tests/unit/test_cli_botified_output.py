@@ -1082,15 +1082,15 @@ def test_memory_event_frame_contains_compact_memory_context_and_stable_payload()
         "conversation_summaries": ["上次问过新品尺码，偏好浅色外套。"],
     }
     assert context["trigger_evidence"] == {
-        "memory_match_id": "match_000001",
         "matched_type": "person",
         "matched_id": "person_000001",
-        "embedding_id": "emb_face_000001",
         "match_type": "face",
         "match_score": 0.86,
         "top2_margin": 0.09,
-        "source_target_mode": "track_id",
     }
+    assert "memory_match_id" not in context["trigger_evidence"]
+    assert "embedding_id" not in context["trigger_evidence"]
+    assert "source_target_mode" not in context["trigger_evidence"]
 
 
 def test_scene_and_familiar_unknown_memory_context_are_projected():
