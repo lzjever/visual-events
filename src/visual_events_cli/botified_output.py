@@ -524,14 +524,21 @@ def _format_request(
     *,
     visual_context: dict[str, Any] | None = None,
 ) -> str:
-    request = (
-        f"event={event.get('event')} "
-        f"camera={event.get('camera')} "
-        f"track_id={event.get('track_id')} "
-        f"confidence={event.get('confidence')} "
-        f"duration_ms={event.get('duration_ms')} "
-        f"text={event.get('text')}"
+    fields = [
+        f"event={event.get('event')}",
+        f"camera={event.get('camera')}",
+    ]
+    target_ref = _request_target_ref(event, visual_context)
+    if target_ref is not None:
+        fields.append(f"target_ref={target_ref}")
+    fields.extend(
+        [
+            f"confidence={event.get('confidence')}",
+            f"duration_ms={event.get('duration_ms')}",
+            f"text={event.get('text')}",
+        ]
     )
+    request = " ".join(fields)
     if visual_context is not None:
         context = json.dumps(
             {"visual_context": visual_context},
@@ -612,6 +619,83 @@ def _track_identity_key(value: Any) -> Any | None:
 
 def _current_target_ref(camera: str, index: int) -> str:
     return f"current:{camera}:person:{index}"
+
+
+def _context_camera(visual_state: dict[str, Any], event: dict[str, Any]) -> str:
+    camera = visual_state.get("camera")
+    if isinstance(camera, str) and camera:
+        return camera
+    camera = event.get("camera")
+    if isinstance(camera, str) and camera:
+        return camera
+    return "unknown"
+
+
+def _current_target_ref_for_track(
+    visual_state: dict[str, Any],
+    track_id: Any,
+    *,
+    camera: str,
+) -> str | None:
+    track_key = _track_identity_key(track_id)
+    if track_key is None:
+        return None
+
+    for index, track in enumerate(_visible_person_tracks(visual_state)):
+        if _track_identity_key(track.get("track_id")) == track_key:
+            return _current_target_ref(camera, index)
+    return None
+
+
+def _event_slot_target_ref(
+    event: dict[str, Any],
+    *,
+    camera: str | None = None,
+) -> str | None:
+    slot = _runtime_person_slot(event)
+    if slot is None or isinstance(slot, bool):
+        return None
+    if not isinstance(slot, (int, str)):
+        return None
+
+    slot_text = str(slot)
+    if slot_text == "":
+        return None
+
+    if camera is None:
+        camera = event.get("camera")
+    if not isinstance(camera, str) or not camera:
+        camera = "unknown"
+    return f"event:{camera}:person_slot:{slot_text}"
+
+
+def _event_target_ref(
+    event: dict[str, Any],
+    visual_state: dict[str, Any],
+    *,
+    camera: str,
+) -> str | None:
+    current_ref = _current_target_ref_for_track(
+        visual_state,
+        event.get("track_id"),
+        camera=camera,
+    )
+    if current_ref is not None:
+        return current_ref
+    return _event_slot_target_ref(event, camera=camera)
+
+
+def _request_target_ref(
+    event: dict[str, Any],
+    visual_context: dict[str, Any] | None,
+) -> str | None:
+    if isinstance(visual_context, dict):
+        event_target = visual_context.get("event_target")
+        if isinstance(event_target, dict):
+            target_ref = event_target.get("target_ref")
+            if isinstance(target_ref, str) and target_ref:
+                return target_ref
+    return _event_slot_target_ref(event)
 
 
 def _snapshot_active_track_key(
@@ -733,10 +817,11 @@ def _visual_context(
     attention_available = scene_context.get("attention_available") is True
     fresh_target = attention_available and target_track_id is not None
     person_count = _person_count(visual_state)
+    camera = _context_camera(visual_state, event)
 
     context = {
         "event_target": {
-            "track_id": event.get("track_id"),
+            "target_ref": _event_target_ref(event, visual_state, camera=camera),
             "runtime_person_slot": _runtime_person_slot(event),
             "visible_now": _track_visible(track),
             "matches_attention_target": fresh_target
@@ -748,10 +833,14 @@ def _visual_context(
         },
         "trigger_evidence": _project_evidence(event),
         "current_scene": {
-            "camera": visual_state.get("camera", event.get("camera")),
+            "camera": camera,
             "frame_age_ms": max(0, now_ms - frame_timestamp_ms),
             "person_count": person_count,
-            "attention_target": _attention_target(visual_state, target_track_id)
+            "attention_target": _attention_target(
+                visual_state,
+                target_track_id,
+                camera=camera,
+            )
             if fresh_target
             else None,
             "other_people_count": _other_people_count(visual_state, target_track_id)
@@ -1151,10 +1240,16 @@ def _other_people_count(visual_state: dict[str, Any], target_track_id: Any) -> i
 def _attention_target(
     visual_state: dict[str, Any],
     target_track_id: Any,
+    *,
+    camera: str,
 ) -> dict[str, Any]:
     track = _find_track(visual_state, target_track_id)
     return {
-        "track_id": target_track_id,
+        "target_ref": _current_target_ref_for_track(
+            visual_state,
+            target_track_id,
+            camera=camera,
+        ),
         "position": _track_position(track, visual_state),
         "size": _track_size(track),
         "center_uv": _track_value(track, "center_uv"),

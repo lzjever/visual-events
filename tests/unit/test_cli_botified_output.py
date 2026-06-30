@@ -403,7 +403,7 @@ def test_format_botified_frame_outputs_allowlisted_events(event_name):
     payload = parse_botified_frame(frame, event_id=event["event_id"])
     assert event["event"] in payload["request"]
     assert event["camera"] in payload["request"]
-    assert str(event["track_id"]) in payload["request"]
+    assert "track_id=" not in payload["request"]
     assert str(event["confidence"]) in payload["request"]
     assert event["text"] in payload["request"]
 
@@ -567,14 +567,21 @@ def test_waving_frame_contains_parseable_visual_context_and_stable_top_level_pay
     assert len(frames) == 1
     payload = parse_botified_frame(frames[0], event_id="front:waving")
     assert set(payload) == {"id", "urgency", "timeout_secs", "request", "expect"}
+    assert "track_id=" not in payload["request"]
+    assert "target_ref=current:front:person:0" in payload["request"]
     context = parse_visual_context(payload)
     assert set(context) == {"event_target", "trigger_evidence", "current_scene"}
-    assert context["event_target"]["track_id"] == 7
+    assert context["event_target"]["target_ref"] == "current:front:person:0"
+    assert "track_id" not in context["event_target"]
     assert context["event_target"]["runtime_person_slot"] == 3
     assert context["event_target"]["visible_now"] is True
     assert context["event_target"]["position"] in {"left", "center", "right"}
     assert context["event_target"]["size"] in {"far", "mid", "near"}
-    assert context["current_scene"]["attention_target"]["track_id"] == 7
+    assert (
+        context["current_scene"]["attention_target"]["target_ref"]
+        == "current:front:person:0"
+    )
+    assert "track_id" not in context["current_scene"]["attention_target"]
     assert context["current_scene"]["attention_target"]["position"] in {
         "left",
         "center",
@@ -1255,12 +1262,13 @@ def test_botified_frame_is_one_line_wrapped_json_request_with_event_facts():
     for fact in [
         "person_waving",
         "front",
-        "7",
+        "target_ref=event:front:person_slot:3",
         "0.86",
         "900",
         "有人在机器人前方挥手",
     ]:
         assert fact in payload["request"]
+    assert "track_id=" not in payload["request"]
 
 
 def test_botified_frame_escapes_wrapper_tokens_newlines_quotes_backslashes_ampersand_and_unicode():
