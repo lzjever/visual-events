@@ -833,6 +833,7 @@ build_current_visual_snapshot(latest_visual_state) -> dict
 - 展示 teach auto merge anonymous。
 - 展示 identify-current result。
 - 展示 event identity enrichment。
+- 展示 CLI current visual snapshot：当前有哪些可见人物、身份摘要、opaque `target_ref`，并确认 agent-facing 输出不含 raw track id、bbox、embedding、crop、keypoints 或 `stream_ref`。
 - 继续复用已有 renderer，不新增第二套 evidence 工具。
 
 ## 8. 开发步骤
@@ -849,11 +850,20 @@ build_current_visual_snapshot(latest_visual_state) -> dict
 10. 修改 `teach_person`，将 anonymous match 从 409 改成自动 `merged_anonymous_person`，并按 `stream_ref + camera` 解析 hot buffer。
 11. 保留 `merge-anonymous-person`，但从产品主路径和 runner helper 主路径中移除。
 12. 更新 CLI Botified projection，支持 event `identity_context` 和按需 current visual snapshot。
-13. 更新 visual evidence 和 memory teaching evidence。
+13. 更新 visual evidence、memory teaching evidence 和 CLI current visual snapshot demo。
 14. 补核心 tests 和 deterministic evidence demo。
 15. 同步更新旧合同和 runner：`docs/memory-teaching-ga-development-plan.md`、`docs/memory-teaching-ga-handoff.md`、API tests、GA runner 中的 explicit merge 主路径必须改为 `teach_person` auto merge；maintenance merge API 只保留单独测试。
 
 ## 9. 测试计划
+
+测试数据：
+
+- 必须使用本地 ignored 的 `val-data/` 做端到端验证和 demo artifact。
+- 交互文本唯一来源是参考图像旁边的同 stem `.transcript` 文件，例如 `img_1782721491874061223.jpg` 附近对应 `img_1782721491874061223.transcript`。
+- `.transcript` 表示用户消息发生在对应参考图像附近的时间点。runner replay 到该图像附近时，使用最新 `visual_state.stream_ref` 和该文本手工构造 `teach_person` / scene teach / identify 相关 API payload，模拟用户当时对机器人说话。
+- 不再支持目录级 `des.txt` 作为本计划输入；如果历史文档还提到 `des.txt`，以后续实现时以本计划的 `.transcript` 规则为准。
+- 不调用 LLM 自动解析 `.transcript`；测试中把文本手工映射为固定 request 模板，并在 report/evidence 中记录 `source_text_path`、`source_image_path`、`source_frame_ref` 和 `request_snapshot_ref`。
+- runner 不修改 `val-data/`，不把 `val-data/`、模型、runtime DB 或 artifacts 加入 Git。
 
 ### 9.1 Unit Tests
 
@@ -941,7 +951,7 @@ CLI：
 - Botified `visual_context.identity_context` 被投影且长度受限。
 - current visual snapshot 从最新 `visual_state.identity_context` 投影，包含 identity summary 和 opaque `target_ref`。
 - CLI 缓存最新 `visual_state.stream_ref`，active API 调用自动带回它；agent-facing 文本不要求用户理解 stream_ref。
-- agent-facing 输出不泄露 raw track 字段、bbox、embedding、crop、keypoints。
+- agent-facing 输出不泄露 raw track 字段、bbox、embedding、crop、keypoints 或 `stream_ref`。
 - same-key gap 可以使用 person_id / anonymous_id alias 减少重复唤醒。
 
 ### 9.2 Integration Tests
@@ -960,6 +970,7 @@ Memory E2E：
 
 - familiar unknown present。
 - event identity enrichment。
+- current visual snapshot 包含当前可见人物身份摘要和 opaque `target_ref`，且不暴露 raw track id、bbox 或 `stream_ref`。
 - identify-current。
 - teach anonymous auto merge。
 - merge 后不再输出旧 anonymous familiar event。
@@ -977,9 +988,11 @@ uv run python tools/run_memory_teaching_ga_e2e.py \
 
 需要扩展 runner 或新增最小 deterministic 场景，证明：
 
+- 交互用例能读取参考图像同 stem `.transcript`，在对应图像附近发出模拟用户 API 调用。
 - familiar unknown event 包含 `anonymous_id`、`seen_count`、`observed_duration_ms`。
 - 普通事件带 `identity_context`。
 - current visual_state 顶层 `identity_context.tracks[]` 带身份。
+- CLI current visual snapshot artifact 带 identity summary 和 opaque `target_ref`，不带 raw track id、bbox 或 `stream_ref`。
 - identify-current 返回身份。
 - teach_person 自动 merge anonymous。
 - active API 记录包含请求使用的 `stream_ref`，且没有 camera-only fallback。
@@ -997,6 +1010,8 @@ uv run python tools/generate_memory_teaching_evidence.py \
 
 - HTML 能看到 identity overlay。
 - 图片 bbox 或 caption 能看到已知人姓名 / familiar unknown。
+- HTML 能看到 current visual snapshot 和 Botified `visual_context.identity_context` 投影摘要。
+- teach / identify evidence 能看到用户消息来源：`source_text_path`、对应图像、source frame 和 request snapshot。
 - teach auto merge 有 source frame、request snapshot、merged anonymous id、person id。
 - 不要求像素级 golden image。
 
@@ -1014,7 +1029,7 @@ uv run python tools/generate_memory_teaching_evidence.py \
 - `visible_people` 主动刷新不属于本期；读取多人身份走 CLI current visual snapshot。
 - anonymous familiar 使用 observed duration 和同 tick 去重。
 - CLI 只投影，不做身份逻辑、不写 DB、不控制运控。
-- evidence 能人工看到 event identity、current identity、identify-current、teach auto merge。
+- evidence 能人工看到 event identity、current identity、CLI current visual snapshot、identify-current、teach auto merge。
 - public protocol 不包含 keypoints、embedding、crop、图片路径。
 - `artifacts/`、`runtime/`、模型、`val-data/` 不进 Git。
 
