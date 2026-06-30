@@ -887,11 +887,7 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
             "camera_motion_state",
         ),
         "person_waving": (
-            "wrist_x_span_px",
-            "wrist_x_span_bbox_ratio",
-            "wrist_y_relative_to_shoulder_px",
             "wave_duration_ms",
-            "keypoint_min_confidence",
         ),
         "known_person_present": (
             "matched_type",
@@ -924,6 +920,7 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _is_agent_facing_evidence_key(key: str) -> bool:
+    key_text = str(key)
     if key in {
         "bbox",
         "center_uv",
@@ -934,11 +931,11 @@ def _is_agent_facing_evidence_key(key: str) -> bool:
     }:
         return False
     return (
-        not key.startswith("bbox_")
-        and "bbox_area_ratio" not in key
-        and not key.endswith("_track_id")
-        and "crop" not in key
-        and "embedding" not in key
+        "bbox" not in key_text
+        and "keypoint" not in key_text
+        and not key_text.endswith("_track_id")
+        and "crop" not in key_text
+        and "embedding" not in key_text
     )
 
 

@@ -281,15 +281,12 @@ def assert_no_visual_context_low_level_fields(context: dict[str, Any]) -> None:
                     key_text
                     in {
                         "center_uv",
-                        "bbox",
-                        "bbox_xyxy",
                         "track_id",
                         "runtime_person_slot",
-                        "keypoints",
                         "stream_ref",
                     }
-                    or key_text.startswith("bbox_")
-                    or "bbox_area_ratio" in key_text
+                    or "bbox" in key_text
+                    or "keypoint" in key_text
                     or key_text.endswith("_track_id")
                     or "crop" in key_text
                     or "embedding" in key_text
@@ -762,13 +759,7 @@ def test_trigger_evidence_only_contains_whitelisted_projection_fields():
     evidence = parse_visual_context(
         parse_botified_frame(frames[0], event_id="front:waving")
     )["trigger_evidence"]
-    assert evidence == {
-        "wrist_x_span_px": 84.0,
-        "wrist_x_span_bbox_ratio": 0.42,
-        "wrist_y_relative_to_shoulder_px": 18.0,
-        "wave_duration_ms": 900,
-        "keypoint_min_confidence": 0.72,
-    }
+    assert evidence == {"wave_duration_ms": 900}
 
 
 @pytest.mark.parametrize(
