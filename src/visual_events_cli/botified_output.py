@@ -828,7 +828,6 @@ def _visual_context(
             "event_age_ms": max(0, now_ms - _event_timestamp_ms(event, frame_timestamp_ms)),
             "position": _track_position(track, visual_state),
             "size": _track_size(track),
-            "bbox_area_ratio": _track_value(track, "bbox_area_ratio"),
         },
         "trigger_evidence": _project_evidence(event),
         "current_scene": {
@@ -865,12 +864,10 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
     allowed_by_event = {
         "person_appeared": (
             "visible_duration_ms",
-            "bbox_area_ratio",
             "salient_reason",
         ),
         "person_left": (
             "lost_duration_ms",
-            "last_bbox_area_ratio",
         ),
         "person_passing_by": (
             "dx_ratio",
@@ -880,14 +877,11 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
             "passing_speed_class",
         ),
         "person_approaching_robot": (
-            "bbox_area_ratio_start",
-            "bbox_area_ratio_end",
             "area_growth_ratio",
             "area_delta",
             "camera_motion_state",
         ),
         "person_stopped_near_robot": (
-            "bbox_area_ratio",
             "speed_px_s_p95",
             "stationary_duration_ms",
             "camera_motion_state",
@@ -924,9 +918,28 @@ def _project_evidence(event: dict[str, Any]) -> dict[str, Any]:
     keys = allowed_by_event.get(str(event.get("event")), ())
     projected: dict[str, Any] = {}
     for key in keys:
-        if key in evidence:
+        if key in evidence and _is_agent_facing_evidence_key(key):
             projected[key] = evidence[key]
     return projected
+
+
+def _is_agent_facing_evidence_key(key: str) -> bool:
+    if key in {
+        "bbox",
+        "center_uv",
+        "track_id",
+        "runtime_person_slot",
+        "stream_ref",
+        "keypoints",
+    }:
+        return False
+    return (
+        not key.startswith("bbox_")
+        and "bbox_area_ratio" not in key
+        and not key.endswith("_track_id")
+        and "crop" not in key
+        and "embedding" not in key
+    )
 
 
 def _memory_event_keys(
@@ -1236,8 +1249,6 @@ def _attention_target(
         ),
         "position": _track_position(track, visual_state),
         "size": _track_size(track),
-        "center_uv": _track_value(track, "center_uv"),
-        "bbox_area_ratio": _track_value(track, "bbox_area_ratio"),
     }
 
 

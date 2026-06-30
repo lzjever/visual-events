@@ -265,7 +265,43 @@ def parse_visual_context(payload: dict[str, Any]) -> dict[str, Any]:
     wrapper, end = json.JSONDecoder().raw_decode(request[start:])
     assert request[start + end :].strip() == ""
     assert set(wrapper) == {"visual_context"}
-    return wrapper["visual_context"]
+    context = wrapper["visual_context"]
+    assert_no_visual_context_low_level_fields(context)
+    return context
+
+
+def assert_no_visual_context_low_level_fields(context: dict[str, Any]) -> None:
+    violations: list[str] = []
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                key_text = str(key)
+                if (
+                    key_text
+                    in {
+                        "center_uv",
+                        "bbox",
+                        "bbox_xyxy",
+                        "track_id",
+                        "runtime_person_slot",
+                        "keypoints",
+                        "stream_ref",
+                    }
+                    or key_text.startswith("bbox_")
+                    or "bbox_area_ratio" in key_text
+                    or key_text.endswith("_track_id")
+                    or "crop" in key_text
+                    or "embedding" in key_text
+                ):
+                    violations.append(f"{path}.{key_text}")
+                visit(child, f"{path}.{key_text}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+
+    visit(context, "$")
+    assert violations == []
 
 
 def visual_state_with_events(
@@ -574,9 +610,11 @@ def test_waving_frame_contains_parseable_visual_context_and_stable_top_level_pay
     assert context["event_target"]["target_ref"] == "current:front:person:0"
     assert "track_id" not in context["event_target"]
     assert "runtime_person_slot" not in context["event_target"]
+    assert "bbox_area_ratio" not in context["event_target"]
     assert context["event_target"]["visible_now"] is True
     assert context["event_target"]["position"] in {"left", "center", "right"}
     assert context["event_target"]["size"] in {"far", "mid", "near"}
+    assert context["event_target"]["matches_attention_target"] is True
     assert (
         context["current_scene"]["attention_target"]["target_ref"]
         == "current:front:person:0"
@@ -592,8 +630,9 @@ def test_waving_frame_contains_parseable_visual_context_and_stable_top_level_pay
         "mid",
         "near",
     }
-    assert context["current_scene"]["attention_target"]["center_uv"] == [420.0, 360.0]
-    assert context["current_scene"]["attention_target"]["bbox_area_ratio"] == 0.1042
+    assert "center_uv" not in context["current_scene"]["attention_target"]
+    assert "bbox_area_ratio" not in context["current_scene"]["attention_target"]
+    assert_no_visual_context_low_level_fields(context)
 
 
 def test_pending_approaching_flush_uses_latest_visual_state_for_current_scene():
@@ -729,6 +768,93 @@ def test_trigger_evidence_only_contains_whitelisted_projection_fields():
         "wave_duration_ms": 900,
         "keypoint_min_confidence": 0.72,
     }
+
+
+@pytest.mark.parametrize(
+    ("event_name", "evidence", "expected"),
+    [
+        (
+            "person_appeared",
+            {
+                "runtime_person_slot": 3,
+                "visible_duration_ms": 250,
+                "bbox_area_ratio": 0.1042,
+                "track_id": 7,
+                "center_uv": [420.0, 360.0],
+                "salient_reason": "new_track",
+                "crop_ref": "runtime/private/crop.jpg",
+            },
+            {
+                "visible_duration_ms": 250,
+                "salient_reason": "new_track",
+            },
+        ),
+        (
+            "person_left",
+            {
+                "runtime_person_slot": 3,
+                "lost_duration_ms": 350,
+                "last_bbox_area_ratio": 0.05,
+                "track_id": 7,
+                "bbox_xyxy": [320.0, 120.0, 520.0, 600.0],
+                "stream_ref": "ws_1",
+            },
+            {"lost_duration_ms": 350},
+        ),
+        (
+            "person_approaching_robot",
+            {
+                "runtime_person_slot": 3,
+                "bbox_area_ratio_start": 0.02,
+                "bbox_area_ratio_end": 0.08,
+                "area_growth_ratio": 4.0,
+                "area_delta": 0.06,
+                "camera_motion_state": "stationary",
+                "track_id": 7,
+                "embedding": [0.1, 0.2],
+            },
+            {
+                "area_growth_ratio": 4.0,
+                "area_delta": 0.06,
+                "camera_motion_state": "stationary",
+            },
+        ),
+        (
+            "person_stopped_near_robot",
+            {
+                "runtime_person_slot": 3,
+                "bbox_area_ratio": 0.11,
+                "speed_px_s_p95": 8.0,
+                "stationary_duration_ms": 1100,
+                "camera_motion_state": "stationary",
+                "track_id": 7,
+                "keypoints": [{"name": "nose"}],
+            },
+            {
+                "speed_px_s_p95": 8.0,
+                "stationary_duration_ms": 1100,
+                "camera_motion_state": "stationary",
+            },
+        ),
+    ],
+)
+def test_person_trigger_evidence_excludes_low_level_fields(
+    event_name: str,
+    evidence: dict[str, Any],
+    expected: dict[str, Any],
+):
+    module = import_botified_output()
+    event_id = f"front:{event_name}_projection"
+    event = semantic_event(event_id=event_id, event=event_name, evidence=evidence)
+    state = visual_state_with_events([event])
+    context = module._visual_context(event, state, now_ms=1_710_000_000_100)
+
+    frame = module.format_botified_frame(event, visual_context=context)
+
+    payload = parse_botified_frame(frame, event_id=event_id)
+    projected = parse_visual_context(payload)["trigger_evidence"]
+    assert projected == expected
+    assert_no_visual_context_low_level_fields({"trigger_evidence": projected})
 
 
 def test_current_visual_snapshot_projects_visible_people_and_active_target():

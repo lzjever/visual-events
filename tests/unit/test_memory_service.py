@@ -1895,6 +1895,7 @@ async def test_teach_person_no_usable_face_all_candidates_does_not_write(tmp_pat
     await _wait_for_memory_query_idle(subject, camera="front")
     backend.person_inputs.clear()
     backend.scene_inputs.clear()
+    before_counts = _store_counts(subject.store)
 
     with pytest.raises(MemoryServiceError) as exc:
         await subject.teach_person(
@@ -1908,9 +1909,9 @@ async def test_teach_person_no_usable_face_all_candidates_does_not_write(tmp_pat
 
     assert exc.value.code == "no_usable_face"
     assert len(backend.person_inputs) == 2
-    assert _count_rows(subject.store, "person_profiles") == 0
-    assert _count_rows(subject.store, "person_embeddings") == 0
-    assert _count_rows(subject.store, "embedding_provenance") == 0
+    assert "store_delta" in exc.value.details
+    _assert_zero_store_delta(exc.value.details["store_delta"])
+    assert _store_counts(subject.store) == before_counts
 
 
 @pytest.mark.asyncio

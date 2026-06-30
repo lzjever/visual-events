@@ -712,6 +712,10 @@ class AppMemoryService:
                 or embedding_candidate is None
             ):
                 if first_no_usable_face is not None:
+                    _attach_store_delta_to_error(
+                        first_no_usable_face,
+                        self._store_delta(store_before),
+                    )
                     raise first_no_usable_face
                 raise MemoryServiceError(
                     "embedding_unavailable",
