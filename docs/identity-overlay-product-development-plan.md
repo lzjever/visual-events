@@ -2,9 +2,13 @@
 
 日期：2026-06-30
 
+## Source of Truth / Supersession
+
+从本计划起，以下主题以本文为唯一 active product/development source of truth：`Identity Overlay`、`teach_person` server-side auto merge、`identify-current`、memory/teaching core contract、`.transcript` 交互输入、identity evidence、CLI current visual snapshot。旧 `memory-teaching` 文档如果与本文冲突，以本文为准；旧文档只保留 archived / legacy / reference 价值，不再承载 active GA gate、handoff 或 checklist。
+
 ## 1. 定位
 
-本计划取代 `docs/familiar-unknown-recognition-improvement-plan.md` 作为后续身份相关功能的 source of truth。旧文档只覆盖匿名熟悉人阈值和 evidence 小增强，本计划覆盖完整产品闭环：
+本计划取代 `docs/legacy/familiar-unknown-recognition-improvement-plan.md` 作为后续身份相关功能的 source of truth。旧文档只覆盖匿名熟悉人阈值和 evidence 小增强，本计划覆盖完整产品闭环：
 
 - `Identity Overlay`：server 维护当前画面人物的统一身份覆盖层。
 - `teach_person` 自动把 active anonymous / familiar unknown 合并成正式 person，client 不再调用 merge。
@@ -386,6 +390,32 @@ observed_duration_ms += increment_ms
 ```
 
 同一 memory query tick 内，同一 `anonymous_id` 只能更新一次，避免一帧多个 track 把 `seen_count` 加多次。
+
+### 5.7 Memory/Teaching Core Contract / Compatibility Gate
+
+本区块吸收旧 `memory-teaching` GA 文档中仍有效的 blocker 级合同。它是兼容 gate，不新增第二套产品范围、治理平台、manifest 审计或 evidence 工具。
+
+示教和场景记忆：
+
+- `teach_person` self introduction 只接受新鲜、可互动、可见的 `active_interaction_target` 解析“我”。不能 fallback 到 raw attention target、单人候选、最近候选或最大 bbox；没有可靠目标、目标过期、质量不足或脸不可用时返回业务失败并不写库。
+- `teach_person` third-person introduction 使用 A=介绍人、B=被介绍人。A 来自 `active_interaction_target`；B 只能从当前其他 person tracks 中解析。解析只使用现有 YOLOv8n-pose 的 shoulder / elbow / wrist 手臂方向、人指向人几何和短窗口稳定性；不承诺手指级指向、物体指向或通用手势理解。不确定时返回 `ambiguous`，不写库。
+- `teach_scene -> scene_activated` 保留 whole-scene memory 合同；`target.kind=scene` 表示整图场景教学和后续整图激活。
+- `target.kind=object` 是 unsupported / no-write：返回 `not_found` 或等价 unsupported error，不写 object memory，不降级为 scene 或 region。`region` 只可作为测试-only fixture 或后续能力，不是当前 agent-facing capability。
+
+内部解析和写库边界：
+
+- `MemoryFrameSnapshot` 是 resolver / recall / crop 的内部输入，至少持有 frame bytes/ref、timestamp、image size、track refs、bbox、keypoints、attention input、scene_context / engagement、track freshness/stability。`MemoryService` 不从 public `visual_state` 反推这些字段。
+- teach / resolve / identify active API 必须按 `stream_ref + camera` 选择 request-arrival snapshot / hot buffer；缺失、未知、过期或 stale snapshot 不回退 camera-only 最新帧，不写库。report 记录 `request_snapshot_ref`、`source_frame_ref`、frame timestamp、snapshot `observed_at_ms`、TTL 和 N-of-M stability 结果。
+- teach API 是原子 `resolve + write`：只有重新 resolve 为 `resolved` 且质量通过才提交。`ambiguous`、`not_found`、conflict、unsupported、no usable face 等 no-write case 必须记录 `store_delta`，memory-owned tables 除允许的诊断/临时表外 delta 为 0。
+- embedding provenance 随 person/scene + embedding 同事务持久提交，最小字段包括 `source_track_ref`、`source_frame_ref`、`crop_hash`、`crop_path_or_artifact_ref`、`resolver_target_ref`、`resolution_reason`、`embedding_type`、`embedding_model`、`embedding_version`、`embedding_dim`。
+- third-person 写库必须能机器证明写入 B 不是 A：至少记录 `introducer_ref`、`resolver_target_ref`、`stored_embedding_source_track_ref`、`stored_crop_frame/path`、`stored_crop_hash`、`profile.display_name` 和 pose pointing evidence；断言 `stored_embedding_source_track_ref == resolver_target_ref` 且 `stored_embedding_source_track_ref != introducer_ref`。
+- teach/write embedding、recognition retrieval、event recall 和 `identify-current` 都走 bounded worker / bounded retrieval / cooldown，不阻塞 10Hz detection/tracking/gaze；report 记录 queue/backpressure、timeout、max tracks per tick、rate limit、worker backlog 和主链路 latency 摘要。
+
+Report / evidence 最小验收：
+
+- runner 使用同 stem `.transcript` + `.jpeg/.jpg` interaction inventory，不使用 `des.txt`，不以 manifest 作为 identity/teaching 交互清单。
+- machine report 至少能 join：`source_text_path`、`source_image_path`、`source_frame_ref`、`request_snapshot_ref`、source/crop path 或 crop hash、API response record、event record、Botified frame / CLI projection record。
+- visual evidence 复用同一个 renderer，展示 self introduction、third-person A/B pose pointing、whole-scene activation、object unsupported no-write、identity overlay、event identity_context、identify-current、CLI current visual snapshot 和 teach auto merge。缺少 optional identity evidence 显示 `not_present`；缺 source frame/text/image/crop 这类 join 必要输入则 fail。
 
 ## 6. 事件系统设计
 
@@ -852,14 +882,19 @@ build_current_visual_snapshot(latest_visual_state) -> dict
 12. 更新 CLI Botified projection，支持 event `identity_context` 和按需 current visual snapshot。
 13. 更新 visual evidence、memory teaching evidence 和 CLI current visual snapshot demo。
 14. 补核心 tests 和 deterministic evidence demo。
-15. 同步更新旧合同和 runner：`docs/memory-teaching-ga-development-plan.md`、`docs/memory-teaching-ga-handoff.md`、API tests、GA runner 中的 explicit merge 主路径必须改为 `teach_person` auto merge；maintenance merge API 只保留单独测试。
+15. 同步更新旧合同和 runner：`docs/legacy/memory-teaching-ga-development-plan.md`、`docs/legacy/memory-teaching-ga-handoff.md`、API tests、GA runner 中的 explicit merge 主路径必须改为 `teach_person` auto merge；maintenance merge API 只保留单独测试。
 
 ## 9. 测试计划
 
 测试数据：
 
 - 必须使用本地 ignored 的 `val-data/` 做端到端验证和 demo artifact。
-- 交互文本唯一来源是参考图像旁边的同 stem `.transcript` 文件，例如 `img_1782721491874061223.jpg` 附近对应 `img_1782721491874061223.transcript`。
+- 数据清单分三层，不互相替代：
+  - legacy manifest oracle：`val-data/manifest.json` 仍是旧 7 scene / 576 frame 视觉 oracle 口径，不是 identity/memory/teaching 交互清单。
+  - JPEG replay inventory：runner 按实际目录发现 `.jpeg` / `.jpg` 图像和 scene 目录；当前本地发现是 15 个 scene 目录、2221 张 JPEG。
+  - interaction inventory：只由同 stem `.transcript` 和同 stem 图像组成；当前本地发现是 4 个 `.transcript` case。
+- runner 不以 manifest 作为 identity/teaching interaction list，也不要求 manifest 覆盖 identity cases；report 只记录 manifest legacy mismatch。
+- 交互文本唯一来源是参考图像旁边的同 stem `.transcript` 文件，例如同 stem 图像 `img_1782721491874061223.jpeg` 或 `img_1782721491874061223.jpg` 对应 `img_1782721491874061223.transcript`。
 - `.transcript` 表示用户消息发生在对应参考图像附近的时间点。runner replay 到该图像附近时，使用最新 `visual_state.stream_ref` 和该文本手工构造 `teach_person` / scene teach / identify 相关 API payload，模拟用户当时对机器人说话。
 - 不再支持目录级 `des.txt` 作为本计划输入；如果历史文档还提到 `des.txt`，以后续实现时以本计划的 `.transcript` 规则为准。
 - 不调用 LLM 自动解析 `.transcript`；测试中把文本手工映射为固定 request 模板，并在 report/evidence 中记录 `source_text_path`、`source_image_path`、`source_frame_ref` 和 `request_snapshot_ref`。

@@ -2,6 +2,8 @@
 
 日期：2026-06-30
 
+> Renderer spec only：本文只定义 memory/teaching/identity evidence renderer 的输入和输出形态，不是当前产品范围、active acceptance source 或 handoff checklist。当前 active 产品/开发/QA 验收以 `docs/identity-overlay-product-development-plan.md` 为准。
+
 ## 1. 目标
 
 新增一个独立的人眼证据生成命令，把一次 memory / teaching runner 产出的 artifacts 转成完整、可解释、可人工检查的 evidence 包。它面向开发、产品和 demo 检查人员，目标是打开一个 HTML 后能看懂：
@@ -9,18 +11,21 @@
 - 用户示教“请记住我”时，服务端绑定的是谁，后续是否召回为 `known_person_present`。
 - 用户介绍第三人时，服务端如何用介绍人的姿态指向解析被介绍人，后续是否召回为 `known_person_present`。
 - 用户示教整图场景时，服务端是否能输出 `scene_activated`。
+- Identity Overlay 是否进入 `visual_state.identity_context`，普通人物事件是否带 `identity_context`。
+- `identify-current`、CLI current visual snapshot 和 `teach_person -> merged_anonymous_person` 是否有可读证据。
 - object teaching 当前是 unsupported / no-write 负例，没有被误写成 person、scene 或 region memory。
-- 每张图和机器报告能通过 `assertion_id`、track refs、request/source frame ref、crop hash/path、event id 或 `memory_match_id` 对齐。
+- 每张图和机器报告能通过 `assertion_id`、track refs、`source_text_path`、`source_image_path`、`source_frame_ref`、`request_snapshot_ref`、crop hash/path、event id 或 `memory_match_id` 对齐。
 
 这个工具不是新的测试框架，不是第二套 E2E runner，也不是发布审计层。它是 `generate_visual_evidence.py` 在 memory / teaching 领域的对应工具：离线优先读取既有 runner artifact，生成可人工查看的 evidence，而不是替代机器断言。
 
 ## 2. 原则
 
 - KISS：一个 memory evidence 命令，一个底层 memory teaching runner，一个图片/HTML renderer。
-- DRY：不复制 teach / resolve / replay 业务流程；新工具只消费现有 runner artifact，或显式委托现有 runner 后再渲染。
+- DRY：不复制 teach / resolve / replay / identify-current 业务流程；新工具只消费现有 runner artifact，或显式委托现有 runner 后再渲染。
 - YAGNI：不做 Web dashboard、标注平台、profile 管理 UI、身份纠错 UI、模型训练、对象记忆系统或复杂审计报告。
 - 一个功能一种做法：实时视觉流 evidence 继续用 `tools/generate_visual_evidence.py`；memory / teaching evidence 使用新命令；不要让一个命令同时承担两种输入语义。
 - 低心智负担：默认从已有 runner artifact 生成 evidence；需要重新跑真实模型时，显式委托现有 runner，不在新工具里重写执行链路。
+- identity evidence 复用同一个 renderer 和同一个命令，不新增第二套 identity evidence 工具。
 - 不测试测试工具本身：只对核心 evidence contract、字段传播和高风险绘图 helper 做小范围测试；不做像素级回归和页面美术测试。
 - `val-data/`、模型、runtime DB、cache、artifacts 不进 Git。
 
@@ -46,9 +51,21 @@ uv run python tools/generate_memory_teaching_evidence.py \
 默认行为：
 
 - 不连接 server，不启动 runner，不加载模型。
-- 读取 `--artifact` 下的 `report.json`、`timeline.jsonl`、`teach_payloads.json`、`api_responses.jsonl`、`botified_frames.jsonl`、`visual_states.jsonl`、stored crop artifacts 和 source JPEG path。
+- 读取 `--artifact` 下的 `report.json`、`timeline.jsonl`、`teach_payloads.json`、`api_responses.jsonl`、`botified_frames.jsonl`、`visual_states.jsonl`、stored crop artifacts 和 source JPEG path；如果存在 identity source records，也一起读取。
 - 生成新的 HTML / 图片 evidence 包到 `--out`。
 - 如果缺少关键 artifact、source frame 或 crop path，直接失败并说明缺失项，不猜测路径，不伪造图片。
+
+### 4.1 最小 Source Artifact 输入合同
+
+source artifact 仍以 runner 输出为唯一机器 truth，renderer 不重新跑业务逻辑。最小输入分为 required 和 optional：
+
+- required：`report.json`、可 join 的 source frame/image/crop 引用、`source_frame_ref`、`request_snapshot_ref`。交互用例还必须有 `source_text_path` 和 `source_image_path`。
+- required records：teach/resolve API records、event records、`visual_states.jsonl` 或等价 report section、Botified/CLI projection records。
+- identity optional records：`identify-current` API records、`visual_states.identity_context`、event enrichment records、CLI current visual snapshot artifact、`teach_person -> merged_anonymous_person` response/evidence。
+- optional identity evidence 缺失时，HTML 显示 `not_present`，不伪造结论，也不让 renderer 失败。
+- source frame、source text、source image、stored crop 或 crop hash/path 缺失时失败；这些是图片和 report 双向对齐的必要证据。
+
+identity overlay、event identity_context、identify-current、CLI current visual snapshot 和 teach auto merge 都通过同一 `visual_evidence_index[]`、同一 HTML renderer 和同一图片绘制 helper 展示。
 
 可选真实模型便捷模式：
 
@@ -79,7 +96,7 @@ uv run python tools/generate_memory_teaching_evidence.py \
 uv run python tools/run_memory_teaching_ga_e2e.py --data-dir val-data --out artifacts/memory-teaching-ga
 ```
 
-`run_memory_teaching_ga_e2e.py` 继续用于 gate / regression；新命令用于人工 evidence / demo。两者底层执行和 renderer 不能分叉。
+`run_memory_teaching_ga_e2e.py` 可以继续用于 legacy regression / source artifact 生成；新命令用于人工 evidence / demo。两者底层执行和 renderer 不能分叉；当前 active acceptance 不由本文定义。
 
 ## 5. 输出结构
 
@@ -326,11 +343,11 @@ uv run python tools/generate_memory_teaching_evidence.py \
   --pose-model-path runtime/models/yolov8n-pose.pt
 ```
 
-验收：
+Renderer smoke checks（非产品验收）：
 
 - exit code 为 0。
-- renderer 成功时 exit code 为 0；source gate status 在 HTML 和 stdout 中明确展示。使用 `--strict-source-ok` 时，source `report.ok=false` 应返回非零。
-- `scene_count` 等于 source artifact 对应的实际 scene 数。
+- renderer 成功时 exit code 为 0；source report status 在 HTML 和 stdout 中明确展示。使用 `--strict-source-ok` 时，source `report.ok=false` 应返回非零。
+- discovered scene count 等于 source artifact 对应的实际 scene 数。
 - self、third-person、scene、artifact skeleton checks 在 source report 中通过；object negative 和 full replay 如果 source artifact 包含，也必须展示。
 - visual evidence 图片存在且可打开。
 - third-person 图上可见 introducer、target、关键点和指向线。
@@ -342,9 +359,9 @@ uv run python tools/generate_memory_teaching_evidence.py \
 - 不对 HTML CSS 做测试。
 - 不写测试去验证测试报告文案。
 
-## 9. 验收标准
+## 9. Renderer Completion Checks（非当前 handoff）
 
-开发完成后可以 handoff 的条件：
+renderer spec 完成条件：
 
 - 新命令能从现有 memory teaching artifact 生成 `artifacts/memory-teaching-evidence`。
 - 可选 `--run-local-smoke` 能委托现有 runner 用真实 local 模型先产出 source artifact，再生成 evidence。
@@ -352,7 +369,7 @@ uv run python tools/generate_memory_teaching_evidence.py \
 - 图片能解释关键算法证据，而不是只显示最终结论。
 - report 和图片能双向对齐：从图片能找到 report section，从 report 能找到图片。
 - object negative 仍然是 no-write，不被新 evidence 工具误包装成可用 object memory。
-- renderer 成功和 source gate 成功在 stdout / HTML 中分开展示，不把人眼 evidence 命令变成隐形测试 gate。
+- renderer 成功和 source report 成功在 stdout / HTML 中分开展示，不把人眼 evidence 命令变成隐形产品 gate。
 - agent-facing REST contract 没有新增低层字段。
 - `val-data/`、模型、runtime、cache、artifacts 仍不进入 Git。
 
@@ -371,4 +388,4 @@ uv run python tools/generate_memory_teaching_evidence.py \
 - pose 指向缺失的根因是 renderer 只有 target bbox，缺少 introducer/keypoint/ray 几何字段。
 - 推荐结构性修正 evidence 字段和 renderer，不用硬编码画假框，不从 public visual_state 反推内部 keypoints，也不在 renderer 中重新计算 pose scoring。
 
-本文按 KISS / DRY / YAGNI 收敛，可以作为开发 handoff 基础；实现时如发现字段无法可靠获得，应优先在内部 evidence 产生点补齐，而不是在 renderer 里猜测。
+本文按 KISS / DRY / YAGNI 收敛，可作为 renderer 开发参考；实现时如发现字段无法可靠获得，应优先在内部 evidence 产生点补齐，而不是在 renderer 里猜测。当前 handoff 入口仍以 identity plan 为准。

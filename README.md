@@ -33,7 +33,7 @@ DDS JPEG @10Hz
 - [Server 开发计划](docs/server-development-plan.md)
 - [Server handoff](docs/server-handoff.md)
 - [GA 后续开发计划](docs/ga-development-plan.md)
-- [Memory Teaching GA handoff](docs/memory-teaching-ga-handoff.md)
+- [Identity Overlay active plan](docs/identity-overlay-product-development-plan.md)
 - [协议草案](common/schema/protocol.md)
 - DDS contracts: [camera JPEG](common/schema/dds/camera_jpeg_contract.md), [gaze target v1](common/schema/dds/gaze_target_v1.md), [head state v1](common/schema/dds/head_state_v1.md)
 
