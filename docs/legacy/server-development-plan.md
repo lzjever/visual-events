@@ -874,6 +874,6 @@ Server handoff 必须包含：
 
 ## 16. 参考
 
-- [产品设计](../product-design.md)
-- [开发与测试计划](../development-test-plan.md)
+- [产品设计](product-design-v1-baseline.md)
+- [开发与测试计划](development-test-plan.md)
 - [协议草案](../../common/schema/protocol.md)
