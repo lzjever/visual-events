@@ -313,6 +313,76 @@ def visual_state_with_events(
     return state
 
 
+def current_snapshot_state(
+    *,
+    semantic_events: list[dict[str, Any]] | None = None,
+    identity_context: dict[str, Any] | None = None,
+    timestamp_ms: int = 1_710_000_000_000,
+) -> dict[str, Any]:
+    state = visual_state_with_events(
+        semantic_events or [],
+        timestamp_ms=timestamp_ms,
+        tracks=[
+            {
+                "track_id": 7,
+                "class": "person",
+                "bbox_xyxy": [420.0, 90.0, 780.0, 690.0],
+                "bbox_area_ratio": 0.24,
+                "center_uv": [600.0, 390.0],
+                "head_uv": [602.0, 180.0],
+                "lost_ms": 0,
+                "stream_ref": "ws_1",
+            },
+            {
+                "track_id": 8,
+                "class": "person",
+                "bbox_xyxy": [860.0, 160.0, 1030.0, 610.0],
+                "bbox_area_ratio": 0.083,
+                "center_uv": [945.0, 385.0],
+                "head_uv": [946.0, 230.0],
+                "lost_ms": 0,
+                "keypoints": [{"name": "nose"}],
+            },
+            {
+                "track_id": 9,
+                "class": "person",
+                "bbox_xyxy": [20.0, 120.0, 120.0, 500.0],
+                "bbox_area_ratio": 0.041,
+                "center_uv": [70.0, 310.0],
+                "lost_ms": 500,
+            },
+        ],
+        scene_context={
+            "engagement_state": "available",
+            "attention_available": True,
+            "target_track_id": 7,
+            "no_engage_reasons": [],
+            "target_reacquired": None,
+        },
+    )
+    if identity_context is not None:
+        state["identity_context"] = identity_context
+    return state
+
+
+def assert_no_current_snapshot_forbidden_fields(snapshot: dict[str, Any]) -> None:
+    serialized = json.dumps(snapshot, ensure_ascii=False)
+    for forbidden in (
+        "track_id",
+        "bbox",
+        "bbox_xyxy",
+        "keypoints",
+        "embedding",
+        "crop",
+        "crop_ref",
+        "stream_ref",
+        "raw_track_id",
+        "source_frame",
+        "request_snapshot_ref",
+    ):
+        assert forbidden not in serialized
+
+
 def test_allowed_events_constant_is_exact_botified_events():
     module = import_botified_output()
 
@@ -652,6 +722,173 @@ def test_trigger_evidence_only_contains_whitelisted_projection_fields():
         "wrist_y_relative_to_shoulder_px": 18.0,
         "wave_duration_ms": 900,
         "keypoint_min_confidence": 0.72,
+    }
+
+
+def test_current_visual_snapshot_projects_visible_people_and_active_target():
+    module = import_botified_output()
+    state = current_snapshot_state(
+        identity_context={
+            "overlay_status": "ready",
+            "active_target": {"track_id": 8},
+            "tracks": [
+                {"track_id": 7, "identity": known_identity_context()},
+                {"track_id": 8, "identity": familiar_unknown_identity_context()},
+            ],
+            "stream_ref": "ws_1",
+        }
+    )
+
+    snapshot = module.build_current_visual_snapshot(state, now_ms=1_710_000_000_100)
+
+    assert snapshot == {
+        "type": "current_visual_snapshot",
+        "camera": "front",
+        "frame_age_ms": 100,
+        "person_count": 2,
+        "overlay_status": "ready",
+        "active_target_ref": "current:front:person:1",
+        "people": [
+            {
+                "target_ref": "current:front:person:0",
+                "visible_now": True,
+                "attention_target": False,
+                "position": "center",
+                "size": "near",
+                "identity_context": {
+                    "status": "known_person",
+                    "source": "cache",
+                    "fresh_ms": 120,
+                    "confidence": 0.91,
+                    "person": {
+                        "person_id": "person_000001",
+                        "display_name": "张三",
+                        "description": "店长，熟悉新品陈列和现场活动",
+                        "tags": ["staff", "manager"],
+                    },
+                },
+            },
+            {
+                "target_ref": "current:front:person:1",
+                "visible_now": True,
+                "attention_target": True,
+                "position": "right",
+                "size": "mid",
+                "identity_context": {
+                    "status": "familiar_unknown",
+                    "source": "cache",
+                    "fresh_ms": 250,
+                    "confidence": 0.88,
+                    "anonymous_person": {
+                        "anonymous_id": "anon_seeded",
+                        "seen_count": 5,
+                        "observed_duration_ms": 4_200,
+                        "familiar_score": 0.88,
+                    },
+                },
+            },
+        ],
+        "events": [],
+    }
+    assert_no_current_snapshot_forbidden_fields(snapshot)
+
+
+def test_current_visual_snapshot_events_use_event_identity_before_track_identity():
+    module = import_botified_output()
+    event = semantic_event(event_id="front:waving_snapshot", event="person_waving")
+    event["identity_context"] = familiar_unknown_identity_context()
+    ignored_event = semantic_event(
+        event_id="front:ignored_snapshot",
+        event="attention_target_changed",
+    )
+    state = current_snapshot_state(
+        semantic_events=[event, ignored_event],
+        identity_context={
+            "overlay_status": "ready",
+            "tracks": [{"track_id": 7, "identity": known_identity_context()}],
+        },
+    )
+
+    snapshot = module.build_current_visual_snapshot(state, now_ms=1_710_000_000_100)
+
+    assert snapshot["events"] == [
+        {
+            "event": "person_waving",
+            "target_ref": "current:front:person:0",
+            "confidence": 0.86,
+            "identity_context": {
+                "status": "familiar_unknown",
+                "source": "cache",
+                "fresh_ms": 250,
+                "confidence": 0.88,
+                "anonymous_person": {
+                    "anonymous_id": "anon_seeded",
+                    "seen_count": 5,
+                    "observed_duration_ms": 4_200,
+                    "familiar_score": 0.88,
+                },
+            },
+        }
+    ]
+    serialized = json.dumps(snapshot["events"], ensure_ascii=False)
+    for event_summary in snapshot["events"]:
+        for forbidden_key in ("event_id", "track_id", "evidence", "text"):
+            assert forbidden_key not in event_summary
+    for forbidden in ("event_id", "track_id", "evidence", "有人在机器人前方挥手"):
+        assert forbidden not in serialized
+    assert_no_current_snapshot_forbidden_fields(snapshot)
+
+
+def test_current_visual_snapshot_identity_fallbacks_for_overlay_states():
+    module = import_botified_output()
+    ready_state = current_snapshot_state(
+        identity_context={"overlay_status": "ready", "tracks": []}
+    )
+    unavailable_state = current_snapshot_state(
+        identity_context={
+            "overlay_status": "unavailable",
+            "reason": "memory_disabled",
+            "tracks": [],
+        }
+    )
+    missing_state = current_snapshot_state()
+
+    ready_snapshot = module.build_current_visual_snapshot(
+        ready_state,
+        now_ms=1_710_000_000_100,
+    )
+    unavailable_snapshot = module.build_current_visual_snapshot(
+        unavailable_state,
+        now_ms=1_710_000_000_100,
+    )
+    missing_snapshot = module.build_current_visual_snapshot(
+        missing_state,
+        now_ms=1_710_000_000_100,
+    )
+
+    assert ready_snapshot["overlay_status"] == "ready"
+    assert ready_snapshot["people"][0]["identity_context"] == {"status": "unknown"}
+    assert unavailable_snapshot["overlay_status"] == "unavailable"
+    assert unavailable_snapshot["people"][0]["identity_context"] == {
+        "status": "unavailable",
+        "reason": "memory_disabled",
+    }
+    assert missing_snapshot["overlay_status"] == "unavailable"
+    assert missing_snapshot["people"][0]["identity_context"] == {
+        "status": "unavailable"
+    }
+
+
+def test_current_visual_snapshot_non_dict_input_returns_unavailable_empty_snapshot():
+    module = import_botified_output()
+
+    assert module.build_current_visual_snapshot(None, now_ms=1_710_000_000_100) == {
+        "type": "current_visual_snapshot",
+        "overlay_status": "unavailable",
+        "people": [],
+        "events": [],
+        "person_count": 0,
+        "active_target_ref": None,
     }
 
 

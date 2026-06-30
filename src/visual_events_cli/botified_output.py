@@ -65,6 +65,75 @@ class _PendingEvent:
     created_ms: int
 
 
+def build_current_visual_snapshot(
+    latest_visual_state: Any,
+    *,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    if not isinstance(latest_visual_state, dict):
+        return {
+            "type": "current_visual_snapshot",
+            "overlay_status": "unavailable",
+            "people": [],
+            "events": [],
+            "person_count": 0,
+            "active_target_ref": None,
+        }
+
+    observed_ms = _wall_clock_ms() if now_ms is None else _as_int(now_ms)
+    camera = _snapshot_camera(latest_visual_state)
+    frame_timestamp_ms = _as_int(
+        latest_visual_state.get("frame_timestamp_ms"),
+        observed_ms,
+    )
+    overlay = latest_visual_state.get("identity_context")
+    overlay_status, overlay_reason = _snapshot_overlay_status(overlay)
+    visible_tracks = _visible_person_tracks(latest_visual_state)
+    identity_by_track = _snapshot_identity_by_track(overlay)
+
+    target_ref_by_track: dict[Any, str] = {}
+    for index, track in enumerate(visible_tracks):
+        track_key = _track_identity_key(track.get("track_id"))
+        if track_key is not None:
+            target_ref_by_track[track_key] = _current_target_ref(camera, index)
+
+    active_track_key = _snapshot_active_track_key(latest_visual_state, overlay)
+    active_target_ref = (
+        target_ref_by_track.get(active_track_key)
+        if active_track_key is not None
+        else None
+    )
+
+    people = [
+        _snapshot_person(
+            track,
+            index=index,
+            camera=camera,
+            visual_state=latest_visual_state,
+            active_target_ref=active_target_ref,
+            overlay_status=overlay_status,
+            overlay_reason=overlay_reason,
+            identity_by_track=identity_by_track,
+        )
+        for index, track in enumerate(visible_tracks)
+    ]
+
+    return {
+        "type": "current_visual_snapshot",
+        "camera": camera,
+        "frame_age_ms": max(0, observed_ms - frame_timestamp_ms),
+        "person_count": len(people),
+        "overlay_status": overlay_status,
+        "active_target_ref": active_target_ref,
+        "people": people,
+        "events": _snapshot_events(
+            latest_visual_state,
+            target_ref_by_track=target_ref_by_track,
+            identity_by_track=identity_by_track,
+        ),
+    }
+
+
 def format_botified_frame(
     event: dict[str, Any],
     timeout_secs: int = 8,
@@ -473,6 +542,182 @@ def _format_request(
     return request
 
 
+def _snapshot_camera(visual_state: dict[str, Any]) -> str:
+    camera = visual_state.get("camera")
+    if isinstance(camera, str) and camera:
+        return camera
+    return "unknown"
+
+
+def _snapshot_overlay_status(overlay: Any) -> tuple[str, str | None]:
+    if not isinstance(overlay, dict):
+        return "unavailable", None
+
+    status = overlay.get("overlay_status")
+    if isinstance(status, str) and status.strip():
+        overlay_status = _clip_string(status, max_chars=80)
+    else:
+        overlay_status = "unavailable"
+
+    reason = overlay.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return overlay_status, _clip_string(reason, max_chars=180)
+    return overlay_status, None
+
+
+def _visible_person_tracks(visual_state: dict[str, Any]) -> list[dict[str, Any]]:
+    tracks = visual_state.get("tracks")
+    if not isinstance(tracks, list):
+        return []
+    return [
+        track
+        for track in tracks
+        if isinstance(track, dict)
+        and track.get("class") == "person"
+        and _track_visible(track)
+    ]
+
+
+def _snapshot_identity_by_track(overlay: Any) -> dict[Any, dict[str, Any]]:
+    if not isinstance(overlay, dict):
+        return {}
+    tracks = overlay.get("tracks")
+    if not isinstance(tracks, list):
+        return {}
+
+    identity_by_track: dict[Any, dict[str, Any]] = {}
+    for item in tracks:
+        if not isinstance(item, dict):
+            continue
+        track_key = _track_identity_key(item.get("track_id"))
+        if track_key is None:
+            continue
+        identity = _project_identity_context_value(item.get("identity"))
+        if identity:
+            identity_by_track[track_key] = identity
+    return identity_by_track
+
+
+def _track_identity_key(value: Any) -> Any | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value == "":
+        return None
+    try:
+        hash(value)
+    except TypeError:
+        return None
+    return value
+
+
+def _current_target_ref(camera: str, index: int) -> str:
+    return f"current:{camera}:person:{index}"
+
+
+def _snapshot_active_track_key(
+    visual_state: dict[str, Any],
+    overlay: Any,
+) -> Any | None:
+    if isinstance(overlay, dict):
+        active_target = overlay.get("active_target")
+        if isinstance(active_target, dict):
+            track_key = _track_identity_key(active_target.get("track_id"))
+            if track_key is not None:
+                return track_key
+
+    scene_context = visual_state.get("scene_context")
+    if isinstance(scene_context, dict):
+        return _track_identity_key(scene_context.get("target_track_id"))
+    return None
+
+
+def _snapshot_person(
+    track: dict[str, Any],
+    *,
+    index: int,
+    camera: str,
+    visual_state: dict[str, Any],
+    active_target_ref: str | None,
+    overlay_status: str,
+    overlay_reason: str | None,
+    identity_by_track: dict[Any, dict[str, Any]],
+) -> dict[str, Any]:
+    target_ref = _current_target_ref(camera, index)
+    track_key = _track_identity_key(track.get("track_id"))
+    return {
+        "target_ref": target_ref,
+        "visible_now": True,
+        "attention_target": target_ref == active_target_ref,
+        "position": _track_position(track, visual_state),
+        "size": _track_size(track),
+        "identity_context": _snapshot_person_identity(
+            track_key,
+            overlay_status=overlay_status,
+            overlay_reason=overlay_reason,
+            identity_by_track=identity_by_track,
+        ),
+    }
+
+
+def _snapshot_person_identity(
+    track_key: Any | None,
+    *,
+    overlay_status: str,
+    overlay_reason: str | None,
+    identity_by_track: dict[Any, dict[str, Any]],
+) -> dict[str, Any]:
+    if overlay_status == "ready":
+        if track_key is not None:
+            identity = identity_by_track.get(track_key)
+            if identity:
+                return identity
+        return {"status": "unknown"}
+
+    identity = {"status": "unavailable"}
+    if overlay_reason:
+        identity["reason"] = overlay_reason
+    return identity
+
+
+def _snapshot_events(
+    visual_state: dict[str, Any],
+    *,
+    target_ref_by_track: dict[Any, str],
+    identity_by_track: dict[Any, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    semantic_events = visual_state.get("semantic_events")
+    if not isinstance(semantic_events, list):
+        return []
+
+    projected: list[dict[str, Any]] = []
+    for event in semantic_events:
+        if not isinstance(event, dict):
+            continue
+        event_name = event.get("event")
+        if event_name not in BOTIFIED_ALLOWED_EVENTS:
+            continue
+
+        track_key = _track_identity_key(event.get("track_id"))
+        target_ref = target_ref_by_track.get(track_key) if track_key is not None else None
+        summary: dict[str, Any] = {"event": event_name}
+        if target_ref is not None:
+            summary["target_ref"] = target_ref
+
+        confidence = event.get("confidence")
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+            summary["confidence"] = confidence
+
+        identity = _project_identity_context(event)
+        if not identity and track_key is not None:
+            identity = identity_by_track.get(track_key, {})
+        if identity:
+            summary["identity_context"] = identity
+
+        projected.append(summary)
+
+    return projected
+
+
 def _visual_context(
     event: dict[str, Any],
     visual_state: dict[str, Any],
@@ -700,7 +945,10 @@ def _project_memory_context(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _project_identity_context(event: dict[str, Any]) -> dict[str, Any]:
-    context = event.get("identity_context")
+    return _project_identity_context_value(event.get("identity_context"))
+
+
+def _project_identity_context_value(context: Any) -> dict[str, Any]:
     if not isinstance(context, dict):
         return {}
 
