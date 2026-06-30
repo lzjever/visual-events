@@ -211,6 +211,12 @@ def test_visual_state_attention_contract_for_cli_gaze_mapper():
     assert 0.0 <= target_v <= height
     assert attention["reason"] == "largest_stable_person"
     assert "scene_context" in visual_state
+    assert visual_state["stream_ref"].startswith("ws_")
+    assert visual_state["identity_context"] == {
+        "overlay_status": "unavailable",
+        "reason": "memory_disabled",
+        "tracks": [],
+    }
     assert "phase_latencies_ms" not in visual_state
     assert "resources" not in visual_state
 

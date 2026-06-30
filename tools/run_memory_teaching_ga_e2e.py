@@ -42,6 +42,7 @@ from visual_events_server.protocol import SCHEMA_VERSION, encode_frame_message
 DEFAULT_DATA_DIR = Path("val-data")
 DEFAULT_OUT = Path("artifacts/memory-teaching-ga")
 DEFAULT_CAMERA = "front"
+PAYLOAD_FIXTURE_STREAM_REF = memory_e2e.PAYLOAD_FIXTURE_STREAM_REF
 
 JPEG_SUFFIXES = {".jpeg", ".jpg"}
 FORBIDDEN_AGENT_PAYLOAD_FIELDS = {
@@ -886,6 +887,7 @@ class LocalMemorySmokeRunner:
         self.out = out
         self.camera = camera
         self.frame_id = 0
+        self.latest_stream_ref: str | None = None
         case_runtime_dir = out / "runtime" / case
         case_config = _config_for_local_smoke_case(config, case_runtime_dir)
         self.processor = create_processor_from_config(case_config)
@@ -920,6 +922,9 @@ class LocalMemorySmokeRunner:
         }
         websocket.send_bytes(encode_frame_message(header, source_frame.jpeg_bytes))
         state = json.loads(websocket.receive_text())
+        stream_ref = state.get("stream_ref")
+        if isinstance(stream_ref, str) and stream_ref:
+            self.latest_stream_ref = stream_ref
         states_file.write(
             json.dumps(
                 {
@@ -2383,21 +2388,72 @@ def _seed_stable_interaction_window(
     app = getattr(client, "app", None)
     state_obj = getattr(app, "state", None)
     memory_service = getattr(state_obj, "memory_service", None)
-    if memory_service is not None:
+    processor = getattr(runner, "processor", None)
+    if processor is not None:
+        processor.drop_next_memory_snapshot = True
+    state = runner.send(
+        websocket,
+        timestamp_ms=start_timestamp_ms,
+        states_file=states_file,
+        phase=f"{phase}:stream-ref",
+    )
+    stream_ref = state.get("stream_ref")
+    if memory_service is not None and isinstance(stream_ref, str) and stream_ref:
         # Seed frames establish the request interaction window only; avoid
         # kicking off recognition queries before the teach/resolve request.
-        memory_service._last_query_frame_timestamp_ms[runner.camera] = (  # noqa: SLF001
-            start_timestamp_ms
+        memory_service._last_query_frame_timestamp_ms_by_stream[  # noqa: SLF001
+            (stream_ref, runner.camera)
+        ] = start_timestamp_ms
+        _discard_seed_query_for_stream(
+            memory_service,
+            stream_ref=stream_ref,
+            camera=runner.camera,
         )
-    state: dict[str, Any] = {}
     for index in range(2):
         state = runner.send(
             websocket,
-            timestamp_ms=start_timestamp_ms + index,
+            timestamp_ms=start_timestamp_ms + index + 1,
             states_file=states_file,
             phase=f"{phase}:stable-{index + 1}",
         )
     return state
+
+
+def _discard_seed_query_for_stream(
+    memory_service: Any,
+    *,
+    stream_ref: str,
+    camera: str,
+) -> None:
+    stream_key = (stream_ref, camera)
+    pending = memory_service._pending_queries_by_stream.get(stream_key)  # noqa: SLF001
+    if pending is not None:
+        for _ in range(50):
+            if pending.done():
+                break
+            time.sleep(0.01)
+        if pending.done():
+            memory_service._collect_completed_query(stream_key, pending)  # noqa: SLF001
+    queue = memory_service._completed_by_stream.get(stream_key)  # noqa: SLF001
+    if queue is not None:
+        queue.clear()
+    _clear_seed_anonymous_memory(memory_service)
+
+
+def _clear_seed_anonymous_memory(memory_service: Any) -> None:
+    store = getattr(memory_service, "store", None)
+    lock = getattr(store, "_lock", None)
+    connection = getattr(store, "connection", None)
+    if lock is None or connection is None:
+        return
+    with lock:
+        with connection:
+            connection.execute(
+                "DELETE FROM embedding_provenance WHERE owner_type = 'anonymous'"
+            )
+            connection.execute("DELETE FROM anonymous_embedding_vectors")
+            connection.execute("DELETE FROM anonymous_embeddings")
+            connection.execute("DELETE FROM anonymous_profiles")
 
 
 def _run_actual_self_introduction(
@@ -2918,6 +2974,7 @@ def _run_actual_supporting_summary_link(
             endpoint="/v1/memory/teach/person",
             payload=memory_e2e.self_introduction_payload(
                 camera=camera,
+                stream_ref=runner.require_stream_ref(),
                 display_name="Supporting Summary Person",
                 description="supporting contracts summary/link fixture",
                 tags=["memory-ga"],
@@ -3131,6 +3188,7 @@ def _run_actual_supporting_correct_identity(
             endpoint="/v1/memory/teach/person",
             payload=memory_e2e.self_introduction_payload(
                 camera=camera,
+                stream_ref=runner.require_stream_ref(),
                 display_name="Supporting Wrong Person",
             ),
             operation="supporting_teach_wrong_person",
@@ -3203,13 +3261,18 @@ def _run_actual_supporting_resolve_target_states(
     )
     with runner.open_stream() as websocket:
         memory_service = runner.client.app.state.memory_service
-        memory_service._last_query_frame_timestamp_ms[camera] = 1_000  # noqa: SLF001
-        runner.send(
+        runner.processor.drop_next_memory_snapshot = True
+        state = runner.send(
             websocket,
             timestamp_ms=1_000,
             states_file=states_file,
             phase="supporting-resolve-single-frame",
         )
+        stream_ref = state.get("stream_ref")
+        if isinstance(stream_ref, str) and stream_ref:
+            memory_service._last_query_frame_timestamp_ms_by_stream[  # noqa: SLF001
+                (stream_ref, camera)
+            ] = 1_000
         resolved_response = _post_and_record_api_response(
             runner=runner,
             api_response_records=api_response_records,
@@ -3250,6 +3313,7 @@ def _run_actual_supporting_resolve_target_states(
             endpoint="/v1/memory/resolve-target",
             payload=memory_e2e.object_resolve_payload(
                 camera=camera,
+                stream_ref=runner.require_stream_ref(),
                 referent_text="手机",
             ),
             operation="supporting_resolve_target_not_found",
@@ -3346,6 +3410,11 @@ def _post_and_record_api_response(
     payload: dict[str, Any],
     operation: str,
 ) -> dict[str, Any]:
+    payload = _payload_for_runner_stream(
+        runner=runner,
+        endpoint=endpoint,
+        payload=payload,
+    )
     response = runner.client.post(endpoint, json=payload)
     body = response.json()
     record = {
@@ -3360,6 +3429,20 @@ def _post_and_record_api_response(
     }
     api_response_records.append(record)
     return {"status_code": response.status_code, "body": body}
+
+
+def _payload_for_runner_stream(
+    *,
+    runner: Any,
+    endpoint: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    stream_ref = getattr(runner, "latest_stream_ref", None)
+    return memory_e2e._with_stream_ref_for_endpoint(  # noqa: SLF001
+        endpoint=endpoint,
+        payload=payload,
+        stream_ref=stream_ref if isinstance(stream_ref, str) else None,
+    )
 
 
 def _get_and_record_api_response(
@@ -3571,6 +3654,7 @@ def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
         endpoint = "/v1/memory/teach/person"
         payload = {
             "camera": camera,
+            "stream_ref": PAYLOAD_FIXTURE_STREAM_REF,
             "target": {
                 "kind": "person",
                 "intent": "self_introduction",
@@ -3584,6 +3668,7 @@ def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
         endpoint = "/v1/memory/teach/person"
         payload = {
             "camera": camera,
+            "stream_ref": PAYLOAD_FIXTURE_STREAM_REF,
             "target": {
                 "kind": "person",
                 "intent": "third_person_introduction",
@@ -3596,6 +3681,7 @@ def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
         endpoint = "/v1/memory/teach/scene"
         payload = {
             "camera": camera,
+            "stream_ref": PAYLOAD_FIXTURE_STREAM_REF,
             "target": {
                 "kind": "scene",
                 "intent": "teach_scene",
@@ -3608,6 +3694,7 @@ def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
         endpoint = "/v1/memory/resolve-target"
         payload = {
             "camera": camera,
+            "stream_ref": PAYLOAD_FIXTURE_STREAM_REF,
             "target": {
                 "kind": "object",
                 "intent": "teach_object",

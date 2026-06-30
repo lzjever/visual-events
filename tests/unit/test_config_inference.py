@@ -156,6 +156,7 @@ known_person_margin = 0.07
 anonymous_threshold = 0.76
 anonymous_margin = 0.04
 familiar_seen_count = 4
+familiar_observed_duration_ms = 12000
 familiar_threshold = 0.88
 scene_threshold = 0.79
 event_cooldown_ms = 30000
@@ -180,6 +181,7 @@ event_cooldown_ms = 30000
     assert config.memory.matching.anonymous_threshold == 0.76
     assert config.memory.matching.anonymous_margin == 0.04
     assert config.memory.matching.familiar_seen_count == 4
+    assert config.memory.matching.familiar_observed_duration_ms == 12000
     assert config.memory.matching.familiar_threshold == 0.88
     assert config.memory.matching.scene_threshold == 0.79
     assert config.memory.matching.event_cooldown_ms == 30000
@@ -204,6 +206,10 @@ familiar_seen_count = 0
     [
         ("[memory.embedding]\nteach_queue_size = -1", "teach_queue_size"),
         ("[memory.embedding]\nteach_queue_timeout_ms = 0", "teach_queue_timeout_ms"),
+        (
+            "[memory.matching]\nfamiliar_observed_duration_ms = -1",
+            "familiar_observed_duration_ms",
+        ),
     ],
 )
 def test_load_config_rejects_invalid_memory_embedding_teach_queue_values(

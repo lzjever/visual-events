@@ -440,6 +440,7 @@ def service(
     embedding_backend: FakeEmbeddingBackend | None = None,
     teach_queue_size: int = 2,
     teach_queue_timeout_ms: int = 500,
+    familiar_observed_duration_ms: int = 0,
 ) -> AppMemoryService:
     clock = lambda: now_ms
     store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
@@ -457,6 +458,7 @@ def service(
             anonymous_threshold=0.95,
             anonymous_margin=0.05,
             familiar_seen_count=3,
+            familiar_observed_duration_ms=familiar_observed_duration_ms,
             familiar_threshold=0.95,
             scene_threshold=0.95,
             event_cooldown_ms=5_000,
@@ -523,6 +525,7 @@ async def test_teach_person_embedding_does_not_block_event_loop_when_backend_blo
         subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "张三"},
             }
@@ -561,6 +564,7 @@ async def test_teach_scene_embedding_does_not_block_event_loop_when_backend_bloc
         subject.teach_scene(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "scene"},
                 "memory": {"title": "新品展示区"},
             }
@@ -605,6 +609,7 @@ async def test_teach_embedding_backpressure_rejects_second_write_and_first_persi
         subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "第一位"},
             }
@@ -617,6 +622,7 @@ async def test_teach_embedding_backpressure_rejects_second_write_and_first_persi
             await subject.teach_person(
                 {
                     "camera": "front",
+                    "stream_ref": "ws_1",
                     "target": {"mode": "track_id", "track_id": 7},
                     "profile": {"display_name": "第二位"},
                 }
@@ -665,6 +671,7 @@ async def test_teach_embedding_slot_survives_cancelled_request_until_job_finishe
         subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "第一位"},
             }
@@ -682,6 +689,7 @@ async def test_teach_embedding_slot_survives_cancelled_request_until_job_finishe
                 subject.teach_person(
                     {
                         "camera": "front",
+                        "stream_ref": "ws_1",
                         "target": {"mode": "track_id", "track_id": 7},
                         "profile": {"display_name": "第二位"},
                     }
@@ -717,6 +725,7 @@ async def test_close_waits_for_in_flight_teach_before_closing_store(tmp_path):
         subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "第一位"},
             }
@@ -752,6 +761,7 @@ async def test_teach_person_sends_decodable_face_safe_person_crop(tmp_path):
     await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {"display_name": "张三"},
         }
@@ -786,6 +796,7 @@ async def test_teach_person_persists_embedding_provenance_for_resolved_target(tm
     person = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {"display_name": "张三"},
         }
@@ -845,6 +856,7 @@ async def test_teach_person_response_includes_minimal_person_visual_evidence(
     person = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {"display_name": "张三"},
         }
@@ -896,6 +908,7 @@ async def test_teach_person_duplicate_same_display_name_updates_metadata_without
     created = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {"display_name": "张三", "description": "旧备注"},
         }
@@ -909,6 +922,7 @@ async def test_teach_person_duplicate_same_display_name_updates_metadata_without
     updated = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {
                 "display_name": "张三",
@@ -960,6 +974,7 @@ async def test_teach_person_duplicate_same_display_name_links_new_external_ref(
     created = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {"display_name": "张三"},
         }
@@ -969,6 +984,7 @@ async def test_teach_person_duplicate_same_display_name_links_new_external_ref(
     updated = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {
                 "display_name": "张三",
@@ -1009,6 +1025,7 @@ async def test_teach_person_duplicate_external_ref_bound_elsewhere_conflicts_wit
     created = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {"display_name": "张三"},
         }
@@ -1031,6 +1048,7 @@ async def test_teach_person_duplicate_external_ref_bound_elsewhere_conflicts_wit
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {
                     "display_name": "张三",
@@ -1071,6 +1089,7 @@ async def test_teach_person_duplicate_missing_metadata_fields_preserves_existing
     created = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {
                 "display_name": "张三",
@@ -1083,6 +1102,7 @@ async def test_teach_person_duplicate_missing_metadata_fields_preserves_existing
     await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {"display_name": "张三"},
         }
@@ -1115,6 +1135,7 @@ async def test_teach_person_duplicate_different_display_name_conflicts_without_w
     created = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {"display_name": "张三", "description": "店长"},
         }
@@ -1129,6 +1150,7 @@ async def test_teach_person_duplicate_different_display_name_conflicts_without_w
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "李四", "description": "新客户"},
             }
@@ -1193,6 +1215,7 @@ async def test_teach_person_duplicate_active_anonymous_requires_merge_without_wr
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "张三"},
             }
@@ -1298,6 +1321,7 @@ async def test_teach_person_waits_pending_same_camera_before_duplicate_store_del
         subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "张三"},
             }
@@ -1344,6 +1368,7 @@ async def test_teach_person_removes_crop_artifact_when_store_create_fails(
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "张三"},
             }
@@ -1379,6 +1404,7 @@ async def test_teach_person_falls_back_to_target_masked_context_on_no_usable_fac
     person = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {"display_name": "张三"},
         }
@@ -1448,6 +1474,7 @@ async def test_teach_person_no_usable_face_all_candidates_does_not_write(tmp_pat
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "张三"},
             }
@@ -1479,6 +1506,7 @@ async def test_self_introduction_requires_active_interaction_target_and_does_not
     preview = await subject.resolve_target(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "person",
                 "intent": "self_introduction",
@@ -1498,6 +1526,7 @@ async def test_self_introduction_requires_active_interaction_target_and_does_not
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {
                     "kind": "person",
                     "intent": "self_introduction",
@@ -1552,6 +1581,7 @@ async def test_self_introduction_inconsistent_active_targets_does_not_write(tmp_
 
     request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "self_introduction",
@@ -1608,6 +1638,7 @@ async def test_self_introduction_latest_active_target_must_match_stable_track(tm
 
     request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "self_introduction",
@@ -1666,6 +1697,7 @@ async def test_self_introduction_uses_active_interaction_target_for_write(tmp_pa
     person = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "person",
                 "intent": "self_introduction",
@@ -1744,6 +1776,7 @@ async def test_resolve_self_introduction_returns_snapshot_evidence_and_zero_stor
     preview = await subject.resolve_target(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "person",
                 "intent": "self_introduction",
@@ -1826,6 +1859,7 @@ async def test_self_introduction_inactive_snapshot_uses_allowed_ambiguity_type(
 
     request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "self_introduction",
@@ -1874,6 +1908,7 @@ async def test_self_introduction_stale_snapshot_uses_allowed_ambiguity_type(tmp_
             anonymous_threshold=0.95,
             anonymous_margin=0.05,
             familiar_seen_count=3,
+            familiar_observed_duration_ms=0,
             familiar_threshold=0.95,
             scene_threshold=0.95,
             event_cooldown_ms=5_000,
@@ -1900,6 +1935,7 @@ async def test_self_introduction_stale_snapshot_uses_allowed_ambiguity_type(tmp_
 
     request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "self_introduction",
@@ -1994,6 +2030,7 @@ async def test_third_person_introduction_uses_active_person_pose_pointing_for_wr
 
     request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "third_person_introduction",
@@ -2148,6 +2185,7 @@ async def test_third_person_introduction_requires_pose_target_window_stability(
 
     request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "third_person_introduction",
@@ -2269,6 +2307,7 @@ async def test_third_person_fallback_keeps_introduced_person_evidence(tmp_path):
     person = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "person",
                 "intent": "third_person_introduction",
@@ -2364,6 +2403,7 @@ async def test_third_person_introduction_pose_unclear_does_not_write(tmp_path):
 
     request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "third_person_introduction",
@@ -2471,6 +2511,7 @@ async def test_third_person_introduction_multiple_pointing_candidates_does_not_w
 
     request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "third_person_introduction",
@@ -2531,6 +2572,7 @@ async def test_non_pose_resolve_target_does_not_emit_pose_pointing_evidence(tmp_
     preview = await subject.resolve_target(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
         }
     )
@@ -2554,6 +2596,7 @@ async def test_non_self_public_person_intents_do_not_invent_ambiguity_types(tmp_
 
     third_person = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "third_person_introduction",
@@ -2579,6 +2622,7 @@ async def test_non_self_public_person_intents_do_not_invent_ambiguity_types(tmp_
 
     unsupported = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "identify_person",
@@ -2620,6 +2664,7 @@ async def test_teach_person_bbox_target_uses_face_safe_person_crop(tmp_path):
     await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "mode": "bbox",
                 "bbox_xyxy": [300.0, 100.0, 700.0, 650.0],
@@ -2687,6 +2732,7 @@ async def test_teach_person_rejects_invalid_bbox_without_embedding_or_write(tmp_
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {
                     "mode": "bbox",
                     "bbox_xyxy": [300.0, 100.0, 305.0, 105.0],
@@ -2719,6 +2765,7 @@ async def test_teach_scene_scene_mode_sends_original_decodable_jpeg_to_backend(t
     await subject.teach_scene(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "scene"},
             "memory": {"title": "新品展示区"},
         }
@@ -2745,6 +2792,7 @@ async def test_teach_scene_persists_embedding_provenance_for_full_frame(tmp_path
     scene = await subject.teach_scene(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "scene"},
             "memory": {"title": "新品展示区"},
         }
@@ -2815,6 +2863,7 @@ async def test_teach_scene_removes_crop_artifact_when_store_create_fails(
         await subject.teach_scene(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "scene"},
                 "memory": {"title": "新品展示区"},
             }
@@ -2846,6 +2895,7 @@ async def test_teach_scene_rejects_bbox_target_without_writing_scene(tmp_path):
         await subject.teach_scene(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {
                     "mode": "bbox",
                     "bbox_xyxy": [300.0, 100.0, 700.0, 650.0],
@@ -3070,6 +3120,436 @@ async def test_memory_query_report_counts_only_targets_actually_queried_before_e
 
 
 @pytest.mark.asyncio
+async def test_known_person_background_query_updates_identity_overlay_even_when_event_is_suppressed(
+    tmp_path,
+):
+    now = 10_000
+
+    def clock() -> int:
+        return now
+
+    match_vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[match_vector, match_vector],
+    )
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=backend,
+            frame_cache_seconds=1,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.05,
+            familiar_seen_count=3,
+            familiar_observed_duration_ms=0,
+            familiar_threshold=0.95,
+            scene_threshold=1.1,
+            event_cooldown_ms=5_000,
+            clock_ms=clock,
+        )
+    )
+    _seed_person(subject, backend, vector=match_vector, display_name="张三")
+
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=first_frame),
+    )
+    first_events = await _drain_memory_events(
+        subject,
+        camera="front",
+        connection_id="ws_1",
+        frame_id=1,
+        frame_timestamp_ms=1_000,
+    )
+    assert [event["event"] for event in first_events] == ["known_person_present"]
+
+    now = 11_001
+    second_frame = frame(frame_id=2, timestamp_ms=1_500)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot(frame_message=second_frame),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    suppressed = await subject.drain_completed_events(
+        camera="front",
+        connection_id="ws_1",
+        frame_id=2,
+        frame_timestamp_ms=1_500,
+    )
+
+    identity_context = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+    )
+
+    assert suppressed == []
+    assert identity_context["tracks"][0]["identity"]["status"] == "known_person"
+    assert identity_context["tracks"][0]["identity"]["person"]["display_name"] == "张三"
+    assert identity_context["tracks"][0]["identity"]["fresh_ms"] == 0
+
+
+@pytest.mark.asyncio
+async def test_familiar_anonymous_overlay_requires_seen_count_duration_and_score(tmp_path):
+    now = 10_000
+
+    def clock() -> int:
+        return now
+
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[
+            (1.0, 0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0, 0.0),
+        ],
+        scene_dim=4,
+    )
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=backend,
+            frame_cache_seconds=5,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.0,
+            familiar_seen_count=3,
+            familiar_observed_duration_ms=1_000,
+            familiar_threshold=0.95,
+            scene_threshold=1.1,
+            event_cooldown_ms=0,
+            clock_ms=clock,
+        )
+    )
+
+    for frame_id, frame_timestamp_ms in ((1, 1_000), (2, 1_600)):
+        now += 600
+        query_frame = frame(frame_id=frame_id, timestamp_ms=frame_timestamp_ms)
+        await subject.observe_visual_state(
+            connection_id="ws_1",
+            frame=query_frame,
+            visual_state=visual_state(frame_id=frame_id, timestamp_ms=frame_timestamp_ms),
+            memory_snapshot=memory_snapshot(frame_message=query_frame),
+        )
+        await _wait_for_memory_query_idle(subject, camera="front")
+
+    not_familiar = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_600),
+    )
+    assert not_familiar["tracks"][0]["identity"]["status"] == "unknown"
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=2,
+            frame_timestamp_ms=1_600,
+        )
+        == []
+    )
+
+    now += 600
+    third_frame = frame(frame_id=3, timestamp_ms=2_200)
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=third_frame,
+        visual_state=visual_state(frame_id=3, timestamp_ms=2_200),
+        memory_snapshot=memory_snapshot(frame_message=third_frame),
+    )
+    events = await _drain_memory_events(
+        subject,
+        camera="front",
+        connection_id="ws_1",
+        frame_id=3,
+        frame_timestamp_ms=2_200,
+    )
+    familiar = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visual_state(frame_id=3, timestamp_ms=2_200),
+    )
+
+    assert [event["event"] for event in events] == ["familiar_unknown_present"]
+    assert events[0]["memory_context"]["anonymous_person"]["observed_duration_ms"] == 1_000
+    assert familiar["tracks"][0]["identity"]["status"] == "familiar_unknown"
+    assert (
+        familiar["tracks"][0]["identity"]["anonymous_person"]["observed_duration_ms"]
+        == 1_000
+    )
+
+
+@pytest.mark.asyncio
+async def test_same_camera_streams_run_recognition_and_drain_events_independently(
+    tmp_path,
+):
+    match_vector = _unit_vector(0)
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[match_vector, match_vector],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_person(subject, backend, vector=match_vector, display_name="张三")
+
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    await subject.observe_visual_state(
+        connection_id="ws_a",
+        frame=first_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=first_frame),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front", connection_id="ws_a")
+
+    second_frame = frame(frame_id=2, timestamp_ms=1_000)
+    await subject.observe_visual_state(
+        connection_id="ws_b",
+        frame=second_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=second_frame),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front", connection_id="ws_b")
+
+    first_events = await subject.drain_completed_events(
+        camera="front",
+        connection_id="ws_a",
+        frame_id=1,
+        frame_timestamp_ms=1_000,
+    )
+    first_drained_again = await subject.drain_completed_events(
+        camera="front",
+        connection_id="ws_a",
+        frame_id=1,
+        frame_timestamp_ms=1_000,
+    )
+    second_events = await subject.drain_completed_events(
+        camera="front",
+        connection_id="ws_b",
+        frame_id=2,
+        frame_timestamp_ms=1_000,
+    )
+
+    assert [event["event"] for event in first_events] == ["known_person_present"]
+    assert first_events[0]["evidence"]["source_frame_id"] == 1
+    assert first_drained_again == []
+    assert [event["event"] for event in second_events] == ["known_person_present"]
+    assert second_events[0]["evidence"]["source_frame_id"] == 2
+    assert (
+        subject.identity_context_for_visual_state(
+            connection_id="ws_a",
+            visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        )["tracks"][0]["identity"]["status"]
+        == "known_person"
+    )
+    assert (
+        subject.identity_context_for_visual_state(
+            connection_id="ws_b",
+            visual_state=visual_state(frame_id=2, timestamp_ms=1_000),
+        )["tracks"][0]["identity"]["status"]
+        == "known_person"
+    )
+
+
+@pytest.mark.asyncio
+async def test_same_query_tick_updates_matching_anonymous_profile_once(tmp_path):
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[
+            (1.0, 0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0, 0.0),
+        ],
+        scene_dim=4,
+    )
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=backend,
+            frame_cache_seconds=5,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.0,
+            familiar_seen_count=3,
+            familiar_observed_duration_ms=0,
+            familiar_threshold=0.95,
+            scene_threshold=1.1,
+            event_cooldown_ms=0,
+            clock_ms=lambda: 10_000,
+        )
+    )
+    store.create_anonymous_profile(
+        anonymous_id="anon_1",
+        seen_count=1,
+        first_seen_at_ms=1_000,
+        last_seen_at_ms=1_000,
+        familiar_score=1.0,
+    )
+    store.add_anonymous_embedding(
+        anonymous_id="anon_1",
+        result=EmbeddingResult(
+            vector=(1.0, 0.0, 0.0, 0.0),
+            embedding_type="face",
+            embedding_model=backend.person_model,
+            embedding_version=backend.model_version,
+            quality=1.0,
+        ),
+        source_target_type="recognition_track",
+        now_ms=1_000,
+    )
+    query_frame = frame(frame_id=2, timestamp_ms=1_500)
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=query_frame,
+        visual_state=visual_state(frame_id=2, timestamp_ms=1_500),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [
+                person_track(7, frame_message=query_frame),
+                person_track(8, frame_message=query_frame),
+            ],
+            frame_message=query_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    events = await subject.drain_completed_events(
+        camera="front",
+        connection_id="ws_1",
+        frame_id=2,
+        frame_timestamp_ms=1_500,
+    )
+    profile = store.get_active_anonymous_profile("anon_1")
+
+    assert events == []
+    assert profile is not None
+    assert profile["seen_count"] == 2
+    assert profile["observed_duration_ms"] == 500
+
+
+@pytest.mark.asyncio
+async def test_same_query_tick_new_anonymous_is_touched_before_later_track_match(
+    tmp_path,
+):
+    backend = SequencePersonEmbeddingBackend(
+        person_vectors=[
+            (1.0, 0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0, 0.0),
+        ],
+        scene_dim=4,
+    )
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=backend,
+            frame_cache_seconds=5,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.0,
+            familiar_seen_count=2,
+            familiar_observed_duration_ms=0,
+            familiar_threshold=0.95,
+            scene_threshold=1.1,
+            event_cooldown_ms=0,
+            clock_ms=lambda: 10_000,
+        )
+    )
+    query_frame = frame(frame_id=1, timestamp_ms=1_000)
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=query_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot_with_tracks(
+            [
+                person_track(7, frame_message=query_frame),
+                person_track(8, frame_message=query_frame),
+            ],
+            frame_message=query_frame,
+            attention_track_id=7,
+            scene_target_track_id=7,
+        ),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    events = await subject.drain_completed_events(
+        camera="front",
+        connection_id="ws_1",
+        frame_id=1,
+        frame_timestamp_ms=1_000,
+    )
+    matches = store.search_anonymous_embeddings(
+        EmbeddingResult(
+            vector=(1.0, 0.0, 0.0, 0.0),
+            embedding_type="face",
+            embedding_model=backend.person_model,
+            embedding_version=backend.model_version,
+            quality=1.0,
+        ),
+        limit=2,
+    )
+    profile = store.get_active_anonymous_profile(matches[0].matched_id)
+
+    assert events == []
+    assert _count_rows(store, "anonymous_profiles") == 1
+    assert _count_rows(store, "anonymous_embeddings") == 1
+    assert profile is not None
+    assert profile["seen_count"] == 1
+    assert profile["observed_duration_ms"] == 0
+
+
+@pytest.mark.asyncio
+async def test_background_recall_no_usable_face_sets_track_identity_unavailable(
+    tmp_path,
+):
+    backend = ScriptedPersonEmbeddingBackend(
+        person_outcomes=[_no_usable_face(), _no_usable_face()],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    source_frame = frame(frame_id=1, timestamp_ms=1_000)
+
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=source_frame,
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+        memory_snapshot=memory_snapshot(frame_message=source_frame),
+    )
+    await _wait_for_memory_query_idle(subject, camera="front")
+    events = await subject.drain_completed_events(
+        camera="front",
+        connection_id="ws_1",
+        frame_id=1,
+        frame_timestamp_ms=1_000,
+    )
+    identity_context = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visual_state(frame_id=1, timestamp_ms=1_000),
+    )
+
+    assert events == []
+    assert len(backend.person_inputs) == 2
+    assert identity_context["overlay_status"] == "ready"
+    assert identity_context["tracks"][0]["identity"] == {
+        "status": "unavailable",
+        "source": "background_recall",
+        "fresh_ms": 0,
+        "reason": "no_usable_face",
+    }
+
+
+@pytest.mark.asyncio
 async def test_memory_query_respects_max_person_tracks_bound(tmp_path):
     match_vector = _unit_vector(5)
     backend = SequencePersonEmbeddingBackend(
@@ -3214,6 +3694,7 @@ async def test_observe_visual_state_does_not_wait_for_blocking_memory_query(tmp_
             anonymous_threshold=0.95,
             anonymous_margin=0.05,
             familiar_seen_count=3,
+            familiar_observed_duration_ms=0,
             familiar_threshold=0.95,
             scene_threshold=0.95,
             event_cooldown_ms=5_000,
@@ -3327,9 +3808,12 @@ async def _wait_for_memory_query_idle(
     subject: AppMemoryService,
     *,
     camera: str,
+    connection_id: str = "ws_1",
 ) -> None:
     for _ in range(20):
-        pending = subject._pending_queries_by_camera.get(camera)  # noqa: SLF001
+        pending = subject._pending_queries_by_stream.get(  # noqa: SLF001
+            (connection_id, camera)
+        )
         if pending is None or pending.done():
             return
         await asyncio.sleep(0.05)
@@ -3433,6 +3917,7 @@ async def test_teach_person_requires_fresh_cached_target_and_does_not_write_on_e
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "张三"},
             }
@@ -3449,6 +3934,7 @@ async def test_teach_person_requires_fresh_cached_target_and_does_not_write_on_e
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 99},
                 "profile": {"display_name": "张三"},
             }
@@ -3474,6 +3960,7 @@ async def test_teach_person_rejects_expired_cached_frame_without_writing(tmp_pat
             anonymous_threshold=0.95,
             anonymous_margin=0.05,
             familiar_seen_count=3,
+            familiar_observed_duration_ms=0,
             familiar_threshold=0.95,
             scene_threshold=0.95,
             event_cooldown_ms=5_000,
@@ -3491,6 +3978,7 @@ async def test_teach_person_rejects_expired_cached_frame_without_writing(tmp_pat
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "track_id", "track_id": 7},
                 "profile": {"display_name": "张三"},
             }
@@ -3517,6 +4005,7 @@ async def test_teach_summary_link_and_low_frequency_memory_events(tmp_path):
             anonymous_threshold=0.95,
             anonymous_margin=0.05,
             familiar_seen_count=3,
+            familiar_observed_duration_ms=0,
             familiar_threshold=0.95,
             scene_threshold=0.95,
             event_cooldown_ms=5_000,
@@ -3534,6 +4023,7 @@ async def test_teach_summary_link_and_low_frequency_memory_events(tmp_path):
     person = await subject.teach_person(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "track_id", "track_id": 7},
             "profile": {
                 "display_name": "张三",
@@ -3545,6 +4035,7 @@ async def test_teach_summary_link_and_low_frequency_memory_events(tmp_path):
     scene = await subject.teach_scene(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "scene"},
             "memory": {
                 "title": "新品展示区",
@@ -3646,6 +4137,7 @@ async def test_unknown_person_becomes_familiar_unknown_then_merge_suppresses_ano
             anonymous_threshold=0.95,
             anonymous_margin=0.0,
             familiar_seen_count=2,
+            familiar_observed_duration_ms=0,
             familiar_threshold=0.95,
             scene_threshold=1.1,
             event_cooldown_ms=0,
@@ -3748,6 +4240,7 @@ async def test_correct_identity_blocks_same_wrong_candidate_without_deleting_pro
             anonymous_threshold=0.95,
             anonymous_margin=0.0,
             familiar_seen_count=3,
+            familiar_observed_duration_ms=0,
             familiar_threshold=0.95,
             scene_threshold=1.1,
             event_cooldown_ms=0,
@@ -3849,6 +4342,7 @@ async def test_resolve_target_preview_and_point_teach_rejects_ambiguous_write(tm
     preview = await subject.resolve_target(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "point_uv", "point_uv": [500.0, 160.0]},
         }
     )
@@ -3861,6 +4355,7 @@ async def test_resolve_target_preview_and_point_teach_rejects_ambiguous_write(tm
         await subject.teach_person(
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "point_uv", "point_uv": [500.0, 160.0]},
                 "profile": {"display_name": "张三"},
             }
@@ -3886,6 +4381,7 @@ async def test_teach_scene_persists_region_id_and_emits_it_in_scene_context(tmp_
     scene = await subject.teach_scene(
         {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {"mode": "scene"},
             "memory": {
                 "title": "门口",

@@ -41,6 +41,7 @@ class MemoryMatchingConfig:
     anonymous_threshold: float = 0.78
     anonymous_margin: float = 0.04
     familiar_seen_count: int = 3
+    familiar_observed_duration_ms: int = 10000
     familiar_threshold: float = 0.78
     scene_threshold: float = 0.78
     event_cooldown_ms: int = 60000
@@ -243,6 +244,12 @@ def _parse_memory_matching_config(data: dict[str, Any]) -> MemoryMatchingConfig:
     familiar_seen_count = int(
         data.get("familiar_seen_count", defaults.familiar_seen_count)
     )
+    familiar_observed_duration_ms = int(
+        data.get(
+            "familiar_observed_duration_ms",
+            defaults.familiar_observed_duration_ms,
+        )
+    )
     familiar_threshold = float(
         data.get("familiar_threshold", defaults.familiar_threshold)
     )
@@ -262,6 +269,10 @@ def _parse_memory_matching_config(data: dict[str, Any]) -> MemoryMatchingConfig:
             raise ValueError(f"[memory.matching].{name} must be between 0 and 1")
     if familiar_seen_count <= 0:
         raise ValueError("[memory.matching].familiar_seen_count must be positive")
+    if familiar_observed_duration_ms < 0:
+        raise ValueError(
+            "[memory.matching].familiar_observed_duration_ms must be non-negative"
+        )
     if event_cooldown_ms <= 0:
         raise ValueError("[memory.matching].event_cooldown_ms must be positive")
     return MemoryMatchingConfig(
@@ -270,6 +281,7 @@ def _parse_memory_matching_config(data: dict[str, Any]) -> MemoryMatchingConfig:
         anonymous_threshold=anonymous_threshold,
         anonymous_margin=anonymous_margin,
         familiar_seen_count=familiar_seen_count,
+        familiar_observed_duration_ms=familiar_observed_duration_ms,
         familiar_threshold=familiar_threshold,
         scene_threshold=scene_threshold,
         event_cooldown_ms=event_cooldown_ms,

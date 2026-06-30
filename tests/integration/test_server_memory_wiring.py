@@ -226,6 +226,7 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
 
     person_request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "person",
             "intent": "self_introduction",
@@ -240,6 +241,7 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
 
     scene_request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "scene",
             "intent": "teach_scene",
@@ -304,6 +306,7 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
 
     resolve_request = {
         "camera": "front",
+        "stream_ref": "ws_1",
         "target": {
             "kind": "scene",
             "intent": "teach_scene",
@@ -332,6 +335,7 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
             "teach_person",
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {
                     "kind": "person",
                     "intent": "self_introduction",
@@ -344,6 +348,7 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
             "teach_scene",
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "scene"},
                 "memory": {"title": "新品展示区"},
             },
@@ -357,6 +362,7 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
             "resolve_target",
             {
                 "camera": "front",
+                "stream_ref": "ws_1",
                 "target": {"mode": "scene"},
             },
         ),
@@ -367,6 +373,7 @@ def test_public_memory_routes_reject_low_level_agent_payload_fields():
     base_payloads = {
         "/v1/memory/resolve-target": {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "scene",
                 "intent": "teach_scene",
@@ -375,6 +382,7 @@ def test_public_memory_routes_reject_low_level_agent_payload_fields():
         },
         "/v1/memory/teach/person": {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "person",
                 "intent": "self_introduction",
@@ -384,6 +392,7 @@ def test_public_memory_routes_reject_low_level_agent_payload_fields():
         },
         "/v1/memory/teach/scene": {
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "scene",
                 "intent": "teach_scene",
@@ -413,6 +422,88 @@ def test_public_memory_routes_reject_low_level_agent_payload_fields():
                 payload["target"][field] = value
             response = client.post(path, json=payload)
             assert response.status_code == 422
+
+    assert service.calls == []
+
+
+def test_public_memory_routes_pass_required_stream_ref_without_exposing_low_level_targets():
+    service = FakeMemoryService()
+    client = TestClient(create_app(memory_service=service))
+
+    response = client.post(
+        "/v1/memory/resolve-target",
+        json={
+            "camera": "front",
+            "stream_ref": "ws_stream_1",
+            "target": {
+                "kind": "person",
+                "intent": "self_introduction",
+                "referent_text": "我",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert service.calls == [
+        (
+            "resolve_target",
+            {
+                "camera": "front",
+                "stream_ref": "ws_stream_1",
+                "target": {
+                    "kind": "person",
+                    "intent": "self_introduction",
+                    "referent_text": "我",
+                },
+            },
+        )
+    ]
+
+
+def test_public_frame_bound_memory_routes_require_stream_ref():
+    service = FakeMemoryService()
+    client = TestClient(create_app(memory_service=service))
+    payloads = [
+        (
+            "/v1/memory/resolve-target",
+            {
+                "camera": "front",
+                "target": {
+                    "kind": "person",
+                    "intent": "self_introduction",
+                    "referent_text": "我",
+                },
+            },
+        ),
+        (
+            "/v1/memory/teach/person",
+            {
+                "camera": "front",
+                "target": {
+                    "kind": "person",
+                    "intent": "self_introduction",
+                    "referent_text": "我",
+                },
+                "profile": {"display_name": "张三"},
+            },
+        ),
+        (
+            "/v1/memory/teach/scene",
+            {
+                "camera": "front",
+                "target": {
+                    "kind": "scene",
+                    "intent": "teach_scene",
+                    "referent_text": "当前展示区",
+                },
+                "memory": {"title": "新品展示区"},
+            },
+        ),
+    ]
+
+    for path, payload in payloads:
+        response = client.post(path, json=payload)
+        assert response.status_code == 422
 
     assert service.calls == []
 
@@ -482,6 +573,7 @@ def test_public_resolve_target_rejects_object_without_calling_memory_service():
         "/v1/memory/resolve-target",
         json={
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "object",
                 "intent": "teach_object",
@@ -510,6 +602,7 @@ def test_public_resolve_target_does_not_expose_conflict_as_resolver_status():
         "/v1/memory/resolve-target",
         json={
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "scene",
                 "intent": "teach_scene",
@@ -529,6 +622,7 @@ def test_default_memory_endpoints_fail_fast_when_memory_service_is_disabled():
         "/v1/memory/teach/person",
         json={
             "camera": "front",
+            "stream_ref": "ws_1",
             "target": {
                 "kind": "person",
                 "intent": "self_introduction",
@@ -612,6 +706,119 @@ def test_memory_side_chain_failure_does_not_break_visual_stream():
     assert message["type"] == "visual_state"
     assert message["frame_id"] == 7
     assert message["semantic_events"] == []
+
+
+def test_stream_includes_stream_ref_and_disabled_identity_context():
+    client = TestClient(create_app())
+
+    with client.websocket_connect("/v1/stream") as websocket:
+        websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
+        message = json.loads(websocket.receive_text())
+
+    assert message["stream_ref"].startswith("ws_")
+    assert message["identity_context"] == {
+        "overlay_status": "unavailable",
+        "reason": "memory_disabled",
+        "tracks": [],
+    }
+
+
+def test_stream_ref_and_frame_cache_are_isolated_for_same_camera_connections(tmp_path):
+    config = ServerConfig(
+        memory=MemoryConfig(
+            enabled=True,
+            db_path=tmp_path / "memory.sqlite3",
+            frame_cache_seconds=5,
+            query_interval_ms=60_000,
+            queue_size=4,
+            embedding=MemoryEmbeddingConfig(backend="fake"),
+            matching=MemoryMatchingConfig(
+                known_person_threshold=0.95,
+                known_person_margin=0.05,
+                anonymous_threshold=0.95,
+                anonymous_margin=0.05,
+                familiar_seen_count=3,
+                familiar_observed_duration_ms=0,
+                familiar_threshold=0.95,
+                scene_threshold=0.95,
+                event_cooldown_ms=5_000,
+            ),
+        )
+    )
+    with TestClient(
+        create_app(processor=MemoryVisualProcessor(), config=config)
+    ) as client:
+        with client.websocket_connect("/v1/stream") as first:
+            first.send_bytes(
+                encode_frame_message(
+                    frame_header(frame_id=1, timestamp_ms=1710000000000),
+                    JPEG_BYTES,
+                )
+            )
+            first_message = json.loads(first.receive_text())
+        with client.websocket_connect("/v1/stream") as second:
+            second.send_bytes(
+                encode_frame_message(
+                    frame_header(frame_id=2, timestamp_ms=1710000000100),
+                    JPEG_BYTES,
+                )
+            )
+            second_message = json.loads(second.receive_text())
+
+        memory_service = client.app.state.memory_service
+        first_cached = memory_service._cache.get_fresh_for_stream(  # noqa: SLF001
+            first_message["stream_ref"],
+            "front",
+        )
+        second_cached = memory_service._cache.get_fresh_for_stream(  # noqa: SLF001
+            second_message["stream_ref"],
+            "front",
+        )
+
+    assert first_message["stream_ref"] != second_message["stream_ref"]
+    assert first_cached.frame.frame_id == 1
+    assert second_cached.frame.frame_id == 2
+    assert first_message["identity_context"]["overlay_status"] == "ready"
+    assert first_message["identity_context"]["tracks"][0]["identity"]["status"] in {
+        "pending",
+        "unknown",
+    }
+
+
+def test_configured_memory_rejects_unknown_stream_ref_without_camera_fallback(tmp_path):
+    config = ServerConfig(
+        memory=MemoryConfig(
+            enabled=True,
+            db_path=tmp_path / "memory.sqlite3",
+            frame_cache_seconds=5,
+            query_interval_ms=60_000,
+            queue_size=4,
+            embedding=MemoryEmbeddingConfig(backend="fake"),
+        )
+    )
+    with TestClient(
+        create_app(processor=MemoryVisualProcessor(), config=config)
+    ) as client:
+        with client.websocket_connect("/v1/stream") as websocket:
+            websocket.send_bytes(encode_frame_message(frame_header(), JPEG_BYTES))
+            message = json.loads(websocket.receive_text())
+            assert message["stream_ref"] != "ws_missing"
+
+            response = client.post(
+                "/v1/memory/resolve-target",
+                json={
+                    "camera": "front",
+                    "stream_ref": "ws_missing",
+                    "target": {
+                        "kind": "person",
+                        "intent": "self_introduction",
+                        "referent_text": "我",
+                    },
+                },
+            )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "no_active_frame"
 
 
 class MemoryVisualProcessor:
@@ -759,6 +966,7 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
         with client.websocket_connect("/v1/stream") as websocket:
             messages = _send_stable_memory_window(websocket)
             assert [message["semantic_events"] for message in messages] == [[], []]
+            stream_ref = messages[-1]["stream_ref"]
 
             person_profile = {
                 "display_name": "张三",
@@ -769,6 +977,7 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
                 "/v1/memory/teach/person",
                 json={
                     "camera": "front",
+                    "stream_ref": stream_ref,
                     "target": {
                         "kind": "person",
                         "intent": "self_introduction",
@@ -800,6 +1009,7 @@ def test_configured_memory_service_teaches_and_returns_memory_events(tmp_path):
                 "/v1/memory/teach/scene",
                 json={
                     "camera": "front",
+                    "stream_ref": stream_ref,
                     "target": {
                         "kind": "scene",
                         "intent": "teach_scene",
@@ -976,12 +1186,14 @@ def test_configured_memory_resolve_target_endpoint_previews_without_writing(tmp_
         create_app(processor=MemoryVisualProcessor(), config=config)
     ) as client:
         with client.websocket_connect("/v1/stream") as websocket:
-            _send_stable_memory_window(websocket)
+            messages = _send_stable_memory_window(websocket)
+            stream_ref = messages[-1]["stream_ref"]
 
             response = client.post(
                 "/v1/memory/resolve-target",
                 json={
                     "camera": "front",
+                    "stream_ref": stream_ref,
                     "target": {
                         "kind": "person",
                         "intent": "self_introduction",

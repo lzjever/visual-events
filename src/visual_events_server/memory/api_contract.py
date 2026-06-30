@@ -55,6 +55,10 @@ class _RejectLowLevelFieldsModel(_StrictModel):
 
 class _BaseMemoryRequest(_RejectLowLevelFieldsModel):
     camera: str = Field(min_length=1)
+    stream_ref: str = Field(min_length=1)
+
+    def _base_internal_request(self) -> dict[str, Any]:
+        return {"camera": self.camera, "stream_ref": self.stream_ref}
 
 
 class TeachPersonRequest(_BaseMemoryRequest):
@@ -63,7 +67,7 @@ class TeachPersonRequest(_BaseMemoryRequest):
 
     def to_internal_request(self) -> dict[str, Any]:
         return {
-            "camera": self.camera,
+            **self._base_internal_request(),
             "target": self.target.model_dump(),
             "profile": dict(self.profile),
         }
@@ -75,7 +79,7 @@ class TeachSceneRequest(_BaseMemoryRequest):
 
     def to_internal_request(self) -> dict[str, Any]:
         return {
-            "camera": self.camera,
+            **self._base_internal_request(),
             "target": {"mode": "scene"},
             "memory": dict(self.memory),
         }
@@ -93,10 +97,7 @@ class ResolveTargetRequest(_BaseMemoryRequest):
             target: dict[str, Any] = self.target.model_dump()
         else:
             target = {"mode": "scene"}
-        return {
-            "camera": self.camera,
-            "target": target,
-        }
+        return {**self._base_internal_request(), "target": target}
 
 
 class ConversationSummaryRequest(_RejectLowLevelFieldsModel):

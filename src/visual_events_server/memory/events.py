@@ -136,6 +136,9 @@ def build_familiar_unknown_event(
             "anonymous_person": {
                 "anonymous_id": anonymous_profile["anonymous_id"],
                 "seen_count": int(anonymous_profile["seen_count"]),
+                "observed_duration_ms": int(
+                    anonymous_profile.get("observed_duration_ms", 0)
+                ),
                 "familiar_score": _rounded(anonymous_profile["familiar_score"]),
                 "last_seen_at_ms": int(anonymous_profile["last_seen_at_ms"]),
             }

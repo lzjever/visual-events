@@ -118,6 +118,7 @@ V1 baseline 使用 `YOLOv8n-pose + 项目内 ByteTrack-style IoU/TTL tracker bas
   "type": "visual_state",
   "schema_version": 1,
   "camera": "front",
+  "stream_ref": "stream_front_01",
   "frame_id": 1024,
   "frame_timestamp_ms": 1710000000000,
   "server_timestamp_ms": 1710000000082,
@@ -147,6 +148,21 @@ V1 baseline 使用 `YOLOv8n-pose + 项目内 ByteTrack-style IoU/TTL tracker bas
     "person_count": 1,
     "largest_person_stable": true,
     "someone_near_center": true
+  },
+  "identity_context": {
+    "overlay_status": "ready",
+    "tracks": [
+      {
+        "track_id": 7,
+        "identity": {
+          "status": "pending",
+          "source": "none"
+        }
+      }
+    ],
+    "active_target": {
+      "track_id": 7
+    }
   },
   "semantic_events": []
 }

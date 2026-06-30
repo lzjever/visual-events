@@ -144,6 +144,7 @@ def test_maps_des_txt_to_stable_agent_payloads_without_low_level_fields(
     assert by_scene["pic_teach_me"]["endpoint"] == "/v1/memory/teach/person"
     assert by_scene["pic_teach_me"]["payload"] == {
         "camera": "front",
+        "stream_ref": memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
         "target": {
             "kind": "person",
             "intent": "self_introduction",
@@ -153,6 +154,7 @@ def test_maps_des_txt_to_stable_agent_payloads_without_low_level_fields(
     }
     assert by_scene["pic_teach_person"]["payload"] == {
         "camera": "front",
+        "stream_ref": memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
         "target": {
             "kind": "person",
             "intent": "third_person_introduction",
@@ -162,6 +164,7 @@ def test_maps_des_txt_to_stable_agent_payloads_without_low_level_fields(
     }
     assert by_scene["pic_teach_scene_galbot"]["payload"] == {
         "camera": "front",
+        "stream_ref": memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
         "target": {
             "kind": "scene",
             "intent": "teach_scene",
@@ -172,6 +175,7 @@ def test_maps_des_txt_to_stable_agent_payloads_without_low_level_fields(
     assert by_scene["pic_teach_item_phone"]["endpoint"] == "/v1/memory/resolve-target"
     assert by_scene["pic_teach_item_phone"]["payload"] == {
         "camera": "front",
+        "stream_ref": memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
         "target": {
             "kind": "object",
             "intent": "teach_object",
@@ -397,22 +401,29 @@ def test_memory_e2e_runner_generates_public_rest_payloads_without_low_level_fiel
     payloads = [
         memory_e2e.self_introduction_payload(
             camera="front",
+            stream_ref=memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
             display_name="小李飞刀",
             description="public self introduction",
             tags=["memory-e2e"],
         ),
         memory_e2e.third_person_introduction_payload(
             camera="front",
+            stream_ref=memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
             display_name="彭刚",
             referent_text="这位/彭刚",
         ),
         memory_e2e.teach_scene_payload(
             camera="front",
+            stream_ref=memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
             title="银河通用办公室",
             description="public whole-scene teaching",
             activation_hint="office",
         ),
-        memory_e2e.object_resolve_payload(camera="front", referent_text="手机"),
+        memory_e2e.object_resolve_payload(
+            camera="front",
+            stream_ref=memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
+            referent_text="手机",
+        ),
     ]
 
     TeachPersonRequest.model_validate(payloads[0])
@@ -1241,6 +1252,67 @@ def test_local_smoke_requires_explicit_real_local_backends(tmp_path: Path) -> No
     assert "--scene-model-path" in missing
     assert "--inference-backend ultralytics" in missing
     assert "--pose-model-path" in missing
+
+
+def test_local_runner_frame_bound_posts_include_latest_stream_ref(
+    tmp_path: Path,
+) -> None:
+    frame_path = tmp_path / "img_000.jpeg"
+    frame_path.write_bytes(_valid_jpeg_bytes())
+    source_frame = memory_e2e.SourceFrame(
+        path=frame_path,
+        jpeg_bytes=frame_path.read_bytes(),
+        width=1280,
+        height=720,
+    )
+    runner = module.LocalMemorySmokeRunner(
+        case="local-stream-ref-payload",
+        out=tmp_path,
+        camera="front",
+        config=module.ServerConfig(
+            runtime_dir=tmp_path / "runtime",
+            memory=module.MemoryConfig(
+                enabled=True,
+                db_path=tmp_path / "memory.sqlite3",
+                embedding=module.MemoryEmbeddingConfig(backend="fake"),
+            ),
+        ),
+    )
+    api_response_records: list[dict[str, Any]] = []
+    states_path = tmp_path / "visual_states.jsonl"
+
+    with states_path.open("w", encoding="utf-8") as states_file:
+        with runner.open_stream() as websocket:
+            runner.send(
+                websocket,
+                source_frame,
+                timestamp_ms=1_000,
+                states_file=states_file,
+                phase="stream-ref-seed",
+            )
+            response = module._post_and_record_api_response(
+                runner=runner,
+                api_response_records=api_response_records,
+                payload_index="local:resolve-object",
+                scene="pic_teach_item_phone",
+                endpoint="/v1/memory/resolve-target",
+                payload={
+                    "camera": "front",
+                    "target": {
+                        "kind": "object",
+                        "intent": "teach_object",
+                        "referent_text": "手机",
+                    },
+                },
+                operation="local_resolve_object_stream_ref_contract",
+            )
+
+    assert response["status_code"] == 200
+    assert api_response_records
+    payload = api_response_records[0]["payload"]
+    assert payload["stream_ref"] == runner.latest_stream_ref
+    assert payload["stream_ref"].startswith("ws_")
+    assert payload["stream_ref"] != memory_e2e.PAYLOAD_FIXTURE_STREAM_REF
 
 
 def test_local_smoke_report_fails_insufficient_third_person_without_models(

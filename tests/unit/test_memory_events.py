@@ -138,6 +138,7 @@ def test_familiar_unknown_event_contains_anonymous_person_context() -> None:
     assert event["memory_context"]["anonymous_person"] == {
         "anonymous_id": "anon_1",
         "seen_count": 5,
+        "observed_duration_ms": 0,
         "familiar_score": 0.81,
         "last_seen_at_ms": 1710000000000,
     }

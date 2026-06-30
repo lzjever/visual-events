@@ -466,10 +466,32 @@ def test_anonymous_profile_embedding_and_retrieval_round_trip(tmp_path) -> None:
         "first_seen_at_ms": 1000,
         "last_seen_at_ms": 1300,
         "familiar_score": 0.72,
+        "observed_duration_ms": 0,
         "status": "active",
         "merged_person_id": None,
     }
     assert store.get_active_anonymous_profile("anon_inactive") is None
+
+
+def test_anonymous_profile_observed_duration_defaults_and_updates(tmp_path) -> None:
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=4, scene_dim=4)
+    store.create_anonymous_profile(
+        anonymous_id="anon_1",
+        seen_count=1,
+        first_seen_at_ms=1000,
+        last_seen_at_ms=1000,
+        familiar_score=0.25,
+    )
+
+    assert store.get_active_anonymous_profile("anon_1")["observed_duration_ms"] == 0
+
+    store.update_anonymous_profile(
+        anonymous_id="anon_1",
+        last_seen_at_ms=1600,
+        observed_duration_ms=500,
+    )
+
+    assert store.get_active_anonymous_profile("anon_1")["observed_duration_ms"] == 500
 
 
 def test_anonymous_embedding_records_provenance_and_merge_copies_it(tmp_path) -> None:

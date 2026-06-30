@@ -34,6 +34,7 @@ from .memory.api_contract import (
     unsupported_target_kind_response,
     validate_resolve_target_response,
 )
+from .memory.identity_overlay import unavailable_identity_context
 from .metrics import JsonlMetricsSink, MetricsSink
 from .processor import (
     BackendVisualFrameProcessor,
@@ -103,6 +104,14 @@ class MemoryService(Protocol):
     async def resolve_target(self, request: dict[str, Any]) -> dict[str, Any]:
         ...
 
+    def identity_context_for_visual_state(
+        self,
+        *,
+        connection_id: str,
+        visual_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
 
 class DisabledMemoryService:
     async def observe_visual_state(
@@ -155,6 +164,14 @@ class DisabledMemoryService:
 
     async def resolve_target(self, request: dict[str, Any]) -> dict[str, Any]:
         raise self._disabled()
+
+    def identity_context_for_visual_state(
+        self,
+        *,
+        connection_id: str,
+        visual_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return unavailable_identity_context("memory_disabled")
 
     async def close(self) -> None:
         return None
@@ -334,6 +351,7 @@ def create_app(
                     await websocket.close(code=1008)
                     return
                 response = await processor_session.process_frame(frame)
+                response["stream_ref"] = connection_id
                 memory_snapshot = _take_memory_frame_snapshot(processor_session)
                 response = await _attach_memory_events(
                     app.state.memory_service,
@@ -440,8 +458,20 @@ async def _attach_memory_events(
             frame_timestamp_ms=frame.timestamp_ms,
         )
     except Exception:
+        _attach_identity_context(
+            memory_service,
+            connection_id=connection_id,
+            visual_state=visual_state,
+            fallback_reason="memory_unavailable",
+        )
         return visual_state
 
+    _attach_identity_context(
+        memory_service,
+        connection_id=connection_id,
+        visual_state=visual_state,
+        fallback_reason=None,
+    )
     if not completed_events:
         return visual_state
 
@@ -451,6 +481,29 @@ async def _attach_memory_events(
         return visual_state
     semantic_events.extend(completed_events)
     return visual_state
+
+
+def _attach_identity_context(
+    memory_service: MemoryService,
+    *,
+    connection_id: str,
+    visual_state: dict[str, Any],
+    fallback_reason: str | None,
+) -> None:
+    identity_context = None
+    context_for_state = getattr(memory_service, "identity_context_for_visual_state", None)
+    if callable(context_for_state):
+        try:
+            identity_context = context_for_state(
+                connection_id=connection_id,
+                visual_state=visual_state,
+            )
+        except Exception:
+            identity_context = None
+    if identity_context is None and fallback_reason is not None:
+        identity_context = unavailable_identity_context(fallback_reason)
+    if isinstance(identity_context, dict):
+        visual_state["identity_context"] = identity_context
 
 
 def _take_memory_frame_snapshot(processor_session: Any) -> Any | None:
@@ -506,6 +559,9 @@ def _memory_service_from_config(config: ServerConfig) -> MemoryService:
         anonymous_threshold=config.memory.matching.anonymous_threshold,
         anonymous_margin=config.memory.matching.anonymous_margin,
         familiar_seen_count=config.memory.matching.familiar_seen_count,
+        familiar_observed_duration_ms=(
+            config.memory.matching.familiar_observed_duration_ms
+        ),
         familiar_threshold=config.memory.matching.familiar_threshold,
         scene_threshold=config.memory.matching.scene_threshold,
         event_cooldown_ms=config.memory.matching.event_cooldown_ms,

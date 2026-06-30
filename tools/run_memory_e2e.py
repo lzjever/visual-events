@@ -38,6 +38,14 @@ DEFAULT_CAMERA = "front"
 QUERY_INTERVAL_MS = 1000
 FRAME_CACHE_SECONDS = 10
 QUERY_DRAIN_WAIT_SECONDS = 0.25
+PAYLOAD_FIXTURE_STREAM_REF = "ws_payload_fixture"
+FRAME_BOUND_MEMORY_ENDPOINTS = frozenset(
+    {
+        "/v1/memory/teach/person",
+        "/v1/memory/teach/scene",
+        "/v1/memory/resolve-target",
+    }
+)
 PRIMARY_TRACK_ID = 7
 AMBIGUOUS_TRACK_ID = 8
 PRIMARY_PERSON_BBOX_XYXY = (580.0, 60.0, 805.0, 650.0)
@@ -59,6 +67,7 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
     def __init__(self) -> None:
         self.mode = "single"
         self._last_snapshot: MemoryFrameSnapshot | None = None
+        self.drop_next_memory_snapshot = False
 
     async def process_frame(self, frame: FrameMessage) -> dict[str, Any]:
         tracks = self._tracks(frame)
@@ -97,6 +106,9 @@ class MemoryScenarioProcessor(VisualFrameProcessor):
     def take_memory_frame_snapshot(self) -> MemoryFrameSnapshot | None:
         snapshot = self._last_snapshot
         self._last_snapshot = None
+        if self.drop_next_memory_snapshot:
+            self.drop_next_memory_snapshot = False
+            return None
         return snapshot
 
     def _tracks(self, frame: FrameMessage) -> list[dict[str, Any]]:
@@ -208,6 +220,7 @@ class MemoryE2ERunner:
             create_app(processor=self.processor, config=self._config())
         )
         self.frame_id = 0
+        self.latest_stream_ref: str | None = None
 
     def _config(self) -> ServerConfig:
         runtime_dir = self.out / "runtime"
@@ -227,6 +240,7 @@ class MemoryE2ERunner:
                     anonymous_threshold=0.99,
                     anonymous_margin=0.0,
                     familiar_seen_count=2,
+                    familiar_observed_duration_ms=QUERY_INTERVAL_MS,
                     familiar_threshold=0.99,
                     scene_threshold=0.99,
                     event_cooldown_ms=QUERY_INTERVAL_MS,
@@ -261,6 +275,9 @@ class MemoryE2ERunner:
             encode_frame_message(header, self.source_frame.jpeg_bytes)
         )
         state = json.loads(websocket.receive_text())
+        stream_ref = state.get("stream_ref")
+        if isinstance(stream_ref, str) and stream_ref:
+            self.latest_stream_ref = stream_ref
         states_file.write(
             json.dumps(
                 {
@@ -276,6 +293,11 @@ class MemoryE2ERunner:
         )
         states_file.flush()
         return state
+
+    def require_stream_ref(self) -> str:
+        if not self.latest_stream_ref:
+            raise RuntimeError("stream_ref is unavailable before the first stream frame")
+        return self.latest_stream_ref
 
     def start_query_and_drain(
         self,
@@ -303,6 +325,11 @@ class MemoryE2ERunner:
         return list(drained.get("semantic_events") or [])
 
     def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = _with_stream_ref_for_endpoint(
+            endpoint=path,
+            payload=payload,
+            stream_ref=self.latest_stream_ref,
+        )
         response = self.client.post(path, json=payload)
         body = response.json()
         if response.status_code >= 400:
@@ -384,6 +411,7 @@ def build_embedding_config(args: argparse.Namespace) -> MemoryEmbeddingConfig:
 def self_introduction_payload(
     *,
     camera: str,
+    stream_ref: str,
     display_name: str,
     description: str | None = None,
     tags: list[str] | None = None,
@@ -395,6 +423,7 @@ def self_introduction_payload(
         profile["tags"] = tags
     return {
         "camera": camera,
+        "stream_ref": stream_ref,
         "target": {
             "kind": "person",
             "intent": "self_introduction",
@@ -407,11 +436,13 @@ def self_introduction_payload(
 def third_person_introduction_payload(
     *,
     camera: str,
+    stream_ref: str,
     display_name: str,
     referent_text: str = "这位",
 ) -> dict[str, Any]:
     return {
         "camera": camera,
+        "stream_ref": stream_ref,
         "target": {
             "kind": "person",
             "intent": "third_person_introduction",
@@ -424,6 +455,7 @@ def third_person_introduction_payload(
 def teach_scene_payload(
     *,
     camera: str,
+    stream_ref: str,
     title: str,
     description: str | None = None,
     activation_hint: str | None = None,
@@ -435,6 +467,7 @@ def teach_scene_payload(
         memory["activation_hint"] = activation_hint
     return {
         "camera": camera,
+        "stream_ref": stream_ref,
         "target": {
             "kind": "scene",
             "intent": "teach_scene",
@@ -444,15 +477,34 @@ def teach_scene_payload(
     }
 
 
-def object_resolve_payload(*, camera: str, referent_text: str) -> dict[str, Any]:
+def object_resolve_payload(
+    *,
+    camera: str,
+    stream_ref: str,
+    referent_text: str,
+) -> dict[str, Any]:
     return {
         "camera": camera,
+        "stream_ref": stream_ref,
         "target": {
             "kind": "object",
             "intent": "teach_object",
             "referent_text": referent_text,
         },
     }
+
+
+def _with_stream_ref_for_endpoint(
+    *,
+    endpoint: str,
+    payload: dict[str, Any],
+    stream_ref: str | None,
+) -> dict[str, Any]:
+    if endpoint not in FRAME_BOUND_MEMORY_ENDPOINTS:
+        return payload
+    if not stream_ref:
+        return payload
+    return {**payload, "stream_ref": stream_ref}
 
 
 def embedding_report(args: argparse.Namespace) -> dict[str, Any]:
@@ -650,6 +702,7 @@ def check_teach_person_scene_summary_link(
             "/v1/memory/teach/person",
             self_introduction_payload(
                 camera=camera,
+                stream_ref=runner.require_stream_ref(),
                 display_name="Memory E2E Person",
                 description="stable synthetic target over val-data JPEG",
                 tags=["memory-e2e"],
@@ -659,6 +712,7 @@ def check_teach_person_scene_summary_link(
             "/v1/memory/teach/scene",
             teach_scene_payload(
                 camera=camera,
+                stream_ref=runner.require_stream_ref(),
                 title="Memory E2E Scene",
                 description="scene taught from the selected val-data JPEG",
                 activation_hint="use remembered scene context",
@@ -762,6 +816,7 @@ def check_third_person_introduction(
             "/v1/memory/resolve-target",
             {
                 "camera": camera,
+                "stream_ref": runner.require_stream_ref(),
                 "target": {
                     "kind": "person",
                     "intent": "third_person_introduction",
@@ -773,6 +828,7 @@ def check_third_person_introduction(
             "/v1/memory/teach/person",
             third_person_introduction_payload(
                 camera=camera,
+                stream_ref=runner.require_stream_ref(),
                 display_name="Introduced Memory E2E Person",
                 referent_text="这位",
             ),
@@ -917,6 +973,7 @@ def check_correct_identity(
             "/v1/memory/teach/person",
             self_introduction_payload(
                 camera=camera,
+                stream_ref=runner.require_stream_ref(),
                 display_name="Wrong Memory E2E Person",
             ),
         )
@@ -992,7 +1049,11 @@ def check_object_resolve_unsupported_no_write(
     before_counts = _memory_write_counts(store)
     response = runner.client.post(
         "/v1/memory/resolve-target",
-        json=object_resolve_payload(camera=camera, referent_text="手机"),
+        json=object_resolve_payload(
+            camera=camera,
+            stream_ref=PAYLOAD_FIXTURE_STREAM_REF,
+            referent_text="手机",
+        ),
     )
     body = response.json()
     after_counts = _memory_write_counts(store)

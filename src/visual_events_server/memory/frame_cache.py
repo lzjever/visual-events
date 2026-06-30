@@ -71,7 +71,12 @@ class FrameCache:
         self.max_age_ms = max_age_ms
         self._clock_ms = clock_ms
         self._frames_by_camera: dict[str, CachedFrame] = {}
+        self._frames_by_stream: dict[tuple[str, str], CachedFrame] = {}
         self._snapshot_windows_by_camera: dict[str, deque[CachedFrame]] = {}
+        self._snapshot_windows_by_stream: dict[
+            tuple[str, str],
+            deque[CachedFrame],
+        ] = {}
         self._snapshot_window_size = 3
 
     def update(
@@ -98,14 +103,34 @@ class FrameCache:
             memory_snapshot=memory_snapshot,
         )
         self._frames_by_camera[frame.camera] = cached
+        self._frames_by_stream[(connection_id, frame.camera)] = cached
         window = self._snapshot_windows_by_camera.setdefault(
             frame.camera,
             deque(maxlen=self._snapshot_window_size),
         )
         window.append(cached)
+        stream_window = self._snapshot_windows_by_stream.setdefault(
+            (connection_id, frame.camera),
+            deque(maxlen=self._snapshot_window_size),
+        )
+        stream_window.append(cached)
 
-    def get_fresh(self, camera: str) -> CachedFrame:
+    def get_fresh_for_stream(self, connection_id: str, camera: str) -> CachedFrame:
+        return self._fresh_or_error(
+            self._frames_by_stream.get((connection_id, camera)),
+            camera=camera,
+        )
+
+    def get_latest_for_camera(self, camera: str) -> CachedFrame:
         cached = self._frames_by_camera.get(camera)
+        return self._fresh_or_error(cached, camera=camera)
+
+    def _fresh_or_error(
+        self,
+        cached: CachedFrame | None,
+        *,
+        camera: str,
+    ) -> CachedFrame:
         if cached is None:
             raise FrameCacheError(
                 "no_active_frame",
@@ -119,8 +144,26 @@ class FrameCache:
             )
         return cached
 
-    def get_snapshot_window(self, camera: str) -> MemoryFrameSnapshotWindow:
+    def get_snapshot_window_for_stream(
+        self,
+        connection_id: str,
+        camera: str,
+    ) -> MemoryFrameSnapshotWindow:
+        frames = tuple(
+            self._snapshot_windows_by_stream.get((connection_id, camera)) or ()
+        )
+        return self._snapshot_window_or_error(frames, camera=camera)
+
+    def get_snapshot_window_for_camera(self, camera: str) -> MemoryFrameSnapshotWindow:
         frames = tuple(self._snapshot_windows_by_camera.get(camera) or ())
+        return self._snapshot_window_or_error(frames, camera=camera)
+
+    def _snapshot_window_or_error(
+        self,
+        frames: tuple[CachedFrame, ...],
+        *,
+        camera: str,
+    ) -> MemoryFrameSnapshotWindow:
         if not frames:
             raise FrameCacheError(
                 "no_active_frame",

@@ -314,6 +314,7 @@ class MemoryStore:
         first_seen_at_ms: int,
         last_seen_at_ms: int,
         familiar_score: float,
+        observed_duration_ms: int = 0,
         status: str = "active",
         merged_person_id: str | None = None,
     ) -> None:
@@ -323,9 +324,10 @@ class MemoryStore:
                     """
                     INSERT INTO anonymous_profiles (
                       anonymous_id, seen_count, first_seen_at_ms, last_seen_at_ms,
-                      familiar_score, status, merged_person_id, created_at_ms, updated_at_ms
+                      familiar_score, observed_duration_ms, status, merged_person_id,
+                      created_at_ms, updated_at_ms
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         anonymous_id,
@@ -333,6 +335,7 @@ class MemoryStore:
                         int(first_seen_at_ms),
                         int(last_seen_at_ms),
                         float(familiar_score),
+                        int(observed_duration_ms),
                         status,
                         merged_person_id,
                         int(first_seen_at_ms),
@@ -347,6 +350,7 @@ class MemoryStore:
         seen_count: int | None = None,
         last_seen_at_ms: int | None = None,
         familiar_score: float | None = None,
+        observed_duration_ms: int | None = None,
         status: str | None = None,
         merged_person_id: str | None = None,
     ) -> None:
@@ -363,6 +367,9 @@ class MemoryStore:
         if familiar_score is not None:
             assignments.append("familiar_score = ?")
             values.append(float(familiar_score))
+        if observed_duration_ms is not None:
+            assignments.append("observed_duration_ms = ?")
+            values.append(int(observed_duration_ms))
         if status is not None:
             assignments.append("status = ?")
             values.append(status)
@@ -400,7 +407,7 @@ class MemoryStore:
                 f"""
                 SELECT
                   anonymous_id, seen_count, first_seen_at_ms, last_seen_at_ms,
-                  familiar_score, status, merged_person_id
+                  familiar_score, observed_duration_ms, status, merged_person_id
                 FROM anonymous_profiles
                 WHERE {where}
                 """,
@@ -414,6 +421,7 @@ class MemoryStore:
             "first_seen_at_ms": int(row["first_seen_at_ms"]),
             "last_seen_at_ms": int(row["last_seen_at_ms"]),
             "familiar_score": float(row["familiar_score"]),
+            "observed_duration_ms": int(row["observed_duration_ms"]),
             "status": row["status"],
             "merged_person_id": row["merged_person_id"],
         }
@@ -1447,6 +1455,7 @@ class MemoryStore:
               first_seen_at_ms INTEGER NOT NULL,
               last_seen_at_ms INTEGER NOT NULL,
               familiar_score REAL NOT NULL,
+              observed_duration_ms INTEGER NOT NULL DEFAULT 0,
               status TEXT NOT NULL,
               merged_person_id TEXT,
               created_at_ms INTEGER NOT NULL,
@@ -1579,6 +1588,11 @@ class MemoryStore:
             """
         )
         self._ensure_column("scene_memories", "region_id", "TEXT")
+        self._ensure_column(
+            "anonymous_profiles",
+            "observed_duration_ms",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         self._assert_or_set_meta("person_dim", str(self.person_dim))
         self._assert_or_set_meta("scene_dim", str(self.scene_dim))
         self.connection.commit()

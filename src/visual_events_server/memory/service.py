@@ -36,6 +36,7 @@ from .frame_cache import (
     MemoryFrameSnapshotWindow,
     RequestInteractionSnapshot,
 )
+from .identity_overlay import IdentityOverlay
 from .retriever import MemoryRetriever
 from .store import MemoryStore
 from .target_resolver import (
@@ -55,6 +56,7 @@ _REQUIRED_POSE_SNAPSHOT_COUNT = 2
 _RECOGNITION_ELIGIBILITY_POLICY = (
     "class_name == 'person' and lost_ms == 0 and hits > 0"
 )
+_StreamKey = tuple[str, str]
 
 
 class MemoryServiceError(RuntimeError):
@@ -152,6 +154,7 @@ class AppMemoryService:
         anonymous_threshold: float,
         anonymous_margin: float,
         familiar_seen_count: int,
+        familiar_observed_duration_ms: int,
         familiar_threshold: float,
         scene_threshold: float,
         event_cooldown_ms: int,
@@ -177,12 +180,19 @@ class AppMemoryService:
         self.anonymous_threshold = float(anonymous_threshold)
         self.anonymous_margin = float(anonymous_margin)
         self.familiar_seen_count = int(familiar_seen_count)
+        if familiar_observed_duration_ms < 0:
+            raise ValueError("familiar_observed_duration_ms must be non-negative")
+        self.familiar_observed_duration_ms = int(familiar_observed_duration_ms)
         self.familiar_threshold = float(familiar_threshold)
         self.scene_threshold = float(scene_threshold)
         self.event_cooldown_ms = int(event_cooldown_ms)
         self._clock_ms = clock_ms or _system_time_ms
         self._cache = FrameCache(
             max_age_ms=int(frame_cache_seconds) * 1000,
+            clock_ms=self._clock_ms,
+        )
+        self._identity_overlay = IdentityOverlay(
+            ttl_ms=int(frame_cache_seconds) * 1000,
             clock_ms=self._clock_ms,
         )
         self._resolver = target_resolver or TargetResolver()
@@ -193,13 +203,13 @@ class AppMemoryService:
             if artifact_dir is not None
             else Path("runtime") / "memory" / "artifacts"
         )
-        self._completed_by_camera: dict[str, deque[dict[str, Any]]] = {}
+        self._completed_by_stream: dict[_StreamKey, deque[dict[str, Any]]] = {}
         self._queue_size = int(queue_size)
-        self._last_query_frame_timestamp_ms: dict[str, int] = {}
+        self._last_query_frame_timestamp_ms_by_stream: dict[_StreamKey, int] = {}
         self._event_counters: dict[str, int] = {}
-        self._pending_queries_by_camera: dict[
-            str,
-            asyncio.Future[list[tuple[str, dict[str, Any]]]],
+        self._pending_queries_by_stream: dict[
+            _StreamKey,
+            asyncio.Future[list[dict[str, Any]]],
         ] = {}
         self._query_state_lock = threading.Lock()
         self._recognition_report_lock = threading.Lock()
@@ -254,20 +264,21 @@ class AppMemoryService:
             visual_state=visual_state,
             memory_snapshot=memory_snapshot,
         )
-        if not self._query_due(frame):
+        stream_key = _stream_key(connection_id, frame.camera)
+        if not self._query_due(stream_key, frame):
             return
-        pending = self._pending_queries_by_camera.get(frame.camera)
+        pending = self._pending_queries_by_stream.get(stream_key)
         if pending is not None:
             if pending.done():
-                self._collect_completed_query(frame.camera, pending)
+                self._collect_completed_query(stream_key, pending)
             else:
                 return
-        self._last_query_frame_timestamp_ms[frame.camera] = frame.timestamp_ms
+        self._last_query_frame_timestamp_ms_by_stream[stream_key] = frame.timestamp_ms
         plan = _QueryPlan(
-            cached=self._cache.get_fresh(frame.camera),
+            cached=self._cache.get_fresh_for_stream(connection_id, frame.camera),
         )
         loop = asyncio.get_running_loop()
-        self._pending_queries_by_camera[frame.camera] = loop.run_in_executor(
+        self._pending_queries_by_stream[stream_key] = loop.run_in_executor(
             None,
             self._run_query,
             plan,
@@ -281,10 +292,11 @@ class AppMemoryService:
         frame_id: int,
         frame_timestamp_ms: int,
     ) -> list[dict[str, Any]]:
-        pending = self._pending_queries_by_camera.get(camera)
+        stream_key = _stream_key(connection_id, camera)
+        pending = self._pending_queries_by_stream.get(stream_key)
         if pending is not None and pending.done():
-            self._collect_completed_query(camera, pending)
-        queue = self._completed_by_camera.get(camera)
+            self._collect_completed_query(stream_key, pending)
+        queue = self._completed_by_stream.get(stream_key)
         if not queue:
             return []
         events = list(queue)
@@ -303,11 +315,25 @@ class AppMemoryService:
             )
         return None if report is None else report.to_dict()
 
+    def identity_context_for_visual_state(
+        self,
+        *,
+        connection_id: str,
+        visual_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        camera = str(visual_state.get("camera") or "")
+        return self._identity_overlay.project(
+            connection_id=connection_id,
+            camera=camera,
+            visual_state=visual_state,
+        )
+
     async def teach_person(self, request: dict[str, Any]) -> dict[str, Any]:
         await self._enter_teach_request()
         try:
             camera = _required_text(request, "camera")
-            await self._drain_pending_query_for_camera(camera)
+            stream_ref = _required_text(request, "stream_ref")
+            await self._drain_pending_query_for_stream(stream_ref, camera)
             store_before = self._store_count_snapshot()
             try:
                 cached = self._fresh_cached_frame(request)
@@ -791,8 +817,15 @@ class AppMemoryService:
 
     def _fresh_cached_frame(self, request: dict[str, Any]) -> CachedFrame:
         camera = _required_text(request, "camera")
+        stream_ref = _required_text(request, "stream_ref")
         try:
-            return self._cache.get_fresh(camera)
+            return self._cache.get_fresh_for_stream(stream_ref, camera)
+        except FrameCacheError as exc:
+            raise MemoryServiceError(exc.code, exc.message, status_code=409) from exc
+
+    def _legacy_latest_cached_frame_for_camera(self, camera: str) -> CachedFrame:
+        try:
+            return self._cache.get_latest_for_camera(camera)
         except FrameCacheError as exc:
             raise MemoryServiceError(exc.code, exc.message, status_code=409) from exc
 
@@ -818,16 +851,21 @@ class AppMemoryService:
                 await self._lifecycle_condition.wait()
 
     async def _wait_for_pending_queries(self) -> None:
-        pending = list(self._pending_queries_by_camera.values())
+        pending = list(self._pending_queries_by_stream.values())
         if pending:
             await asyncio.gather(
                 *(asyncio.shield(future) for future in pending),
                 return_exceptions=True,
             )
-        self._pending_queries_by_camera.clear()
+        self._pending_queries_by_stream.clear()
 
-    async def _drain_pending_query_for_camera(self, camera: str) -> None:
-        pending = self._pending_queries_by_camera.get(camera)
+    async def _drain_pending_query_for_stream(
+        self,
+        connection_id: str,
+        camera: str,
+    ) -> None:
+        stream_key = _stream_key(connection_id, camera)
+        pending = self._pending_queries_by_stream.get(stream_key)
         if pending is None:
             return
         if not pending.done():
@@ -836,7 +874,7 @@ class AppMemoryService:
             except Exception:
                 pass
         if pending.done():
-            self._collect_completed_query(camera, pending)
+            self._collect_completed_query(stream_key, pending)
 
     async def _wait_for_teach_embedding_futures(self) -> None:
         while True:
@@ -1002,7 +1040,10 @@ class AppMemoryService:
         intent = _required_text(public_target, "intent")
         if intent == "self_introduction":
             interaction_snapshot, ambiguity_type, evidence = (
-                self._request_interaction_snapshot(cached.frame.camera)
+                self._request_interaction_snapshot(
+                    cached.connection_id,
+                    cached.frame.camera,
+                )
             )
             target = (
                 self._active_interaction_target_from_frame(
@@ -1020,7 +1061,10 @@ class AppMemoryService:
             )
         if intent == "third_person_introduction":
             target, ambiguity_type, interaction_snapshot, evidence = (
-                self._third_person_introduction_target(cached.frame.camera)
+                self._third_person_introduction_target(
+                    cached.connection_id,
+                    cached.frame.camera,
+                )
             )
             if target is not None and interaction_snapshot is not None:
                 return interaction_snapshot.selected, target, interaction_snapshot
@@ -1041,7 +1085,10 @@ class AppMemoryService:
         intent = _required_text(target, "intent")
         if intent == "self_introduction":
             interaction_snapshot, ambiguity_type, evidence = (
-                self._request_interaction_snapshot(cached.frame.camera)
+                self._request_interaction_snapshot(
+                    cached.connection_id,
+                    cached.frame.camera,
+                )
             )
             resolved = (
                 self._active_interaction_target_from_frame(
@@ -1073,7 +1120,10 @@ class AppMemoryService:
             }
         if intent == "third_person_introduction":
             resolved, ambiguity_type, interaction_snapshot, evidence = (
-                self._third_person_introduction_target(cached.frame.camera)
+                self._third_person_introduction_target(
+                    cached.connection_id,
+                    cached.frame.camera,
+                )
             )
             if resolved is None or interaction_snapshot is None:
                 return _ambiguous_target_response(
@@ -1105,10 +1155,11 @@ class AppMemoryService:
 
     def _request_interaction_snapshot(
         self,
+        connection_id: str,
         camera: str,
     ) -> tuple[RequestInteractionSnapshot | None, str, dict[str, Any]]:
         try:
-            window = self._cache.get_snapshot_window(camera)
+            window = self._cache.get_snapshot_window_for_stream(connection_id, camera)
         except FrameCacheError as exc:
             raise MemoryServiceError(exc.code, exc.message, status_code=409) from exc
 
@@ -1262,6 +1313,7 @@ class AppMemoryService:
 
     def _third_person_introduction_target(
         self,
+        connection_id: str,
         camera: str,
     ) -> tuple[
         ResolvedTarget | None,
@@ -1270,7 +1322,7 @@ class AppMemoryService:
         dict[str, Any],
     ]:
         interaction_snapshot, ambiguity_type, evidence = (
-            self._request_interaction_snapshot(camera)
+            self._request_interaction_snapshot(connection_id, camera)
         )
         if interaction_snapshot is None:
             return None, ambiguity_type, None, evidence
@@ -1287,6 +1339,7 @@ class AppMemoryService:
         if snapshot is None:
             return None, "no_active_interaction_target", interaction_snapshot, evidence
         return self._stable_third_person_pose_target(
+            connection_id=connection_id,
             camera=camera,
             interaction_snapshot=interaction_snapshot,
             introducer_track_id=introducer.track_id,
@@ -1296,6 +1349,7 @@ class AppMemoryService:
     def _stable_third_person_pose_target(
         self,
         *,
+        connection_id: str,
         camera: str,
         interaction_snapshot: RequestInteractionSnapshot,
         introducer_track_id: int,
@@ -1307,7 +1361,7 @@ class AppMemoryService:
         dict[str, Any],
     ]:
         try:
-            window = self._cache.get_snapshot_window(camera)
+            window = self._cache.get_snapshot_window_for_stream(connection_id, camera)
         except FrameCacheError:
             return None, "target_unclear", interaction_snapshot, base_evidence
 
@@ -1481,41 +1535,46 @@ class AppMemoryService:
             return None, selected_preview_evidence, selected_ambiguity_type, pose_window
         return selected_candidate, selected_preview_evidence, "", pose_window
 
-    def _query_due(self, frame: FrameMessage) -> bool:
-        last = self._last_query_frame_timestamp_ms.get(frame.camera)
+    def _query_due(self, stream_key: _StreamKey, frame: FrameMessage) -> bool:
+        last = self._last_query_frame_timestamp_ms_by_stream.get(stream_key)
         return last is None or frame.timestamp_ms - last >= self.query_interval_ms
 
     def _collect_completed_query(
         self,
-        camera: str,
-        future: asyncio.Future[list[tuple[str, dict[str, Any]]]],
+        stream_key: _StreamKey,
+        future: asyncio.Future[list[dict[str, Any]]],
     ) -> None:
         try:
             completed = future.result()
         except Exception:
             _LOGGER.exception(
                 "memory query failed for camera %s",
-                camera,
+                stream_key[1],
             )
             completed = []
-        for event_camera, event in completed:
-            self._enqueue(event_camera, event)
-        if self._pending_queries_by_camera.get(camera) is future:
-            self._pending_queries_by_camera.pop(camera, None)
+        for event in completed:
+            self._enqueue(stream_key, event)
+        if self._pending_queries_by_stream.get(stream_key) is future:
+            self._pending_queries_by_stream.pop(stream_key, None)
 
-    def _run_query(self, plan: _QueryPlan) -> list[tuple[str, dict[str, Any]]]:
-        completed: list[tuple[str, dict[str, Any]]] = []
+    def _run_query(self, plan: _QueryPlan) -> list[dict[str, Any]]:
+        completed: list[dict[str, Any]] = []
         queried_person_targets: list[ResolvedTarget] = []
+        updated_anonymous_ids: set[str] = set()
         for person_target in self._query_person_targets(plan):
             queried_person_targets.append(person_target)
             self._record_recognition_queried_targets(plan, queried_person_targets)
-            person_event = self._query_person(plan, person_target)
+            person_event = self._query_person(
+                plan,
+                person_target,
+                updated_anonymous_ids=updated_anonymous_ids,
+            )
             if person_event is not None:
-                completed.append((plan.cached.frame.camera, person_event))
+                completed.append(person_event)
                 break
         scene_event = self._query_scene(plan)
         if scene_event is not None:
-            completed.append((plan.cached.frame.camera, scene_event))
+            completed.append(scene_event)
         return completed
 
     def _query_person_targets(
@@ -1648,9 +1707,12 @@ class AppMemoryService:
         self,
         plan: _QueryPlan,
         target: ResolvedTarget,
+        *,
+        updated_anonymous_ids: set[str],
     ) -> dict[str, Any] | None:
         embedding: EmbeddingResult | None = None
         embedding_bytes: bytes | None = None
+        saw_no_usable_face = False
         for candidate_bytes in _person_embedding_input_candidates(
             plan.cached.frame.jpeg_bytes,
             target,
@@ -1664,11 +1726,19 @@ class AppMemoryService:
                 embedding = self.embedding_backend.embed_person(candidate_bytes)
             except EmbeddingUnavailable as exc:
                 if exc.code == "no_usable_face":
+                    saw_no_usable_face = True
                     continue
                 return None
             embedding_bytes = candidate_bytes
             break
         if embedding is None or embedding_bytes is None:
+            if saw_no_usable_face:
+                self._identity_overlay.put_unavailable(
+                    connection_id=plan.cached.connection_id,
+                    camera=plan.cached.frame.camera,
+                    track_id=target.track_id,
+                    reason="no_usable_face",
+                )
             return None
         match = self._retriever.query_person(
             embedding,
@@ -1681,13 +1751,24 @@ class AppMemoryService:
                 target,
                 embedding,
                 embedding_bytes,
+                updated_anonymous_ids=updated_anonymous_ids,
             )
         profile = self.store.get_person_profile(match.matched_id)
         if profile is None:
             return None
+        conversation_summaries = tuple(
+            self.store.get_conversation_summaries(match.matched_id, limit=3)
+        )
+        self._identity_overlay.put_known_person(
+            connection_id=plan.cached.connection_id,
+            camera=plan.cached.frame.camera,
+            track_id=target.track_id,
+            person_profile=profile,
+            match=match,
+        )
         with self._query_state_lock:
             if not self._gate.allow(
-                plan.cached.frame.camera,
+                _event_gate_scope(plan.cached),
                 "known_person_present",
                 match.matched_id,
                 now_ms=plan.cached.frame.timestamp_ms,
@@ -1707,9 +1788,7 @@ class AppMemoryService:
             match=match,
             source=source,
             person_profile=profile,
-            conversation_summaries=tuple(
-                self.store.get_conversation_summaries(match.matched_id, limit=3)
-            ),
+            conversation_summaries=conversation_summaries,
         )
 
     def _query_anonymous_person(
@@ -1718,6 +1797,8 @@ class AppMemoryService:
         target: ResolvedTarget,
         embedding,
         embedding_bytes: bytes,
+        *,
+        updated_anonymous_ids: set[str],
     ) -> dict[str, Any] | None:
         if target.quality != "usable":
             return None
@@ -1735,6 +1816,7 @@ class AppMemoryService:
                 first_seen_at_ms=plan.cached.frame.timestamp_ms,
                 last_seen_at_ms=plan.cached.frame.timestamp_ms,
                 familiar_score=0.0,
+                observed_duration_ms=0,
             )
             self.store.add_anonymous_embedding(
                 anonymous_id=anonymous_id,
@@ -1748,30 +1830,70 @@ class AppMemoryService:
                 resolution_reason=target.source_target_mode,
                 now_ms=now_ms,
             )
+            updated_anonymous_ids.add(anonymous_id)
+            self._identity_overlay.put_unknown(
+                connection_id=plan.cached.connection_id,
+                camera=plan.cached.frame.camera,
+                track_id=target.track_id,
+                reason="new_anonymous",
+            )
             return None
 
         profile = self.store.get_active_anonymous_profile(match.matched_id)
         if profile is None:
             return None
+        if match.matched_id in updated_anonymous_ids:
+            self._identity_overlay.put_unknown(
+                connection_id=plan.cached.connection_id,
+                camera=plan.cached.frame.camera,
+                track_id=target.track_id,
+                reason="duplicate_anonymous_in_tick",
+            )
+            return None
+        updated_anonymous_ids.add(match.matched_id)
         seen_count = int(profile["seen_count"]) + 1
         familiar_score = max(float(profile["familiar_score"]), match.match_score)
+        observed_duration_ms = _updated_observed_duration_ms(
+            profile,
+            current_frame_timestamp_ms=plan.cached.frame.timestamp_ms,
+            query_interval_ms=self.query_interval_ms,
+        )
         self.store.update_anonymous_profile(
             anonymous_id=match.matched_id,
             seen_count=seen_count,
             last_seen_at_ms=plan.cached.frame.timestamp_ms,
             familiar_score=familiar_score,
+            observed_duration_ms=observed_duration_ms,
         )
         profile = {
             **profile,
             "seen_count": seen_count,
             "last_seen_at_ms": plan.cached.frame.timestamp_ms,
             "familiar_score": familiar_score,
+            "observed_duration_ms": observed_duration_ms,
         }
-        if seen_count < self.familiar_seen_count or familiar_score < self.familiar_threshold:
+        if (
+            seen_count < self.familiar_seen_count
+            or observed_duration_ms < self.familiar_observed_duration_ms
+            or familiar_score < self.familiar_threshold
+        ):
+            self._identity_overlay.put_unknown(
+                connection_id=plan.cached.connection_id,
+                camera=plan.cached.frame.camera,
+                track_id=target.track_id,
+                reason="not_familiar",
+            )
             return None
+        self._identity_overlay.put_familiar_unknown(
+            connection_id=plan.cached.connection_id,
+            camera=plan.cached.frame.camera,
+            track_id=target.track_id,
+            anonymous_profile=profile,
+            match=match,
+        )
         with self._query_state_lock:
             if not self._gate.allow(
-                plan.cached.frame.camera,
+                _event_gate_scope(plan.cached),
                 "familiar_unknown_present",
                 match.matched_id,
                 now_ms=plan.cached.frame.timestamp_ms,
@@ -1824,7 +1946,7 @@ class AppMemoryService:
             return None
         with self._query_state_lock:
             if not self._gate.allow(
-                plan.cached.frame.camera,
+                _event_gate_scope(plan.cached),
                 "scene_activated",
                 match.matched_id,
                 now_ms=plan.cached.frame.timestamp_ms,
@@ -1873,9 +1995,9 @@ class AppMemoryService:
         self._event_counters[camera] = next_value
         return f"{camera}:mem_evt_{next_value:06d}"
 
-    def _enqueue(self, camera: str, event: dict[str, Any]) -> None:
-        queue = self._completed_by_camera.setdefault(
-            camera,
+    def _enqueue(self, stream_key: _StreamKey, event: dict[str, Any]) -> None:
+        queue = self._completed_by_stream.setdefault(
+            stream_key,
             deque(maxlen=self._queue_size),
         )
         queue.append(event)
@@ -1992,9 +2114,13 @@ class AppMemoryService:
         self,
         request: dict[str, Any],
     ) -> dict[str, Any]:
+        stream_ref = _optional_text(request.get("stream_ref"))
+        if not stream_ref:
+            return {}
         try:
             _snapshot, _ambiguity_type, evidence = self._request_interaction_snapshot(
-                _required_text(request, "camera")
+                stream_ref,
+                _required_text(request, "camera"),
             )
         except MemoryServiceError:
             return {}
@@ -2754,6 +2880,27 @@ def _resolved_target_to_candidate_dict(
     if target.evidence:
         result["evidence"] = target.evidence
     return result
+
+
+def _updated_observed_duration_ms(
+    profile: dict[str, Any],
+    *,
+    current_frame_timestamp_ms: int,
+    query_interval_ms: int,
+) -> int:
+    previous_last_seen_at_ms = int(profile["last_seen_at_ms"])
+    previous_observed_duration_ms = int(profile.get("observed_duration_ms", 0))
+    delta_ms = max(0, int(current_frame_timestamp_ms) - previous_last_seen_at_ms)
+    increment_ms = min(delta_ms, int(query_interval_ms))
+    return previous_observed_duration_ms + increment_ms
+
+
+def _stream_key(connection_id: str, camera: str) -> _StreamKey:
+    return (connection_id, camera)
+
+
+def _event_gate_scope(cached: CachedFrame) -> str:
+    return f"{cached.connection_id}:{cached.frame.camera}"
 
 
 def _required_mapping(request: dict[str, Any], key: str) -> dict[str, Any]:
