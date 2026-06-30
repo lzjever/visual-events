@@ -1116,7 +1116,7 @@ def _run_local_self_smoke(
             if body.get("status") != "resolved":
                 last_reason = _response_reason(body)
                 continue
-            teach = _post_teach_person_with_optional_anonymous_merge(
+            teach = _post_teach_person_recording_outcome(
                 runner=runner,
                 api_response_records=api_response_records,
                 payload_index=f"{_payload_index(record)}:local-teach-self",
@@ -1331,7 +1331,7 @@ def _run_local_third_person_probe(
                 invalid_resolve = body
                 continue
 
-            teach = _post_teach_person_with_optional_anonymous_merge(
+            teach = _post_teach_person_recording_outcome(
                 runner=runner,
                 api_response_records=api_response_records,
                 payload_index=f"{_payload_index(record)}:local-teach-third-person",
@@ -2252,7 +2252,7 @@ def _run_actual_post_teach_scene_replay(
             phase="post-teach-self-seed",
         )
         last_query_timestamp_ms = timestamp_ms
-        self_teach = _post_teach_person_with_optional_anonymous_merge(
+        self_teach = _post_teach_person_recording_outcome(
             runner=runner,
             api_response_records=api_response_records,
             payload_index=f"{_payload_index(self_record)}:post-teach",
@@ -2277,7 +2277,7 @@ def _run_actual_post_teach_scene_replay(
             states_file=states_file,
             phase="post-teach-third-person-seed",
         )
-        third_person_teach = _post_teach_person_with_optional_anonymous_merge(
+        third_person_teach = _post_teach_person_recording_outcome(
             runner=runner,
             api_response_records=api_response_records,
             payload_index=f"{_payload_index(third_person_record)}:post-teach",
@@ -2530,7 +2530,7 @@ def _run_actual_self_introduction(
             states_file=states_file,
             phase="self-seed",
         )
-        teach = _post_teach_person_with_optional_anonymous_merge(
+        teach = _post_teach_person_recording_outcome(
             runner=runner,
             api_response_records=api_response_records,
             payload_index=_payload_index(record),
@@ -2607,7 +2607,7 @@ def _run_actual_third_person_introduction(
             payload=resolve_payload,
             operation="resolve_third_person_target",
         )
-        teach = _post_teach_person_with_optional_anonymous_merge(
+        teach = _post_teach_person_recording_outcome(
             runner=runner,
             api_response_records=api_response_records,
             payload_index=_payload_index(record),
@@ -3016,7 +3016,7 @@ def _run_actual_supporting_summary_link(
             states_file=states_file,
             phase="supporting-summary-link-seed",
         )
-        teach = _post_teach_person_with_optional_anonymous_merge(
+        teach = _post_teach_person_recording_outcome(
             runner=runner,
             api_response_records=api_response_records,
             payload_index="supporting:summary-link:teach-person",
@@ -3250,7 +3250,7 @@ def _run_actual_supporting_correct_identity(
             states_file=states_file,
             phase="supporting-correct-seed",
         )
-        wrong = _post_teach_person_with_optional_anonymous_merge(
+        wrong = _post_teach_person_recording_outcome(
             runner=runner,
             api_response_records=api_response_records,
             payload_index="supporting:correct-identity:teach-wrong-person",
@@ -3544,7 +3544,7 @@ def _get_and_record_api_response(
     return {"status_code": response.status_code, "body": body}
 
 
-def _post_teach_person_with_optional_anonymous_merge(
+def _post_teach_person_recording_outcome(
     *,
     runner: Any,
     api_response_records: list[dict[str, Any]],

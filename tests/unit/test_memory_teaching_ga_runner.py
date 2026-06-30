@@ -288,7 +288,7 @@ def test_teach_person_helper_accepts_server_side_anonymous_auto_merge() -> None:
             )
 
     records: list[dict[str, Any]] = []
-    result = module._post_teach_person_with_optional_anonymous_merge(
+    result = module._post_teach_person_recording_outcome(
         runner=SimpleNamespace(client=FakeClient()),
         api_response_records=records,
         payload_index="pic_teach_person:teach",
@@ -335,7 +335,7 @@ def test_teach_person_helper_does_not_synthesize_created_outcome_when_missing() 
             return FakeResponse()
 
     records: list[dict[str, Any]] = []
-    result = module._post_teach_person_with_optional_anonymous_merge(
+    result = module._post_teach_person_recording_outcome(
         runner=SimpleNamespace(client=FakeClient()),
         api_response_records=records,
         payload_index="pic_teach_person:teach",
@@ -388,7 +388,7 @@ def test_teach_person_helper_reports_explicit_created_outcome() -> None:
             assert endpoint == "/v1/memory/teach/person"
             return FakeResponse()
 
-    result = module._post_teach_person_with_optional_anonymous_merge(
+    result = module._post_teach_person_recording_outcome(
         runner=SimpleNamespace(client=FakeClient()),
         api_response_records=[],
         payload_index="pic_teach_person:teach",
@@ -433,7 +433,7 @@ def test_teach_person_helper_keeps_non_anonymous_409_failed() -> None:
             return FakeResponse()
 
     records: list[dict[str, Any]] = []
-    result = module._post_teach_person_with_optional_anonymous_merge(
+    result = module._post_teach_person_recording_outcome(
         runner=SimpleNamespace(client=FakeClient()),
         api_response_records=records,
         payload_index="pic_teach_me:teach",
