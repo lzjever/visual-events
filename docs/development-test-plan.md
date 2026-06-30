@@ -2,6 +2,8 @@
 
 日期：2026-06-26
 
+> Note: 本文保留早期 V1/GA 开发测试背景；Identity Overlay、memory 和 teaching 的当前 active source of truth 是 [Identity Overlay 产品与开发计划](identity-overlay-product-development-plan.md)。
+
 后续 GA 开发以 [GA 后续开发计划](ga-development-plan.md) 为准。本文保留早期总体设计背景，并已同步关键边界：机器人 CLI 只发布 DDS gaze target，不直接操纵运控。
 
 当前 GA acceptance/pass/fail authority 是 PC 本地模拟：`tools/run_cli_local_e2e.py --full-scene --all-scenes --head-state stationary`、synthetic DDS image/head-state publishers、runtime server/CLI、DDS gaze subscriber/stdout collector、`val-data` full PC E2E、Botified event oracle，以及必要轻量稳定性和 latency checks。标准 PC gate 通过即可报告 PC-simulated GA pass；真机实际运行、真实 robot camera DDS、真实 head-state source、physical head pointing、HIL/real closed loop、现场测试或 owner sign-off 属于 post-GA validation，不阻塞 GA，也不能由 PC evidence 外推为通过。只有直接保护运行边界或用户明确要求时才添加 governance/report/audit/gate 工作。

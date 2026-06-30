@@ -1,5 +1,7 @@
 # Visual Evidence Tool Development Plan
 
+> Note: 本文描述通用视觉 evidence 工具；Identity Overlay、memory teaching evidence 和示教证据的当前 active source of truth 是 [Identity Overlay 产品与开发计划](identity-overlay-product-development-plan.md)。
+
 ## 1. 产品目标和非目标
 
 ### 目标

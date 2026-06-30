@@ -2,6 +2,8 @@
 
 日期：2026-06-26
 
+> Note: 本文保留原始 V1 视觉事件 baseline 口径；Identity Overlay、memory 和 teaching 的当前 active source of truth 是 [Identity Overlay 产品与开发计划](identity-overlay-product-development-plan.md)。
+
 ## 1. 产品定位
 
 Visual Events 是一个机器人视觉事件推理服务，不是通用视觉平台。

@@ -2,6 +2,8 @@
 
 日期：2026-06-27
 
+> Note: 本文的 GA 非目标约束只限定 current PC core gate/runtime GA 范围；Identity Overlay、memory 和 teaching 的当前 active source of truth 是 [Identity Overlay 产品与开发计划](identity-overlay-product-development-plan.md)。
+
 ## 1. 目标
 
 术语口径：本文里的 manifest 指 `val-data` 测试数据清单；oracle 指测试标准答案；attention oracle / expected attention target timeline 指注视目标标准答案，也就是 PC 测试里“应该看谁、什么时候不该看”。它们只属于 PC 本地 E2E 验收/测试报告，不是产品运行功能，不是治理平台，不是审计平台，也不是 release audit 层。authoritative 只表示“这份测试数据清单/标准答案是 PC 测试采用的版本”，不表示组织级治理、审计或发布批准；当前不新增 manifest builder、schema 审计、release audit、handoff audit 或 strict gate 扩张。
