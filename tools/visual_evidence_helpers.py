@@ -111,6 +111,9 @@ def frame_header_lines(
     reacquire_summary = _reacquire_summary(state.get("scene_context"))
     if reacquire_summary != "-":
         lines.append(_clip(reacquire_summary, 116))
+    overlay_summary = _identity_overlay_summary(state.get("identity_context"))
+    if overlay_summary != "-":
+        lines.append(_clip(overlay_summary, 116))
     return lines
 
 
@@ -265,9 +268,62 @@ def _event_summary(event: Any) -> str:
     event_name = _short(event.get("event", "-"))
     track = _short(event.get("track_id", "-"))
     if event.get("event") in _MEMORY_EVENTS:
-        return f"{event_name} track={track} memory={_memory_event_summary(event)}"
+        return (
+            f"{event_name} track={track} memory={_memory_event_summary(event)}"
+            f"{_event_identity_suffix(event)}"
+        )
     evidence = _evidence_summary(event)
-    return f"{event_name} track={track} evidence={evidence}"
+    return f"{event_name} track={track}{_event_identity_suffix(event)} evidence={evidence}"
+
+
+def _event_identity_suffix(event: dict[str, Any]) -> str:
+    identity = event.get("identity_context")
+    summary = _identity_summary(identity)
+    return f" identity={summary}" if summary else ""
+
+
+def _identity_overlay_summary(identity_context: Any) -> str:
+    if not isinstance(identity_context, dict):
+        return "-"
+    status = identity_context.get("overlay_status")
+    tracks = identity_context.get("tracks")
+    identity = None
+    if isinstance(tracks, list):
+        for item in tracks:
+            if isinstance(item, dict) and isinstance(item.get("identity"), dict):
+                identity = item["identity"]
+                break
+    identity_text = _identity_summary(identity)
+    parts = []
+    if status:
+        parts.append(f"overlay={_short(status)}")
+    if identity_text:
+        parts.append(f"identity={identity_text}")
+    return " ".join(parts) if parts else "-"
+
+
+def _identity_summary(identity: Any) -> str:
+    if not isinstance(identity, dict):
+        return ""
+    person = identity.get("person")
+    if isinstance(person, dict):
+        display_name = person.get("display_name")
+        if display_name:
+            return _short(display_name)
+        person_id = person.get("person_id")
+        if person_id:
+            return _short(person_id)
+    anonymous = identity.get("anonymous_person")
+    if isinstance(anonymous, dict):
+        anonymous_id = anonymous.get("anonymous_id")
+        return f"familiar:{_short(anonymous_id)}" if anonymous_id else "familiar"
+    status = identity.get("status")
+    source = identity.get("source")
+    if status and source:
+        return f"{_short(status)}/{_short(source)}"
+    if status:
+        return _short(status)
+    return ""
 
 
 def _memory_event_summary(event: Any) -> str:
@@ -472,6 +528,7 @@ def render_frame_card(
         else f"scene_context={scene_summary}"
     )
     reacquire_summary = _reacquire_summary(response.get("scene_context"))
+    overlay_summary = _identity_overlay_summary(response.get("identity_context"))
     events_text = "; ".join(event_summaries) if event_summaries else "none"
     source_name = str(frame_evidence.get("source_name", "-"))
     scene = frame_evidence.get("scene")
@@ -495,6 +552,7 @@ def render_frame_card(
     | {html.escape(latency_text)}
     | attention={html.escape(attention_text)}
     | {html.escape(scene_context_text)}
+    | {html.escape(overlay_summary)}
     | reacq={html.escape(reacquire_summary)}
     | events={html.escape(events_text)}
     | <a href="{html.escape(_rel(root, frame_evidence["state_path"]))}">json</a>

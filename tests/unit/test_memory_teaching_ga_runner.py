@@ -581,6 +581,28 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert report["backend"] == "fake"
     assert report["scene_count"] == 6
     assert report["replayed_scene_count"] == 6
+    assert report["artifacts"]["current_visual_snapshot_json"] == (
+        "current_visual_snapshot.json"
+    )
+    snapshot_path = out / "current_visual_snapshot.json"
+    assert snapshot_path.is_file()
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot["type"] == "current_visual_snapshot"
+    snapshot_text = json.dumps(snapshot, ensure_ascii=False)
+    for forbidden in (
+        "track_id",
+        "bbox",
+        "bbox_xyxy",
+        "keypoints",
+        "embedding",
+        "crop",
+        "crop_ref",
+        "stream_ref",
+        "raw_track_id",
+        "source_frame",
+        "request_snapshot_ref",
+    ):
+        assert forbidden not in snapshot_text
     expected_scene_names = sorted(scene_jpegs)
     assert report["post_teach_scene_replay"]["runner_case"] == (
         "ga-post-teach-scene-replay"
@@ -806,6 +828,10 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     ]
     assert responses
     assert all(response["dry_run"] is False for response in responses)
+    assert any(
+        response["endpoint"] == "/v1/memory/identify-current"
+        for response in responses
+    )
     assert all(
         response["response"].get("status") != "stubbed" for response in responses
     )
@@ -836,6 +862,115 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     )
     event_names = {frame["event"] for frame in botified_frames}
     assert {"known_person_present", "scene_activated"} <= event_names
+
+
+def test_actual_api_response_gate_ignores_identify_current_evidence_only_failure(
+    tmp_path: Path,
+) -> None:
+    api_response_records = [
+        {
+            "operation": "supporting_add_conversation_summary",
+            "dry_run": False,
+            "status_code": 200,
+            "response": {"ok": True, "status": "updated"},
+        },
+        {
+            "operation": "supporting_identify_current",
+            "dry_run": False,
+            "status_code": 500,
+            "response": {"ok": False, "status": "server_error"},
+        },
+    ]
+
+    checks = module._build_actual_checks(  # noqa: SLF001
+        scenes=[],
+        payload_records=[],
+        forbidden_payload_fields={},
+        out=tmp_path,
+        artifact_paths={},
+        visual_evidence_index=[],
+        replay_result={"replayed_scene_count": 0},
+        api_response_records=api_response_records,
+        self_result={},
+        third_person_result={},
+        scene_result={},
+        post_teach_scene_replay_result={},
+        object_result={},
+        supporting_contracts_result={},
+        botified_frame_records=[],
+        bounded_multi_person_recognition={},
+    )
+
+    actual_api = next(check for check in checks if check["name"] == "actual_api_responses")
+    assert actual_api["passed"] is True
+    assert actual_api["details"]["assertions"]["status_codes_ok"] is True
+    assert actual_api["details"]["gate_response_count"] == 1
+    assert actual_api["details"]["evidence_only_response_count"] == 1
+
+
+def test_current_visual_snapshot_artifact_prefers_richer_identity_state(
+    tmp_path: Path,
+) -> None:
+    visual_states_path = tmp_path / "visual_states.jsonl"
+    snapshot_path = tmp_path / "current_visual_snapshot.json"
+    base_track = {
+        "track_id": 7,
+        "class": "person",
+        "lost_ms": 0,
+        "bbox_area_ratio": 0.2,
+    }
+    known_state = {
+        "type": "visual_state",
+        "camera": "front",
+        "frame_timestamp_ms": 1_000,
+        "tracks": [base_track],
+        "identity_context": {
+            "overlay_status": "ready",
+            "active_target": {"track_id": 7},
+            "tracks": [
+                {
+                    "track_id": 7,
+                    "identity": {
+                        "status": "known_person",
+                        "source": "cache",
+                        "person": {
+                            "person_id": "person_identity",
+                            "display_name": "张三",
+                        },
+                    },
+                }
+            ],
+        },
+    }
+    pending_state = {
+        "type": "visual_state",
+        "camera": "front",
+        "frame_timestamp_ms": 2_000,
+        "tracks": [base_track],
+        "identity_context": {
+            "overlay_status": "ready",
+            "active_target": {"track_id": 7},
+            "tracks": [
+                {
+                    "track_id": 7,
+                    "identity": {"status": "pending", "source": "none"},
+                }
+            ],
+        },
+    }
+    with visual_states_path.open("w", encoding="utf-8") as file:
+        for state in (known_state, pending_state):
+            file.write(json.dumps({"visual_state": state}, ensure_ascii=False) + "\n")
+
+    module._write_current_visual_snapshot_artifact(  # noqa: SLF001
+        visual_states_path,
+        snapshot_path,
+    )
+
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    identity = snapshot["people"][0]["identity_context"]
+    assert identity["status"] == "known_person"
+    assert identity["person"]["display_name"] == "张三"
 
 
 def test_actual_fake_runner_report_includes_supporting_contracts(

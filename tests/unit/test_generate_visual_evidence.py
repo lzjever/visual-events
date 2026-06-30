@@ -357,6 +357,64 @@ def test_attention_summary_uses_ok_frames_and_available_attention_only() -> None
     assert summary["keyframes"]["lobby"]["first_attention_frame"] == 0
 
 
+def test_visual_evidence_caption_shows_overlay_and_event_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    out = tmp_path / "evidence"
+    _make_scene(data_dir, "lobby", 1)
+    identity = {
+        "status": "known_person",
+        "source": "cache",
+        "person": {
+            "person_id": "person_identity",
+            "display_name": "张三",
+            "embedding": [1.0, 0.0],
+        },
+    }
+    state = _state(
+        frame_id=0,
+        tracks=[{"track_id": 7, "bbox_xyxy": [1, 2, 3, 4], "lost_ms": 0}],
+        attention={"target_track_id": 7, "target_uv": [2, 3]},
+        events=[
+            {
+                **_event("person_waving", track_id=7),
+                "identity_context": identity,
+            }
+        ],
+        person_count=1,
+    )
+    state["identity_context"] = {
+        "overlay_status": "ready",
+        "tracks": [{"track_id": 7, "identity": identity}],
+    }
+    input_jsonl = tmp_path / "artifact" / "visual_state.jsonl"
+    _write_jsonl(input_jsonl, [_wrapped("lobby", 0, state)])
+    _patch_image_io(monkeypatch)
+
+    module.generate_visual_evidence(
+        records=module.read_wrapped_visual_state_jsonl(input_jsonl),
+        source_images=module.map_source_images(
+            data_dir,
+            [_wrapped("lobby", 0, state)],
+            camera="front",
+            fps=10.0,
+            head_motion="stationary",
+        ),
+        out=out,
+        input_jsonl=input_jsonl,
+    )
+
+    html = (out / "scenes" / "lobby" / "index.html").read_text(encoding="utf-8")
+    assert "overlay=ready identity=张三" in html
+    assert "person_waving track=7 identity=张三" in html
+    raw_state = json.loads((out / "scenes" / "lobby" / "states" / "000000.json").read_text())
+    assert raw_state["identity_context"]["tracks"][0]["identity"]["person"][
+        "embedding"
+    ] == [1.0, 0.0]
+
+
 def test_raw_visual_state_jsonl_is_rejected(tmp_path: Path) -> None:
     raw_jsonl = tmp_path / "visual_state.jsonl"
     _write_jsonl(raw_jsonl, [_state(frame_id=0)])

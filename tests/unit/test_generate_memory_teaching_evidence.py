@@ -35,6 +35,7 @@ def _write_artifact(
     artifact: Path,
     *,
     report_overrides: dict[str, Any] | None = None,
+    include_identity_sidecars: bool = False,
 ) -> dict[str, Path]:
     artifact.mkdir(parents=True, exist_ok=True)
     data_dir = artifact.parent / "val-data"
@@ -208,7 +209,109 @@ def _write_artifact(
         json.dumps({"schema_version": 1, "payloads": []}),
         encoding="utf-8",
     )
+    if include_identity_sidecars:
+        _write_identity_sidecars(artifact)
     return frame_paths
+
+
+def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as file:
+        for record in records:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _write_identity_sidecars(artifact: Path) -> None:
+    identity = {
+        "status": "known_person",
+        "source": "cache",
+        "person": {
+            "person_id": "person_identity",
+            "display_name": "张三",
+            "description": "店长",
+            "tags": ["staff"],
+        },
+    }
+    visual_state = {
+        "type": "visual_state",
+        "camera": "front",
+        "frame_id": 1,
+        "frame_timestamp_ms": 1_000,
+        "identity_context": {
+            "overlay_status": "ready",
+            "active_target": {"track_id": 7},
+            "tracks": [{"track_id": 7, "identity": identity}],
+        },
+        "semantic_events": [
+            {
+                "type": "semantic_event",
+                "event": "person_waving",
+                "track_id": 7,
+                "identity_context": identity,
+            }
+        ],
+    }
+    _write_jsonl(artifact / "visual_states.jsonl", [{"response": visual_state}])
+    _write_jsonl(
+        artifact / "api_responses.jsonl",
+        [
+            {
+                "endpoint": "/v1/memory/identify-current",
+                "operation": "supporting_identify_current",
+                "status_code": 200,
+                "response": {
+                    "ok": True,
+                    "status": "identified",
+                    "people": [
+                        {
+                            "target_ref": "current:front:active_target",
+                            "identity_context": identity,
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    _write_jsonl(
+        artifact / "botified_frames.jsonl",
+        [
+            {
+                "source": "cli_frame_pump_stdout",
+                "event": "person_waving",
+                "payload": {
+                    "request": (
+                        'event=person_waving visual_context={"visual_context":'
+                        '{"identity_context":{"status":"known_person","source":"cache",'
+                        '"person":{"display_name":"张三","person_id":"person_identity"}}}}'
+                    )
+                },
+            }
+        ],
+    )
+    (artifact / "current_visual_snapshot.json").write_text(
+        json.dumps(
+            {
+                "type": "current_visual_snapshot",
+                "camera": "front",
+                "active_target_ref": "current:front:person:0",
+                "people": [
+                    {
+                        "target_ref": "current:front:person:0",
+                        "identity_context": identity,
+                    }
+                ],
+                "events": [
+                    {
+                        "event": "person_waving",
+                        "target_ref": "current:front:person:0",
+                        "identity_context": identity,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _rewrite_report_frame_paths_to_cwd_relative(
@@ -294,6 +397,174 @@ def test_offline_renderer_generates_html_json_images_and_crop_previews(
     assert "real_model_evidence" in root_html
     assert "third-person-pose-pointing.jpg" in visual_html
     assert "face_detection" in visual_html
+
+
+def test_offline_renderer_summarizes_identity_sidecars(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    _write_artifact(artifact, include_identity_sidecars=True)
+    out = tmp_path / "evidence"
+
+    exit_code = module.main(["--artifact", str(artifact), "--out", str(out)])
+
+    assert exit_code == 0
+    index = json.loads(
+        (out / "visual_evidence_index.json").read_text(encoding="utf-8")
+    )
+    by_assertion = {item["assertion_id"]: item for item in index}
+    for assertion_id in [
+        "visual_state_identity_overlay",
+        "event_identity_context",
+        "identify_current_response",
+        "cli_current_visual_snapshot",
+    ]:
+        assert by_assertion[assertion_id]["status"] == "present"
+        assert by_assertion[assertion_id]["kind"] == "identity_summary"
+
+    assert by_assertion["visual_state_identity_overlay"]["display_name"] == "张三"
+    assert by_assertion["visual_state_identity_overlay"]["person_id"] == "person_identity"
+    assert by_assertion["event_identity_context"]["identity_status"] == "known_person"
+    assert by_assertion["event_identity_context"]["identity_source"] == "cache"
+    assert by_assertion["event_identity_context"]["source_label"] == "botified_frames.jsonl"
+    assert by_assertion["event_identity_context"]["source_path"] == "botified_frames.jsonl"
+    assert by_assertion["identify_current_response"]["identify_status"] == "identified"
+    assert by_assertion["cli_current_visual_snapshot"]["target_ref"] == (
+        "current:front:person:0"
+    )
+    assert (
+        by_assertion["cli_current_visual_snapshot"]["forbidden_fields_absent"] is True
+    )
+    serialized_index = json.dumps(index, ensure_ascii=False)
+    assert "张三" in serialized_index
+    assert "current:front:person:0" in serialized_index
+    html = (out / "visual-evidence" / "index.html").read_text(encoding="utf-8")
+    assert "visual_state_identity_overlay" in html
+    assert "identified" in html
+
+
+def test_offline_renderer_prefers_richer_identity_overlay_state(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    _write_artifact(artifact)
+    out = tmp_path / "evidence"
+    pending_state = {
+        "type": "visual_state",
+        "camera": "front",
+        "frame_id": 1,
+        "identity_context": {
+            "overlay_status": "ready",
+            "tracks": [
+                {
+                    "track_id": 7,
+                    "identity": {"status": "pending", "source": "none"},
+                }
+            ],
+        },
+    }
+    known_state = {
+        "type": "visual_state",
+        "camera": "front",
+        "frame_id": 2,
+        "identity_context": {
+            "overlay_status": "ready",
+            "tracks": [
+                {
+                    "track_id": 7,
+                    "identity": {
+                        "status": "known_person",
+                        "source": "cache",
+                        "person": {
+                            "person_id": "person_identity",
+                            "display_name": "张三",
+                        },
+                    },
+                }
+            ],
+        },
+    }
+    _write_jsonl(
+        artifact / "visual_states.jsonl",
+        [{"visual_state": pending_state}, {"visual_state": known_state}],
+    )
+
+    exit_code = module.main(["--artifact", str(artifact), "--out", str(out)])
+
+    assert exit_code == 0
+    index = json.loads(
+        (out / "visual_evidence_index.json").read_text(encoding="utf-8")
+    )
+    by_assertion = {item["assertion_id"]: item for item in index}
+    overlay = by_assertion["visual_state_identity_overlay"]
+    assert overlay["status"] == "present"
+    assert overlay["identity_status"] == "known_person"
+    assert overlay["display_name"] == "张三"
+    assert by_assertion["event_identity_context"]["status"] == "not_present"
+
+
+def test_offline_renderer_labels_visual_state_event_identity_fallback_source(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    _write_artifact(artifact)
+    out = tmp_path / "evidence"
+    identity = {
+        "status": "known_person",
+        "source": "cache",
+        "person": {
+            "person_id": "person_identity",
+            "display_name": "张三",
+        },
+    }
+    visual_state = {
+        "type": "visual_state",
+        "camera": "front",
+        "semantic_events": [
+            {
+                "type": "semantic_event",
+                "event": "person_waving",
+                "track_id": 7,
+                "identity_context": identity,
+            }
+        ],
+    }
+    _write_jsonl(artifact / "visual_states.jsonl", [{"visual_state": visual_state}])
+
+    exit_code = module.main(["--artifact", str(artifact), "--out", str(out)])
+
+    assert exit_code == 0
+    index = json.loads(
+        (out / "visual_evidence_index.json").read_text(encoding="utf-8")
+    )
+    item = {
+        item["assertion_id"]: item for item in index
+    }["event_identity_context"]
+    assert item["status"] == "present"
+    assert item["source_label"] == "visual_states.jsonl"
+    assert item["source_path"] == "visual_states.jsonl"
+    assert item["report_section"] == "visual_states.jsonl.semantic_events"
+
+
+def test_offline_renderer_marks_identity_sidecars_not_present_when_missing(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    _write_artifact(artifact)
+    out = tmp_path / "evidence"
+
+    exit_code = module.main(["--artifact", str(artifact), "--out", str(out)])
+
+    assert exit_code == 0
+    index = json.loads(
+        (out / "visual_evidence_index.json").read_text(encoding="utf-8")
+    )
+    by_assertion = {item["assertion_id"]: item for item in index}
+    assert by_assertion["visual_state_identity_overlay"]["status"] == "not_present"
+    assert by_assertion["event_identity_context"]["status"] == "not_present"
+    assert by_assertion["identify_current_response"]["status"] == "not_present"
+    assert by_assertion["cli_current_visual_snapshot"]["status"] == "not_present"
+    assert (out / "index.html").is_file()
 
 
 def test_offline_renderer_resolves_cwd_relative_val_data_source_frames(

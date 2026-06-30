@@ -9,6 +9,26 @@ from typing import Any
 
 
 JPEG_SUFFIXES = {".jpeg", ".jpg"}
+SNAPSHOT_FORBIDDEN_FIELDS = (
+    "track_id",
+    "bbox",
+    "bbox_xyxy",
+    "keypoints",
+    "embedding",
+    "crop",
+    "crop_ref",
+    "stream_ref",
+    "raw_track_id",
+    "source_frame",
+    "request_snapshot_ref",
+)
+IDENTITY_STATUS_PRIORITY = {
+    "known_person": 5,
+    "familiar_unknown": 4,
+    "unavailable": 3,
+    "unknown": 2,
+    "pending": 1,
+}
 
 
 class MemoryTeachingEvidenceError(RuntimeError):
@@ -224,6 +244,7 @@ def build_artifact_visual_evidence_index(
         )
     )
     items.append(_build_full_replay_summary_item(report))
+    items.extend(_build_identity_summary_items(artifact))
     return items
 
 
@@ -664,6 +685,343 @@ def _build_full_replay_summary_item(report: dict[str, Any]) -> dict[str, Any]:
         "scene_count": len(replay.get("scenes") or []) if isinstance(replay.get("scenes"), list) else None,
         "summary": _compact_replay_summary(replay),
     }
+
+
+def _build_identity_summary_items(artifact: Path) -> list[dict[str, Any]]:
+    visual_states = _visual_states_from_sidecar(Path(artifact) / "visual_states.jsonl")
+    overlay_state = _first_visual_state_with_overlay(visual_states)
+    event_state = _first_visual_state_with_event_identity(visual_states)
+    botified_event_identity = _first_botified_event_identity(
+        Path(artifact) / "botified_frames.jsonl"
+    )
+    api_response = _first_api_response_for_endpoint(
+        Path(artifact) / "api_responses.jsonl",
+        "/v1/memory/identify-current",
+    )
+    snapshot = _read_json_object(Path(artifact) / "current_visual_snapshot.json")
+
+    return [
+        _visual_state_identity_overlay_item(overlay_state),
+        _event_identity_context_item(event_state, botified_event_identity),
+        _identify_current_response_item(api_response),
+        _current_visual_snapshot_item(snapshot),
+    ]
+
+
+def _visual_state_identity_overlay_item(visual_state: dict[str, Any] | None) -> dict[str, Any]:
+    base = {
+        "assertion_id": "visual_state_identity_overlay",
+        "kind": "identity_summary",
+        "path": None,
+        "scene": "sidecar",
+        "report_section": "visual_states.jsonl",
+    }
+    if not isinstance(visual_state, dict):
+        return _status_item(base, "not_present", "visual_states.jsonl not present")
+
+    overlay = visual_state.get("identity_context")
+    if not isinstance(overlay, dict):
+        return _status_item(base, "not_present", "identity_context not present")
+
+    identity = _first_overlay_identity(overlay)
+    summary = _identity_summary(identity)
+    return {
+        **base,
+        "status": "present",
+        "overlay_status": overlay.get("overlay_status"),
+        **summary,
+    }
+
+
+def _event_identity_context_item(
+    visual_state: dict[str, Any] | None,
+    botified_event_identity: dict[str, Any] | None,
+) -> dict[str, Any]:
+    base = {
+        "assertion_id": "event_identity_context",
+        "kind": "identity_summary",
+        "path": None,
+        "scene": "sidecar",
+        "report_section": None,
+    }
+    if isinstance(botified_event_identity, dict):
+        identity = botified_event_identity.get("identity_context")
+        return {
+            **base,
+            "status": "present",
+            "source_label": "botified_frames.jsonl",
+            "source_path": "botified_frames.jsonl",
+            "report_section": "botified_frames.jsonl",
+            "event": botified_event_identity.get("event"),
+            "identity_status": identity.get("status") if isinstance(identity, dict) else None,
+            "identity_source": identity.get("source") if isinstance(identity, dict) else None,
+            **_identity_summary(identity),
+        }
+
+    if not isinstance(visual_state, dict):
+        return _status_item(base, "not_present", "event identity_context not present")
+
+    event = _first_event_with_identity(visual_state)
+    if event is None:
+        return _status_item(base, "not_present", "event identity_context not present")
+
+    identity = event.get("identity_context")
+    return {
+        **base,
+        "status": "present",
+        "source_label": "visual_states.jsonl",
+        "source_path": "visual_states.jsonl",
+        "report_section": "visual_states.jsonl.semantic_events",
+        "event": event.get("event"),
+        "identity_status": identity.get("status") if isinstance(identity, dict) else None,
+        "identity_source": identity.get("source") if isinstance(identity, dict) else None,
+        **_identity_summary(identity),
+    }
+
+
+def _identify_current_response_item(record: dict[str, Any] | None) -> dict[str, Any]:
+    base = {
+        "assertion_id": "identify_current_response",
+        "kind": "identity_summary",
+        "path": None,
+        "scene": "sidecar",
+        "report_section": "api_responses.jsonl",
+    }
+    if not isinstance(record, dict):
+        return _status_item(base, "not_present", "identify-current response not present")
+
+    response = record.get("response")
+    if not isinstance(response, dict):
+        return _status_item(base, "not_present", "identify-current response body not present")
+
+    person = _first_identity_person(response.get("people"))
+    identity = person.get("identity_context") if isinstance(person, dict) else None
+    return {
+        **base,
+        "status": "present",
+        "endpoint": record.get("endpoint"),
+        "operation": record.get("operation"),
+        "status_code": record.get("status_code"),
+        "identify_status": response.get("status"),
+        "target_ref": person.get("target_ref") if isinstance(person, dict) else None,
+        **_identity_summary(identity),
+    }
+
+
+def _current_visual_snapshot_item(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    base = {
+        "assertion_id": "cli_current_visual_snapshot",
+        "kind": "identity_summary",
+        "path": None,
+        "scene": "sidecar",
+        "report_section": "current_visual_snapshot.json",
+    }
+    if not isinstance(snapshot, dict):
+        return _status_item(base, "not_present", "current_visual_snapshot.json not present")
+
+    person = _first_identity_person(snapshot.get("people"))
+    identity = person.get("identity_context") if isinstance(person, dict) else None
+    snapshot_text = json.dumps(snapshot, ensure_ascii=False)
+    absent = all(field not in snapshot_text for field in SNAPSHOT_FORBIDDEN_FIELDS)
+    return {
+        **base,
+        "status": "present",
+        "snapshot_type": snapshot.get("type"),
+        "overlay_status": snapshot.get("overlay_status"),
+        "target_ref": person.get("target_ref") if isinstance(person, dict) else None,
+        "active_target_ref": snapshot.get("active_target_ref"),
+        "forbidden_fields_absent": absent,
+        **_identity_summary(identity),
+    }
+
+
+def _visual_states_from_sidecar(path: Path) -> list[dict[str, Any]]:
+    states: list[dict[str, Any]] = []
+    for record in _read_jsonl_objects(path):
+        for key in ("visual_state", "response", "state"):
+            value = record.get(key)
+            if isinstance(value, dict) and value.get("type") == "visual_state":
+                states.append(value)
+                break
+        else:
+            if record.get("type") == "visual_state":
+                states.append(record)
+    return states
+
+
+def _first_visual_state_with_overlay(
+    visual_states: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    best_state: dict[str, Any] | None = None
+    best_priority = -1
+    for state in visual_states:
+        if isinstance(state.get("identity_context"), dict):
+            priority = visual_state_identity_priority(state)
+            if best_state is None or priority > best_priority:
+                best_state = state
+                best_priority = priority
+    return best_state
+
+
+def visual_state_identity_priority(visual_state: Any) -> int:
+    if not isinstance(visual_state, dict):
+        return 0
+    overlay = visual_state.get("identity_context")
+    if not isinstance(overlay, dict):
+        return 0
+    return _identity_overlay_priority(overlay)
+
+
+def _identity_overlay_priority(overlay: dict[str, Any]) -> int:
+    priorities = [_identity_status_priority(overlay.get("overlay_status"))]
+    tracks = overlay.get("tracks")
+    if isinstance(tracks, list):
+        for item in tracks:
+            if not isinstance(item, dict):
+                continue
+            identity = item.get("identity")
+            if isinstance(identity, dict):
+                priorities.append(_identity_status_priority(identity.get("status")))
+    return max(priorities, default=0)
+
+
+def _identity_status_priority(status: Any) -> int:
+    if not isinstance(status, str):
+        return 0
+    return IDENTITY_STATUS_PRIORITY.get(status, 0)
+
+
+def _first_visual_state_with_event_identity(
+    visual_states: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for state in visual_states:
+        if _first_event_with_identity(state) is not None:
+            return state
+    return None
+
+
+def _first_botified_event_identity(path: Path) -> dict[str, Any] | None:
+    for record in _read_jsonl_objects(path):
+        summary = _botified_event_identity(record)
+        if summary is not None:
+            return summary
+    return None
+
+
+def _botified_event_identity(record: dict[str, Any]) -> dict[str, Any] | None:
+    request = ""
+    payload = record.get("payload")
+    if isinstance(payload, dict):
+        request_value = payload.get("request")
+        if isinstance(request_value, str):
+            request = request_value
+    if not request:
+        return None
+    marker = " visual_context="
+    marker_index = request.find(marker)
+    if marker_index < 0:
+        return None
+    try:
+        context = json.loads(request[marker_index + len(marker) :])
+    except json.JSONDecodeError:
+        return None
+    visual_context = context.get("visual_context") if isinstance(context, dict) else None
+    if not isinstance(visual_context, dict):
+        return None
+    identity = visual_context.get("identity_context")
+    if not isinstance(identity, dict):
+        return None
+    event = record.get("event")
+    if not isinstance(event, str):
+        event = _request_event_name(request)
+    return {"event": event, "identity_context": identity}
+
+
+def _request_event_name(request: str) -> str | None:
+    for part in request.split():
+        if part.startswith("event="):
+            value = part.split("=", 1)[1]
+            return value or None
+    return None
+
+
+def _first_api_response_for_endpoint(path: Path, endpoint: str) -> dict[str, Any] | None:
+    for record in _read_jsonl_objects(path):
+        if record.get("endpoint") == endpoint:
+            return record
+    return None
+
+
+def _read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _first_overlay_identity(overlay: dict[str, Any]) -> dict[str, Any] | None:
+    tracks = overlay.get("tracks")
+    if not isinstance(tracks, list):
+        return None
+    for item in tracks:
+        if isinstance(item, dict) and isinstance(item.get("identity"), dict):
+            return item["identity"]
+    return None
+
+
+def _first_event_with_identity(visual_state: dict[str, Any]) -> dict[str, Any] | None:
+    events = visual_state.get("semantic_events")
+    if not isinstance(events, list):
+        return None
+    for event in events:
+        if isinstance(event, dict) and isinstance(event.get("identity_context"), dict):
+            return event
+    return None
+
+
+def _first_identity_person(value: Any) -> dict[str, Any]:
+    if not isinstance(value, list):
+        return {}
+    for item in value:
+        if isinstance(item, dict):
+            return item
+    return {}
+
+
+def _identity_summary(identity: Any) -> dict[str, Any]:
+    if not isinstance(identity, dict):
+        return {}
+    summary: dict[str, Any] = {
+        "identity_status": identity.get("status"),
+        "identity_source": identity.get("source"),
+    }
+    person = identity.get("person")
+    if isinstance(person, dict):
+        summary["display_name"] = person.get("display_name")
+        summary["person_id"] = person.get("person_id")
+    anonymous = identity.get("anonymous_person")
+    if isinstance(anonymous, dict):
+        summary["anonymous_id"] = anonymous.get("anonymous_id")
+    return {key: value for key, value in summary.items() if value is not None}
 
 
 def write_visual_evidence_index(

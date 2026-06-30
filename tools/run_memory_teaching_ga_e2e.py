@@ -20,7 +20,10 @@ if __package__ in {None, ""}:
 
 from tools import memory_teaching_evidence
 from tools import run_memory_e2e as memory_e2e
-from visual_events_cli.botified_output import BotifiedStdoutWriter
+from visual_events_cli.botified_output import (
+    BotifiedStdoutWriter,
+    build_current_visual_snapshot,
+)
 from visual_events_cli.frame_pump import (
     FramePump,
     HeadMotion,
@@ -62,6 +65,8 @@ TEACH_SCENE_ORDER = (
 )
 POST_TEACH_SCENE_REPLAY_CASE = "ga-post-teach-scene-replay"
 CLI_BOTIFIED_FRAME_SOURCE = "cli_frame_pump_stdout"
+EVIDENCE_ONLY_ARTIFACT_KEYS = {"current_visual_snapshot_json"}
+EVIDENCE_ONLY_API_OPERATIONS = {"supporting_identify_current"}
 BOTIFIED_OPEN = "<botified>"
 BOTIFIED_CLOSE = "</botified>"
 BOUNDED_MULTI_PERSON_RECOGNITION_FIELDS = (
@@ -401,6 +406,7 @@ def run_actual(
     api_responses_path = out / "api_responses.jsonl"
     botified_frames_path = out / "botified_frames.jsonl"
     visual_states_path = out / "visual_states.jsonl"
+    current_snapshot_path = out / "current_visual_snapshot.json"
     evidence_index_path = visual_evidence_dir / "index.html"
     report_path = out / "report.json"
 
@@ -525,6 +531,7 @@ def run_actual(
     )
     _write_jsonl(api_responses_path, api_response_records)
     _write_jsonl(botified_frames_path, botified_frame_records)
+    _write_current_visual_snapshot_artifact(visual_states_path, current_snapshot_path)
     visual_evidence_index = [
         {
             "assertion_id": "memory_teaching_ga_actual_fake",
@@ -558,6 +565,7 @@ def run_actual(
         "api_responses_jsonl": "api_responses.jsonl",
         "botified_frames_jsonl": "botified_frames.jsonl",
         "visual_states_jsonl": "visual_states.jsonl",
+        "current_visual_snapshot_json": "current_visual_snapshot.json",
         "visual_evidence_index_html": "visual-evidence/index.html",
         "runtime_dir": "runtime",
     }
@@ -677,6 +685,7 @@ def run_local_smoke(
     api_responses_path = out / "api_responses.jsonl"
     botified_frames_path = out / "botified_frames.jsonl"
     visual_states_path = out / "visual_states.jsonl"
+    current_snapshot_path = out / "current_visual_snapshot.json"
     evidence_index_path = visual_evidence_dir / "index.html"
 
     timeline_records = _timeline_records(
@@ -723,6 +732,7 @@ def run_local_smoke(
     )
     _write_jsonl(api_responses_path, api_response_records)
     _write_jsonl(botified_frames_path, botified_frame_records)
+    _write_current_visual_snapshot_artifact(visual_states_path, current_snapshot_path)
     visual_evidence_index = [
         {
             "assertion_id": "memory_teaching_ga_local_smoke",
@@ -756,6 +766,7 @@ def run_local_smoke(
         "api_responses_jsonl": "api_responses.jsonl",
         "botified_frames_jsonl": "botified_frames.jsonl",
         "visual_states_jsonl": "visual_states.jsonl",
+        "current_visual_snapshot_json": "current_visual_snapshot.json",
         "visual_evidence_index_html": "visual-evidence/index.html",
         "runtime_dir": "runtime",
     }
@@ -3018,6 +3029,25 @@ def _run_actual_supporting_summary_link(
             endpoint=f"/v1/memory/person/by-external-user/{external_user_ref}",
             operation="supporting_get_person_by_external_user",
         )
+        identify_current = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index="supporting:summary-link:identify-current",
+            scene="supporting_contracts",
+            endpoint="/v1/memory/identify-current",
+            payload={
+                "camera": camera,
+                "stream_ref": runner.require_stream_ref(),
+                "target": {
+                    "kind": "person",
+                    "intent": "identify_current",
+                    "referent_text": "当前这个人",
+                },
+                "scope": "active_target",
+                "timeout_ms": 500,
+            },
+            operation="supporting_identify_current",
+        )
         events = runner.start_query_and_drain(
             websocket,
             query_timestamp_ms=3_000,
@@ -3062,6 +3092,7 @@ def _run_actual_supporting_summary_link(
             "lookup": lookup["body"],
             "lookup_conversation_summaries": lookup_conversation_summaries,
         },
+        "identify_current": identify_current["body"],
     }
 
 
@@ -3855,23 +3886,24 @@ def _build_actual_checks(
     artifact_exists = {
         key: (out / relative_path).exists()
         for key, relative_path in artifact_paths.items()
-        if key != "report_json"
+        if key != "report_json" and key not in EVIDENCE_ONLY_ARTIFACT_KEYS
     }
     evidence_exists = {
         item["path"]: (out / item["path"]).is_file() for item in visual_evidence_index
     }
+    gate_api_response_records = _gate_api_response_records(api_response_records)
     actual_response_assertions = {
-        "has_api_responses": bool(api_response_records),
+        "has_api_responses": bool(gate_api_response_records),
         "all_actual": all(
-            record.get("dry_run") is False for record in api_response_records
+            record.get("dry_run") is False for record in gate_api_response_records
         ),
         "no_stubbed_status": all(
             record.get("response", {}).get("status") != "stubbed"
-            for record in api_response_records
+            for record in gate_api_response_records
         ),
         "status_codes_ok": all(
             _api_response_status_ok(record)
-            for record in api_response_records
+            for record in gate_api_response_records
         ),
     }
     botified_event_counts: dict[str, int] = {}
@@ -3927,6 +3959,10 @@ def _build_actual_checks(
             "details": {
                 "assertions": actual_response_assertions,
                 "response_count": len(api_response_records),
+                "gate_response_count": len(gate_api_response_records),
+                "evidence_only_response_count": (
+                    len(api_response_records) - len(gate_api_response_records)
+                ),
             },
         },
         {
@@ -3988,6 +4024,16 @@ def _api_response_status_ok(record: dict[str, Any]) -> bool:
     return status_code < 400
 
 
+def _gate_api_response_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in records
+        if record.get("operation") not in EVIDENCE_ONLY_API_OPERATIONS
+    ]
+
+
 def _build_local_smoke_checks(
     *,
     scenes: list[SceneDir],
@@ -4011,7 +4057,7 @@ def _build_local_smoke_checks(
     artifact_exists = {
         key: (out / relative_path).exists()
         for key, relative_path in artifact_paths.items()
-        if key != "report_json"
+        if key != "report_json" and key not in EVIDENCE_ONLY_ARTIFACT_KEYS
     }
     evidence_exists = {
         item["path"]: (out / item["path"]).is_file() for item in visual_evidence_index
@@ -4093,6 +4139,65 @@ def _teach_request_summary(record: dict[str, Any]) -> dict[str, Any]:
         "memory": payload.get("memory"),
         "expected": record["expected"],
     }
+
+
+def _write_current_visual_snapshot_artifact(
+    visual_states_path: Path,
+    current_snapshot_path: Path,
+) -> None:
+    visual_state = _best_identity_visual_state_from_sidecar(visual_states_path)
+    now_ms = None
+    if isinstance(visual_state, dict):
+        frame_timestamp_ms = visual_state.get("frame_timestamp_ms")
+        if isinstance(frame_timestamp_ms, (int, float)):
+            now_ms = int(frame_timestamp_ms)
+    _write_json(
+        current_snapshot_path,
+        build_current_visual_snapshot(visual_state, now_ms=now_ms),
+    )
+
+
+def _best_identity_visual_state_from_sidecar(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    latest: dict[str, Any] | None = None
+    best_identity_state: dict[str, Any] | None = None
+    best_identity_priority = -1
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            state = _visual_state_from_sidecar_record(record)
+            if state is not None:
+                latest = state
+                if isinstance(state.get("identity_context"), dict):
+                    priority = memory_teaching_evidence.visual_state_identity_priority(
+                        state
+                    )
+                    if (
+                        best_identity_state is None
+                        or priority > best_identity_priority
+                    ):
+                        best_identity_state = state
+                        best_identity_priority = priority
+    return best_identity_state if best_identity_state is not None else latest
+
+
+def _visual_state_from_sidecar_record(record: Any) -> dict[str, Any] | None:
+    if not isinstance(record, dict):
+        return None
+    for key in ("visual_state", "state", "response"):
+        value = record.get(key)
+        if isinstance(value, dict):
+            return value
+    if any(key in record for key in ("semantic_events", "tracks", "identity_context")):
+        return record
+    return None
 
 
 def _write_json(path: Path, value: Any) -> None:
