@@ -24,6 +24,13 @@ def _assert_image_verifies(path: Path) -> None:
         image.verify()
 
 
+def _pixel_rgb(path: Path, xy: tuple[int, int]) -> tuple[int, int, int]:
+    from PIL import Image
+
+    with Image.open(path) as image:
+        return image.convert("RGB").getpixel(xy)
+
+
 def _make_scene(root: Path, name: str, color: tuple[int, int, int]) -> Path:
     scene_dir = root / name
     scene_dir.mkdir(parents=True)
@@ -397,6 +404,65 @@ def test_offline_renderer_generates_html_json_images_and_crop_previews(
     assert "real_model_evidence" in root_html
     assert "third-person-pose-pointing.jpg" in visual_html
     assert "face_detection" in visual_html
+
+
+def test_offline_renderer_prefers_payload_source_image_over_scene_first_frame(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    frame_paths = _write_artifact(artifact)
+    scene_dir = frame_paths["pic_teach_scene_galbot"].parent
+    source_image = scene_dir / "teach.jpeg"
+    source_text = scene_dir / "teach.transcript"
+    source_image.write_bytes(_valid_jpeg_bytes((12, 34, 210)))
+    source_text.write_text("这是银河通用的办公室，请你记住", encoding="utf-8")
+
+    payload_record = {
+        "scene": "pic_teach_scene_galbot",
+        "source_text_path": str(source_text),
+        "source_image_path": str(source_image),
+        "transcript_text": "这是银河通用的办公室，请你记住",
+        "endpoint": "/v1/memory/teach/scene",
+        "payload": {
+            "camera": "front",
+            "target": {"kind": "scene", "intent": "teach_scene"},
+        },
+        "expected": {"writes_memory": True, "memory_type": "scene"},
+    }
+    (artifact / "teach_payloads.json").write_text(
+        json.dumps({"schema_version": 1, "payloads": [payload_record]}),
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "evidence"
+    exit_code = module.main(["--artifact", str(artifact), "--out", str(out)])
+
+    assert exit_code == 0
+    index = json.loads(
+        (out / "visual_evidence_index.json").read_text(encoding="utf-8")
+    )
+    scene_item = {
+        item["assertion_id"]: item for item in index
+    }["teach_scene_scene_activated"]
+    assert scene_item["source_frame"] == str(source_image)
+    assert scene_item["selected_frame"] == str(
+        frame_paths["pic_teach_scene_galbot"]
+    )
+    assert scene_item["source_image_path"] == str(source_image)
+    assert scene_item["source_text_path"] == str(source_text)
+    assert scene_item["transcript_source"] == str(source_text)
+    bottom_pixel = _pixel_rgb(
+        out / "visual-evidence" / "teach-scene-scene-activated.jpg",
+        (20, 170),
+    )
+    assert bottom_pixel[2] > 150
+    assert bottom_pixel[0] < 80
+
+    visual_html = (out / "visual-evidence" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert str(source_text) in visual_html
+    assert "source_text_path" in visual_html
 
 
 def test_offline_renderer_summarizes_identity_sidecars(

@@ -25,15 +25,19 @@ def _make_scene(
     name: str,
     *,
     frames: int = 1,
-    des_text: str | None = None,
+    transcript_text: str | None = None,
     jpeg_bytes: bytes = b"jpeg",
+    image_suffix: str = ".jpeg",
 ) -> Path:
     scene_dir = data_dir / name
     scene_dir.mkdir(parents=True)
     for index in range(frames):
-        (scene_dir / f"img_{index:03d}.jpeg").write_bytes(jpeg_bytes)
-    if des_text is not None:
-        (scene_dir / "des.txt").write_text(des_text, encoding="utf-8")
+        (scene_dir / f"img_{index:03d}{image_suffix}").write_bytes(jpeg_bytes)
+    if transcript_text is not None:
+        (scene_dir / "img_000.transcript").write_text(
+            transcript_text,
+            encoding="utf-8",
+        )
     return scene_dir
 
 
@@ -114,29 +118,30 @@ def test_discovers_all_jpeg_scene_dirs_without_manifest_as_authority(
     assert manifest["risks"]
 
 
-def test_maps_des_txt_to_stable_agent_payloads_without_low_level_fields(
+def test_maps_transcripts_to_stable_agent_payloads_without_low_level_fields(
     tmp_path: Path,
 ) -> None:
     data_dir = tmp_path / "val-data"
     _make_scene(
         data_dir,
         "pic_teach_me",
-        des_text="请你记住我，我是小李飞刀",
+        transcript_text="请你记住我，我是小李飞刀",
     )
     _make_scene(
         data_dir,
         "pic_teach_person",
-        des_text="这是彭刚，请你记住",
+        transcript_text="这是彭刚，请你记住",
     )
     _make_scene(
         data_dir,
         "pic_teach_scene_galbot",
-        des_text="这是银河通用的办公室，请你记住",
+        transcript_text="这是银河通用的办公室，请你记住",
     )
     _make_scene(
         data_dir,
         "pic_teach_item_phone",
-        des_text="这是手机，请你记住",
+        transcript_text="这是手机，请你记住",
+        image_suffix=".jpg",
     )
 
     records = module.build_teach_payload_records(data_dir, camera="front")
@@ -191,21 +196,54 @@ def test_maps_des_txt_to_stable_agent_payloads_without_low_level_fields(
     }
 
     for record in records:
+        assert Path(record["source_text_path"]).name == "img_000.transcript"
+        assert Path(record["source_image_path"]).stem == "img_000"
+        assert Path(record["source_image_path"]).suffix.lower() in {".jpeg", ".jpg"}
+        assert record["transcript_text"]
+        assert "des_path" not in record
+        assert "des_text" not in record
         assert module.find_forbidden_agent_payload_fields(record["payload"]) == []
+
+
+def test_transcript_without_same_stem_image_does_not_produce_teach_payload(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    scene_dir = _make_scene(data_dir, "pic_teach_me")
+    (scene_dir / "orphan.transcript").write_text(
+        "请你记住我，我是小李飞刀",
+        encoding="utf-8",
+    )
+
+    records = module.build_teach_payload_records(data_dir, camera="front")
+
+    assert records == []
+
+
+def test_des_txt_without_transcript_does_not_fallback_to_teach_payload(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    scene_dir = _make_scene(data_dir, "pic_teach_me")
+    (scene_dir / "des.txt").write_text("请你记住我，我是小李飞刀", encoding="utf-8")
+
+    records = module.build_teach_payload_records(data_dir, camera="front")
+
+    assert records == []
 
 
 def test_generated_payloads_parse_with_public_memory_api_contract(
     tmp_path: Path,
 ) -> None:
     data_dir = tmp_path / "val-data"
-    _make_scene(data_dir, "pic_teach_me", des_text="请你记住我，我是小李飞刀")
-    _make_scene(data_dir, "pic_teach_person", des_text="这是彭刚，请你记住")
+    _make_scene(data_dir, "pic_teach_me", transcript_text="请你记住我，我是小李飞刀")
+    _make_scene(data_dir, "pic_teach_person", transcript_text="这是彭刚，请你记住")
     _make_scene(
         data_dir,
         "pic_teach_scene_galbot",
-        des_text="这是银河通用的办公室，请你记住",
+        transcript_text="这是银河通用的办公室，请你记住",
     )
-    _make_scene(data_dir, "pic_teach_item_phone", des_text="这是手机，请你记住")
+    _make_scene(data_dir, "pic_teach_item_phone", transcript_text="这是手机，请你记住")
 
     records = module.build_teach_payload_records(data_dir, camera="front")
 
@@ -576,14 +614,14 @@ def test_dry_run_writes_minimal_artifact_skeleton_and_evidence_index(
     data_dir = tmp_path / "val-data"
     for name in ["pci_stand", "pic_hello"]:
         _make_scene(data_dir, name, frames=2)
-    _make_scene(data_dir, "pic_teach_me", des_text="请你记住我，我是小李飞刀")
-    _make_scene(data_dir, "pic_teach_person", des_text="这是彭刚，请你记住")
+    _make_scene(data_dir, "pic_teach_me", transcript_text="请你记住我，我是小李飞刀")
+    _make_scene(data_dir, "pic_teach_person", transcript_text="这是彭刚，请你记住")
     _make_scene(
         data_dir,
         "pic_teach_scene_galbot",
-        des_text="这是银河通用的办公室，请你记住",
+        transcript_text="这是银河通用的办公室，请你记住",
     )
-    _make_scene(data_dir, "pic_teach_item_phone", des_text="这是手机，请你记住")
+    _make_scene(data_dir, "pic_teach_item_phone", transcript_text="这是手机，请你记住")
     _write_manifest(data_dir, ["pci_stand"])
     out = tmp_path / "artifacts" / "memory-teaching-ga"
 
@@ -610,6 +648,25 @@ def test_dry_run_writes_minimal_artifact_skeleton_and_evidence_index(
     assert report["manifest"]["matches_actual_scene_dirs"] is False
     assert report["warnings"]
     assert report["visual_evidence_index"]
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["expected_teach_transcript_payloads"]["passed"] is True
+    scene_reports = {scene["name"]: scene for scene in report["scenes"]}
+    assert scene_reports["pic_teach_me"]["transcript_count"] == 1
+    assert scene_reports["pic_teach_me"]["transcript_paths"] == [
+        str(data_dir / "pic_teach_me" / "img_000.transcript")
+    ]
+    teach_requests = {
+        request["scene"]: request for request in report["teach_requests"]
+    }
+    assert teach_requests["pic_teach_me"]["source_text_path"] == str(
+        data_dir / "pic_teach_me" / "img_000.transcript"
+    )
+    assert teach_requests["pic_teach_me"]["source_image_path"] == str(
+        data_dir / "pic_teach_me" / "img_000.jpeg"
+    )
+    for scene_report in report["scenes"]:
+        assert "has_des" not in scene_report
+        assert "des_path" not in scene_report
     assert all(
         evidence["kind"] == "html_index"
         for evidence in report["visual_evidence_index"]
@@ -622,6 +679,14 @@ def test_dry_run_writes_minimal_artifact_skeleton_and_evidence_index(
     assert len(payloads["payloads"]) == 4
     for record in payloads["payloads"]:
         assert module.find_forbidden_agent_payload_fields(record["payload"]) == []
+
+    timeline = [
+        json.loads(line)
+        for line in (out / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    discovered = [entry for entry in timeline if entry["type"] == "scene_discovered"]
+    assert any(entry["transcript_count"] == 1 for entry in discovered)
+    assert all("has_des" not in entry for entry in discovered)
 
     responses = [
         json.loads(line)
@@ -654,25 +719,25 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     _make_scene(
         data_dir,
         "pic_teach_me",
-        des_text="请你记住我，我是小李飞刀",
+        transcript_text="请你记住我，我是小李飞刀",
         jpeg_bytes=scene_jpegs["pic_teach_me"],
     )
     _make_scene(
         data_dir,
         "pic_teach_person",
-        des_text="这是彭刚，请你记住",
+        transcript_text="这是彭刚，请你记住",
         jpeg_bytes=scene_jpegs["pic_teach_person"],
     )
     _make_scene(
         data_dir,
         "pic_teach_scene_galbot",
-        des_text="这是银河通用的办公室，请你记住",
+        transcript_text="这是银河通用的办公室，请你记住",
         jpeg_bytes=scene_jpegs["pic_teach_scene_galbot"],
     )
     _make_scene(
         data_dir,
         "pic_teach_item_phone",
-        des_text="这是手机，请你记住",
+        transcript_text="这是手机，请你记住",
         jpeg_bytes=scene_jpegs["pic_teach_item_phone"],
     )
     out = tmp_path / "artifacts" / "memory-teaching-ga"
@@ -824,6 +889,12 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
 
     third_person = report["third_person_introduction"]
     assert third_person == checks["third_person_known_person_present"]["details"]
+    assert third_person["source_text_path"] == str(
+        data_dir / "pic_teach_person" / "img_000.transcript"
+    )
+    assert third_person["source_image_path"] == str(
+        data_dir / "pic_teach_person" / "img_000.jpeg"
+    )
     assert third_person["resolver_target_ref"] == "front:track:8"
     assert third_person["introducer_ref"] == "front:track:7"
     assert third_person["stored_person_id"] == third_person["person_id"]
@@ -851,6 +922,9 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     assert stability_window["active_target_track_id"] == 7
     third_overlay = overlays_by_assertion["third_person_pose_pointing"]
     third_evidence = third_person["resolve_target"]["evidence"]
+    assert third_overlay["source_text_path"] == third_person["source_text_path"]
+    assert third_overlay["source_image_path"] == third_person["source_image_path"]
+    assert third_overlay["source_frame"] == third_person["source_image_path"]
     assert third_overlay["resolver_target_ref"] == third_person["resolver_target_ref"]
     assert third_overlay["introducer_ref"] == third_person["introducer_ref"]
     assert third_overlay["stored_embedding_source_track_ref"] == (
@@ -1091,25 +1165,25 @@ def test_actual_fake_runner_report_includes_supporting_contracts(
     _make_scene(
         data_dir,
         "pic_teach_me",
-        des_text="请你记住我，我是小李飞刀",
+        transcript_text="请你记住我，我是小李飞刀",
         jpeg_bytes=scene_jpegs["pic_teach_me"],
     )
     _make_scene(
         data_dir,
         "pic_teach_person",
-        des_text="这是彭刚，请你记住",
+        transcript_text="这是彭刚，请你记住",
         jpeg_bytes=scene_jpegs["pic_teach_person"],
     )
     _make_scene(
         data_dir,
         "pic_teach_scene_galbot",
-        des_text="这是银河通用的办公室，请你记住",
+        transcript_text="这是银河通用的办公室，请你记住",
         jpeg_bytes=scene_jpegs["pic_teach_scene_galbot"],
     )
     _make_scene(
         data_dir,
         "pic_teach_item_phone",
-        des_text="这是手机，请你记住",
+        transcript_text="这是手机，请你记住",
         jpeg_bytes=scene_jpegs["pic_teach_item_phone"],
     )
     out = tmp_path / "artifacts" / "memory-teaching-ga"
@@ -1226,19 +1300,19 @@ def test_actual_fake_runner_writes_failed_report_when_teaching_scene_missing(
     _make_scene(
         data_dir,
         "pic_teach_me",
-        des_text="请你记住我，我是小李飞刀",
+        transcript_text="请你记住我，我是小李飞刀",
         jpeg_bytes=jpeg_bytes,
     )
     _make_scene(
         data_dir,
         "pic_teach_scene_galbot",
-        des_text="这是银河通用的办公室，请你记住",
+        transcript_text="这是银河通用的办公室，请你记住",
         jpeg_bytes=jpeg_bytes,
     )
     _make_scene(
         data_dir,
         "pic_teach_item_phone",
-        des_text="这是手机，请你记住",
+        transcript_text="这是手机，请你记住",
         jpeg_bytes=jpeg_bytes,
     )
     out = tmp_path / "artifacts" / "memory-teaching-ga"
@@ -1254,7 +1328,7 @@ def test_actual_fake_runner_writes_failed_report_when_teaching_scene_missing(
     assert report["backend"] == "fake"
 
     checks = {check["name"]: check for check in report["checks"]}
-    payload_check = checks["expected_teach_des_payloads"]
+    payload_check = checks["expected_teach_transcript_payloads"]
     assert payload_check["passed"] is False
     assert payload_check["details"]["missing"] == ["pic_teach_person"]
     assert checks["third_person_known_person_present"]["passed"] is False
@@ -1293,35 +1367,38 @@ def test_post_teach_scene_replay_uses_one_runner_case(
         "pic_teach_person": _valid_jpeg_bytes((64, 180, 96)),
         "pic_teach_scene_galbot": _valid_jpeg_bytes((220, 190, 72)),
     }
+    transcript_text_by_scene = {
+        "pic_teach_me": "请你记住我，我是小李飞刀",
+        "pic_teach_person": "这是彭刚，请你记住",
+        "pic_teach_scene_galbot": "这是银河通用的办公室，请你记住",
+    }
     _make_scene(data_dir, "other_scene", jpeg_bytes=scene_jpegs["other_scene"])
-    _make_scene(
-        data_dir,
-        "pic_teach_me",
-        des_text="请你记住我，我是小李飞刀",
-        jpeg_bytes=scene_jpegs["pic_teach_me"],
-    )
-    _make_scene(
-        data_dir,
-        "pic_teach_person",
-        des_text="这是彭刚，请你记住",
-        jpeg_bytes=scene_jpegs["pic_teach_person"],
-    )
-    _make_scene(
-        data_dir,
-        "pic_teach_scene_galbot",
-        des_text="这是银河通用的办公室，请你记住",
-        jpeg_bytes=scene_jpegs["pic_teach_scene_galbot"],
-    )
+    for scene_name, transcript_text in transcript_text_by_scene.items():
+        scene_dir = _make_scene(
+            data_dir,
+            scene_name,
+            jpeg_bytes=_valid_jpeg_bytes((8, 8, 8)),
+        )
+        (scene_dir / "teach.jpeg").write_bytes(scene_jpegs[scene_name])
+        (scene_dir / "teach.transcript").write_text(
+            transcript_text,
+            encoding="utf-8",
+        )
     scenes = module.discover_scene_dirs(data_dir)
     records = module._build_teach_payload_records_from_scenes(
         scenes,
         camera="front",
     )
     created_cases: list[str] = []
+    created_initial_source_paths: list[str] = []
+    source_paths_by_phase: list[tuple[str, str]] = []
 
     class FakeRunner:
         def __init__(self, **kwargs: Any) -> None:
             created_cases.append(kwargs["case"])
+            created_initial_source_paths.append(
+                str(kwargs["source_frame"].path.relative_to(data_dir))
+            )
             self.case = kwargs["case"]
             self.source_frame = kwargs["source_frame"]
             self.processor = SimpleNamespace(mode="single")
@@ -1338,6 +1415,9 @@ def test_post_teach_scene_replay_uses_one_runner_case(
 
         def send(self, _websocket: Any, *, timestamp_ms: int, states_file: Any, phase: str):
             self.frame_id += 1
+            source_paths_by_phase.append(
+                (phase, str(self.source_frame.path.relative_to(data_dir)))
+            )
             states_file.write(
                 json.dumps(
                     {
@@ -1443,9 +1523,23 @@ def test_post_teach_scene_replay_uses_one_runner_case(
         )
 
     assert created_cases == ["ga-post-teach-scene-replay"]
+    assert created_initial_source_paths == ["pic_teach_me/teach.jpeg"]
     assert result["runner_case"] == "ga-post-teach-scene-replay"
     assert result["passed"] is True
     assert result["replayed_scene_names"] == sorted(scene_jpegs)
+    source_path_by_phase = dict(source_paths_by_phase)
+    assert source_path_by_phase["post-teach-self-seed:query"] == (
+        "pic_teach_me/teach.jpeg"
+    )
+    assert source_path_by_phase["post-teach-third-person-seed:stable-1"] == (
+        "pic_teach_person/teach.jpeg"
+    )
+    assert source_path_by_phase["post-teach-scene-seed:query"] == (
+        "pic_teach_scene_galbot/teach.jpeg"
+    )
+    assert source_path_by_phase["post-teach-scene-replay:pic_teach_me:query"] == (
+        "pic_teach_me/img_000.jpeg"
+    )
     phases = [
         json.loads(line)["phase"]
         for line in states_path.read_text(encoding="utf-8").splitlines()
@@ -1625,19 +1719,19 @@ def test_local_smoke_report_fails_insufficient_third_person_without_models(
     _make_scene(
         data_dir,
         "pic_teach_me",
-        des_text="请你记住我，我是小李飞刀",
+        transcript_text="请你记住我，我是小李飞刀",
         jpeg_bytes=jpeg_bytes,
     )
     _make_scene(
         data_dir,
         "pic_teach_person",
-        des_text="这是彭刚，请你记住",
+        transcript_text="这是彭刚，请你记住",
         jpeg_bytes=jpeg_bytes,
     )
     _make_scene(
         data_dir,
         "pic_teach_scene_galbot",
-        des_text="这是银河通用的办公室，请你记住",
+        transcript_text="这是银河通用的办公室，请你记住",
         jpeg_bytes=jpeg_bytes,
     )
     person_model = tmp_path / "runtime" / "models" / "face-buffalo-s"
@@ -1702,8 +1796,26 @@ def test_local_smoke_report_fails_insufficient_third_person_without_models(
     assert report["mode"] == "local-smoke"
     assert report["real_model_evidence"] is True
     assert report["self_smoke"]["status"] == "passed"
+    assert report["self_smoke"]["source_text_path"] == str(
+        data_dir / "pic_teach_me" / "img_000.transcript"
+    )
+    assert report["self_smoke"]["source_image_path"] == str(
+        data_dir / "pic_teach_me" / "img_000.jpeg"
+    )
     assert report["scene_smoke"]["status"] == "passed"
+    assert report["scene_smoke"]["source_text_path"] == str(
+        data_dir / "pic_teach_scene_galbot" / "img_000.transcript"
+    )
+    assert report["scene_smoke"]["source_image_path"] == str(
+        data_dir / "pic_teach_scene_galbot" / "img_000.jpeg"
+    )
     assert report["third_person_probe"]["status"] == "insufficient_sample"
+    assert report["third_person_probe"]["source_text_path"] == str(
+        data_dir / "pic_teach_person" / "img_000.transcript"
+    )
+    assert report["third_person_probe"]["source_image_path"] == str(
+        data_dir / "pic_teach_person" / "img_000.jpeg"
+    )
     assert report["third_person_probe"]["debug_test_channel_enabled"] is False
     assert report["third_person_probe"]["fixture_inputs_consumed"] == []
     assert (
@@ -1740,19 +1852,19 @@ def test_local_smoke_runner_writes_visual_evidence_overlays_join_report_sections
     _make_scene(
         data_dir,
         "pic_teach_me",
-        des_text="请你记住我，我是小李飞刀",
+        transcript_text="请你记住我，我是小李飞刀",
         jpeg_bytes=_valid_jpeg_bytes((196, 64, 64)),
     )
     _make_scene(
         data_dir,
         "pic_teach_person",
-        des_text="这是彭刚，请你记住",
+        transcript_text="这是彭刚，请你记住",
         jpeg_bytes=_valid_jpeg_bytes((64, 180, 96)),
     )
     _make_scene(
         data_dir,
         "pic_teach_scene_galbot",
-        des_text="这是银河通用的办公室，请你记住",
+        transcript_text="这是银河通用的办公室，请你记住",
         jpeg_bytes=_valid_jpeg_bytes((220, 190, 72)),
     )
     person_model = tmp_path / "runtime" / "models" / "face-buffalo-s"
@@ -1887,6 +1999,15 @@ def test_local_smoke_runner_writes_visual_evidence_overlays_join_report_sections
     assert exit_code == 0
     report = json.loads((out / "report.json").read_text(encoding="utf-8"))
     assert report["ok"] is True
+    assert report["self_smoke"]["source_text_path"] == str(
+        data_dir / "pic_teach_me" / "img_000.transcript"
+    )
+    assert report["scene_smoke"]["source_text_path"] == str(
+        data_dir / "pic_teach_scene_galbot" / "img_000.transcript"
+    )
+    assert report["third_person_probe"]["source_text_path"] == str(
+        data_dir / "pic_teach_person" / "img_000.transcript"
+    )
     visual_evidence_index = report["visual_evidence_index"]
     overlays_by_assertion = {
         item["assertion_id"]: item
@@ -1938,7 +2059,6 @@ def test_local_third_person_probe_passes_after_resolve_teach_and_replay(
         name="pic_teach_person",
         path=tmp_path,
         jpeg_paths=(frame_path,),
-        des_text="这是彭刚，请你记住",
     )
     source_frame = memory_e2e.SourceFrame(
         path=frame_path,
@@ -2163,7 +2283,6 @@ def test_local_third_person_probe_scans_until_late_pose_pointing_window(
         name="pic_teach_person",
         path=tmp_path,
         jpeg_paths=tuple(frame_paths),
-        des_text="这是彭刚，请你记住",
     )
     record = {
         "scene": "pic_teach_person",
@@ -2324,7 +2443,6 @@ def test_local_third_person_probe_does_not_teach_or_replay_without_resolved_wind
         name="pic_teach_person",
         path=tmp_path,
         jpeg_paths=tuple(frame_paths),
-        des_text="这是彭刚，请你记住",
     )
     record = {
         "scene": "pic_teach_person",
@@ -2422,7 +2540,6 @@ def test_local_third_person_probe_failed_result_keeps_debug_fixture_evidence(
         name="pic_teach_person",
         path=tmp_path,
         jpeg_paths=(frame_path,),
-        des_text="这是彭刚，请你记住",
     )
     source_frame = memory_e2e.SourceFrame(
         path=frame_path,

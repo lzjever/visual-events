@@ -48,6 +48,8 @@ DEFAULT_CAMERA = "front"
 PAYLOAD_FIXTURE_STREAM_REF = memory_e2e.PAYLOAD_FIXTURE_STREAM_REF
 
 JPEG_SUFFIXES = {".jpeg", ".jpg"}
+JPEG_SUFFIX_ORDER = (".jpeg", ".jpg")
+TRANSCRIPT_SUFFIX = ".transcript"
 FORBIDDEN_AGENT_PAYLOAD_FIELDS = {
     "track_id",
     "bbox",
@@ -85,12 +87,19 @@ BOUNDED_MULTI_PERSON_RECOGNITION_FIELDS = (
 
 
 @dataclass(frozen=True)
+class InteractionCase:
+    scene: str
+    source_text_path: Path
+    source_image_path: Path
+    transcript_text: str
+
+
+@dataclass(frozen=True)
 class SceneDir:
     name: str
     path: Path
     jpeg_paths: tuple[Path, ...]
-    des_path: Path | None = None
-    des_text: str | None = None
+    interactions: tuple[InteractionCase, ...] = ()
 
     @property
     def frame_count(self) -> int:
@@ -245,14 +254,10 @@ def build_teach_payload_records(
     *,
     camera: str = DEFAULT_CAMERA,
 ) -> list[dict[str, Any]]:
-    scenes_by_name = {scene.name: scene for scene in discover_scene_dirs(data_dir)}
-    records: list[dict[str, Any]] = []
-    for scene_name in TEACH_SCENE_ORDER:
-        scene = scenes_by_name.get(scene_name)
-        if scene is None:
-            continue
-        records.append(_teach_payload_record(scene, camera=camera))
-    return records
+    return _build_teach_payload_records_from_scenes(
+        discover_scene_dirs(data_dir),
+        camera=camera,
+    )
 
 
 def find_forbidden_agent_payload_fields(payload: Any) -> list[str]:
@@ -520,6 +525,23 @@ def run_actual(
             botified_frame_records=botified_frame_records,
         )
 
+    self_result = _with_record_source_fields(
+        self_result,
+        payload_records_by_scene.get("pic_teach_me"),
+    )
+    third_person_result = _with_record_source_fields(
+        third_person_result,
+        payload_records_by_scene.get("pic_teach_person"),
+    )
+    scene_result = _with_record_source_fields(
+        scene_result,
+        payload_records_by_scene.get("pic_teach_scene_galbot"),
+    )
+    object_result = _with_record_source_fields(
+        object_result,
+        payload_records_by_scene.get("pic_teach_item_phone"),
+    )
+
     _write_json(
         teach_payloads_path,
         {
@@ -720,6 +742,18 @@ def run_local_smoke(
         execution.get("third_person_probe") or _not_run_result(status="insufficient_sample")
     )
     third_person_result = _with_local_third_person_debug_evidence(third_person_result)
+    self_result = _with_record_source_fields(
+        self_result,
+        payloads_by_scene.get("pic_teach_me"),
+    )
+    scene_result = _with_record_source_fields(
+        scene_result,
+        payloads_by_scene.get("pic_teach_scene_galbot"),
+    )
+    third_person_result = _with_record_source_fields(
+        third_person_result,
+        payloads_by_scene.get("pic_teach_person"),
+    )
 
     _write_json(
         teach_payloads_path,
@@ -2189,10 +2223,16 @@ def _run_actual_post_teach_scene_replay(
     if missing:
         return _post_teach_scene_replay_missing_result(missing)
 
+    self_record = payload_records_by_scene["pic_teach_me"]
+    third_person_record = payload_records_by_scene["pic_teach_person"]
+    scene_record = payload_records_by_scene["pic_teach_scene_galbot"]
     runner = _actual_runner(
         case=POST_TEACH_SCENE_REPLAY_CASE,
         out=out,
-        source_frame=_load_source_frame_from_scene(scenes_by_name["pic_teach_me"]),
+        source_frame=_load_source_frame_from_record(
+            self_record,
+            scene=scenes_by_name["pic_teach_me"],
+        ),
         camera=camera,
     )
     _attach_cli_botified_projection_recorder(runner, botified_frame_records)
@@ -2200,10 +2240,10 @@ def _run_actual_post_teach_scene_replay(
     timestamp_step_ms = memory_e2e.QUERY_INTERVAL_MS * 2
 
     with runner.open_stream() as websocket:
-        self_record = payload_records_by_scene["pic_teach_me"]
         runner.processor.mode = "single"
-        runner.source_frame = _load_source_frame_from_scene(
-            scenes_by_name["pic_teach_me"]
+        runner.source_frame = _load_source_frame_from_record(
+            self_record,
+            scene=scenes_by_name["pic_teach_me"],
         )
         runner.start_query_and_drain(
             websocket,
@@ -2223,10 +2263,10 @@ def _run_actual_post_teach_scene_replay(
         )
         timestamp_ms += timestamp_step_ms
 
-        third_person_record = payload_records_by_scene["pic_teach_person"]
         runner.processor.mode = "third_person"
-        runner.source_frame = _load_source_frame_from_scene(
-            scenes_by_name["pic_teach_person"]
+        runner.source_frame = _load_source_frame_from_record(
+            third_person_record,
+            scene=scenes_by_name["pic_teach_person"],
         )
         _seed_stable_interaction_window(
             runner,
@@ -2248,10 +2288,10 @@ def _run_actual_post_teach_scene_replay(
         )
         timestamp_ms += timestamp_step_ms
 
-        scene_record = payload_records_by_scene["pic_teach_scene_galbot"]
         runner.processor.mode = "single"
-        runner.source_frame = _load_source_frame_from_scene(
-            scenes_by_name["pic_teach_scene_galbot"]
+        runner.source_frame = _load_source_frame_from_record(
+            scene_record,
+            scene=scenes_by_name["pic_teach_scene_galbot"],
         )
         runner.start_query_and_drain(
             websocket,
@@ -2479,7 +2519,7 @@ def _run_actual_self_introduction(
     runner = _actual_runner(
         case="ga-self-introduction",
         out=out,
-        source_frame=_load_source_frame_from_scene(scene),
+        source_frame=_load_source_frame_from_record(record, scene=scene),
         camera=camera,
     )
     _attach_cli_botified_projection_recorder(runner, botified_frame_records)
@@ -2541,7 +2581,7 @@ def _run_actual_third_person_introduction(
     runner = _actual_runner(
         case="ga-third-person-introduction",
         out=out,
-        source_frame=_load_source_frame_from_scene(scene),
+        source_frame=_load_source_frame_from_record(record, scene=scene),
         camera=camera,
     )
     _attach_cli_botified_projection_recorder(runner, botified_frame_records)
@@ -2753,7 +2793,7 @@ def _run_actual_teach_scene(
     runner = _actual_runner(
         case="ga-teach-scene",
         out=out,
-        source_frame=_load_source_frame_from_scene(scene),
+        source_frame=_load_source_frame_from_record(record, scene=scene),
         camera=camera,
     )
     _attach_cli_botified_projection_recorder(runner, botified_frame_records)
@@ -2812,7 +2852,7 @@ def _run_actual_object_negative(
     runner = _actual_runner(
         case="ga-object-negative",
         out=out,
-        source_frame=_load_source_frame_from_scene(scene),
+        source_frame=_load_source_frame_from_record(record, scene=scene),
         camera=camera,
     )
     store = runner.client.app.state.memory_service.store
@@ -3419,15 +3459,18 @@ def _actual_runner(
 def _load_source_frame_from_scene(scene: SceneDir) -> memory_e2e.SourceFrame:
     if not scene.jpeg_paths:
         raise FileNotFoundError(f"no JPEG frames found in {scene.path}")
-    path = scene.jpeg_paths[0]
-    jpeg_bytes = path.read_bytes()
-    width, height = _parse_jpeg_dimensions(jpeg_bytes, frame_id=None)
-    return memory_e2e.SourceFrame(
-        path=path,
-        jpeg_bytes=jpeg_bytes,
-        width=width,
-        height=height,
-    )
+    return _load_source_frame(scene.jpeg_paths[0])
+
+
+def _load_source_frame_from_record(
+    record: dict[str, Any],
+    *,
+    scene: SceneDir,
+) -> memory_e2e.SourceFrame:
+    source_image_path = record.get("source_image_path")
+    if isinstance(source_image_path, str) and source_image_path:
+        return _load_source_frame(Path(source_image_path))
+    return _load_source_frame_from_scene(scene)
 
 
 def _post_and_record_api_response(
@@ -3571,14 +3614,11 @@ def _payload_index(record: dict[str, Any]) -> int:
 
 def _scene_dir_from_path(path: Path) -> SceneDir:
     jpeg_paths = tuple(_sorted_jpeg_paths(path))
-    des_path = path / "des.txt"
-    des_text = des_path.read_text(encoding="utf-8").strip() if des_path.is_file() else None
     return SceneDir(
         name=path.name,
         path=path,
         jpeg_paths=jpeg_paths,
-        des_path=des_path if des_path.is_file() else None,
-        des_text=des_text,
+        interactions=tuple(_interaction_cases_from_scene(path)),
     )
 
 
@@ -3591,6 +3631,42 @@ def _sorted_jpeg_paths(path: Path) -> list[Path]:
         ],
         key=lambda item: item.name,
     )
+
+
+def _interaction_cases_from_scene(path: Path) -> list[InteractionCase]:
+    cases: list[InteractionCase] = []
+    for source_text_path in _sorted_transcript_paths(path):
+        source_image_path = _same_stem_image_path(source_text_path)
+        if source_image_path is None:
+            continue
+        cases.append(
+            InteractionCase(
+                scene=path.name,
+                source_text_path=source_text_path,
+                source_image_path=source_image_path,
+                transcript_text=source_text_path.read_text(encoding="utf-8").strip(),
+            )
+        )
+    return cases
+
+
+def _sorted_transcript_paths(path: Path) -> list[Path]:
+    return sorted(
+        [
+            child
+            for child in path.iterdir()
+            if child.is_file() and child.suffix.lower() == TRANSCRIPT_SUFFIX
+        ],
+        key=lambda item: item.name,
+    )
+
+
+def _same_stem_image_path(transcript_path: Path) -> Path | None:
+    for suffix in JPEG_SUFFIX_ORDER:
+        candidate = transcript_path.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _manifest_scene_names(manifest: Any) -> list[str]:
@@ -3625,15 +3701,19 @@ def _build_teach_payload_records_from_scenes(
     records: list[dict[str, Any]] = []
     for scene_name in TEACH_SCENE_ORDER:
         scene = scenes_by_name.get(scene_name)
-        if scene is not None:
-            records.append(_teach_payload_record(scene, camera=camera))
+        if scene is not None and scene.interactions:
+            records.append(_teach_payload_record(scene.interactions[0], camera=camera))
     return records
 
 
-def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
-    des_text = scene.des_text or ""
-    if scene.name == "pic_teach_me":
-        display_name = _extract_self_display_name(des_text)
+def _teach_payload_record(
+    interaction: InteractionCase,
+    *,
+    camera: str,
+) -> dict[str, Any]:
+    transcript_text = interaction.transcript_text
+    if interaction.scene == "pic_teach_me":
+        display_name = _extract_self_display_name(transcript_text)
         endpoint = "/v1/memory/teach/person"
         payload = {
             "camera": camera,
@@ -3646,8 +3726,8 @@ def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
             "profile": {"display_name": display_name},
         }
         expected = {"writes_memory": True, "memory_type": "person"}
-    elif scene.name == "pic_teach_person":
-        display_name = _extract_third_person_display_name(des_text)
+    elif interaction.scene == "pic_teach_person":
+        display_name = _extract_third_person_display_name(transcript_text)
         endpoint = "/v1/memory/teach/person"
         payload = {
             "camera": camera,
@@ -3660,7 +3740,7 @@ def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
             "profile": {"display_name": display_name},
         }
         expected = {"writes_memory": True, "memory_type": "person"}
-    elif scene.name == "pic_teach_scene_galbot":
+    elif interaction.scene == "pic_teach_scene_galbot":
         endpoint = "/v1/memory/teach/scene"
         payload = {
             "camera": camera,
@@ -3668,12 +3748,12 @@ def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
             "target": {
                 "kind": "scene",
                 "intent": "teach_scene",
-                "referent_text": _extract_scene_referent_text(des_text),
+                "referent_text": _extract_scene_referent_text(transcript_text),
             },
-            "memory": {"title": _extract_scene_title(des_text)},
+            "memory": {"title": _extract_scene_title(transcript_text)},
         }
         expected = {"writes_memory": True, "memory_type": "scene"}
-    elif scene.name == "pic_teach_item_phone":
+    elif interaction.scene == "pic_teach_item_phone":
         endpoint = "/v1/memory/resolve-target"
         payload = {
             "camera": camera,
@@ -3681,7 +3761,7 @@ def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
             "target": {
                 "kind": "object",
                 "intent": "teach_object",
-                "referent_text": _extract_object_referent(des_text),
+                "referent_text": _extract_object_referent(transcript_text),
             },
         }
         expected = {
@@ -3691,12 +3771,13 @@ def _teach_payload_record(scene: SceneDir, *, camera: str) -> dict[str, Any]:
             "writes_memory": False,
         }
     else:
-        raise ValueError(f"unsupported teach scene: {scene.name}")
+        raise ValueError(f"unsupported teach scene: {interaction.scene}")
 
     return {
-        "scene": scene.name,
-        "des_path": str(scene.des_path) if scene.des_path is not None else None,
-        "des_text": des_text,
+        "scene": interaction.scene,
+        "source_text_path": str(interaction.source_text_path),
+        "source_image_path": str(interaction.source_image_path),
+        "transcript_text": transcript_text,
         "endpoint": endpoint,
         "payload": payload,
         "expected": expected,
@@ -3745,7 +3826,11 @@ def _timeline_records(
                 "frame_count": scene.frame_count,
                 "first_frame": str(scene.jpeg_paths[0]) if scene.jpeg_paths else None,
                 "last_frame": str(scene.jpeg_paths[-1]) if scene.jpeg_paths else None,
-                "has_des": scene.des_path is not None,
+                "transcript_count": len(scene.interactions),
+                "transcript_paths": [
+                    str(interaction.source_text_path)
+                    for interaction in scene.interactions
+                ],
             }
         )
     for index, record in enumerate(payload_records):
@@ -3837,7 +3922,7 @@ def _build_checks(
             "details": {"scene_count": len(scenes)},
         },
         {
-            "name": "expected_teach_des_payloads",
+            "name": "expected_teach_transcript_payloads",
             "passed": expected_teach_scenes <= actual_teach_scenes,
             "details": {
                 "expected": sorted(expected_teach_scenes),
@@ -3934,7 +4019,7 @@ def _build_actual_checks(
             "details": {"scene_count": len(scenes)},
         },
         {
-            "name": "expected_teach_des_payloads",
+            "name": "expected_teach_transcript_payloads",
             "passed": expected_teach_scenes <= actual_teach_scenes,
             "details": {
                 "expected": sorted(expected_teach_scenes),
@@ -4122,8 +4207,10 @@ def _scene_report(scene: SceneDir) -> dict[str, Any]:
         "frame_count": scene.frame_count,
         "first_frame": str(scene.jpeg_paths[0]) if scene.jpeg_paths else None,
         "last_frame": str(scene.jpeg_paths[-1]) if scene.jpeg_paths else None,
-        "has_des": scene.des_path is not None,
-        "des_path": str(scene.des_path) if scene.des_path is not None else None,
+        "transcript_count": len(scene.interactions),
+        "transcript_paths": [
+            str(interaction.source_text_path) for interaction in scene.interactions
+        ],
     }
 
 
@@ -4131,6 +4218,7 @@ def _teach_request_summary(record: dict[str, Any]) -> dict[str, Any]:
     payload = record["payload"]
     return {
         "scene": record["scene"],
+        **_record_source_fields(record),
         "endpoint": record["endpoint"],
         "camera": payload["camera"],
         "target": payload["target"],
@@ -4138,6 +4226,27 @@ def _teach_request_summary(record: dict[str, Any]) -> dict[str, Any]:
         "memory": payload.get("memory"),
         "expected": record["expected"],
     }
+
+
+def _with_record_source_fields(
+    result: dict[str, Any],
+    record: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return result
+    fields = _record_source_fields(record)
+    if not fields:
+        return result
+    return {**fields, **result}
+
+
+def _record_source_fields(record: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for key in ("source_text_path", "source_image_path", "transcript_text"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            fields[key] = value
+    return fields
 
 
 def _write_current_visual_snapshot_artifact(
