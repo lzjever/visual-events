@@ -262,6 +262,27 @@ def _write_identity_sidecars(artifact: Path) -> None:
         artifact / "api_responses.jsonl",
         [
             {
+                "endpoint": "/v1/memory/teach/person",
+                "operation": "supporting_teach_auto_merge_anonymous",
+                "status_code": 200,
+                "response": {
+                    "ok": True,
+                    "outcome": "merged_anonymous_person",
+                    "person_id": "person_auto_merge",
+                    "merged_anonymous_id": "anon_identity",
+                    "copied_embedding_count": 2,
+                    "identity_context": {
+                        "status": "known_person",
+                        "source": "teach_auto_merge",
+                        "person": {
+                            "person_id": "person_auto_merge",
+                            "display_name": "张三",
+                            "description": "店长",
+                        },
+                    },
+                },
+            },
+            {
                 "endpoint": "/v1/memory/identify-current",
                 "operation": "supporting_identify_current",
                 "status_code": 200,
@@ -483,6 +504,7 @@ def test_offline_renderer_summarizes_identity_sidecars(
         "visual_state_identity_overlay",
         "event_identity_context",
         "identify_current_response",
+        "teach_auto_merge_anonymous",
         "cli_current_visual_snapshot",
     ]:
         assert by_assertion[assertion_id]["status"] == "present"
@@ -495,6 +517,11 @@ def test_offline_renderer_summarizes_identity_sidecars(
     assert by_assertion["event_identity_context"]["source_label"] == "botified_frames.jsonl"
     assert by_assertion["event_identity_context"]["source_path"] == "botified_frames.jsonl"
     assert by_assertion["identify_current_response"]["identify_status"] == "identified"
+    auto_merge = by_assertion["teach_auto_merge_anonymous"]
+    assert auto_merge["outcome"] == "merged_anonymous_person"
+    assert auto_merge["person_id"] == "person_auto_merge"
+    assert auto_merge["merged_anonymous_id"] == "anon_identity"
+    assert auto_merge["copied_embedding_count"] == 2
     assert by_assertion["cli_current_visual_snapshot"]["target_ref"] == (
         "current:front:person:0"
     )
@@ -629,6 +656,7 @@ def test_offline_renderer_marks_identity_sidecars_not_present_when_missing(
     assert by_assertion["visual_state_identity_overlay"]["status"] == "not_present"
     assert by_assertion["event_identity_context"]["status"] == "not_present"
     assert by_assertion["identify_current_response"]["status"] == "not_present"
+    assert by_assertion["teach_auto_merge_anonymous"]["status"] == "not_present"
     assert by_assertion["cli_current_visual_snapshot"]["status"] == "not_present"
     assert (out / "index.html").is_file()
 

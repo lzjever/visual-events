@@ -2317,7 +2317,12 @@ def _run_actual_post_teach_scene_replay(
         replayed_scenes: list[dict[str, Any]] = []
 
         for scene in scenes:
-            runner.source_frame = _load_source_frame_from_scene(scene)
+            replay_record = payload_records_by_scene.get(scene.name)
+            runner.source_frame = (
+                _load_source_frame_from_record(replay_record, scene=scene)
+                if replay_record is not None
+                else _load_source_frame_from_scene(scene)
+            )
             runner.processor.mode = (
                 "third_person" if scene.name == "pic_teach_person" else "single"
             )
@@ -2342,6 +2347,7 @@ def _run_actual_post_teach_scene_replay(
             replayed_scenes.append(
                 {
                     "scene": scene.name,
+                    "source_image_path": str(runner.source_frame.path),
                     "events": memory_e2e.compact_events(events),
                     "flags": flags,
                 }
@@ -2948,10 +2954,12 @@ def _run_actual_supporting_contracts(
         "familiar_unknown_present": bool(
             familiar_merge["assertions"].get("familiar_unknown_present")
         ),
-        "merge_suppressed_anonymous": bool(
+        "teach_auto_merge_suppressed_anonymous": bool(
             familiar_merge["assertions"].get("old_anonymous_suppressed")
         ),
-        "merge_known_replay": bool(familiar_merge["assertions"].get("known_replay_present")),
+        "teach_auto_merge_known_replay": bool(
+            familiar_merge["assertions"].get("known_replay_present")
+        ),
         "correct_identity_suppressed_wrong_person": bool(
             correct_identity["assertions"].get("wrong_person_not_returned")
         ),
@@ -2973,7 +2981,7 @@ def _run_actual_supporting_contracts(
         "reason": "" if passed else _first_failed_assertion(assertions),
         "runner_cases": {
             "conversation_summary_context": summary_link["runner_case"],
-            "familiar_unknown_merge": familiar_merge["runner_case"],
+            "familiar_unknown_auto_merge": familiar_merge["runner_case"],
             "correct_identity": correct_identity["runner_case"],
             "resolve_target_states": resolve_states["runner_case"],
         },
@@ -2981,7 +2989,7 @@ def _run_actual_supporting_contracts(
         "conversation_summary_context": summary_link["conversation_summary_context"],
         "external_user_link": summary_link["external_user_link"],
         "familiar_unknown": familiar_merge["familiar_unknown"],
-        "merge_anonymous_person": familiar_merge["merge_anonymous_person"],
+        "teach_auto_merge_anonymous": familiar_merge["teach_auto_merge_anonymous"],
         "correct_identity": correct_identity["correct_identity"],
         "resolve_target_states": {
             "resolved": resolve_states["resolved"],
@@ -3169,21 +3177,19 @@ def _run_actual_supporting_familiar_merge(
             "familiar_unknown_present",
         )
         anonymous_id = _anonymous_id_from_event(familiar)
-        merge = _post_and_record_api_response(
+        teach = _post_teach_person_recording_outcome(
             runner=runner,
             api_response_records=api_response_records,
-            payload_index="supporting:familiar-merge:merge-anonymous",
+            payload_index="supporting:familiar-merge:teach-auto-merge",
             scene="supporting_contracts",
-            endpoint="/v1/memory/merge-anonymous-person",
-            payload={
-                "anonymous_id": anonymous_id,
-                "profile": {
-                    "display_name": "Supporting Merged Person",
-                    "description": "created from familiar unknown supporting contract",
-                },
-                "merge_reason": "memory_teaching_ga_supporting_contract",
-            },
-            operation="supporting_merge_anonymous_person",
+            endpoint="/v1/memory/teach/person",
+            payload=memory_e2e.self_introduction_payload(
+                camera=camera,
+                stream_ref=runner.require_stream_ref(),
+                display_name="Supporting Merged Person",
+                description="created from familiar unknown supporting contract",
+            ),
+            operation="supporting_teach_auto_merge_anonymous",
         )
         merged_events = runner.start_query_and_drain(
             websocket,
@@ -3191,7 +3197,8 @@ def _run_actual_supporting_familiar_merge(
             states_file=states_file,
             phase="supporting-familiar-merged-replay",
         )
-    person_id = merge["body"].get("person_id")
+    person_id = teach["body"].get("person_id")
+    copied_embedding_count = teach["body"].get("copied_embedding_count")
     known = _known_person_event_for_person(merged_events, person_id)
     old_anonymous_events = [
         event
@@ -3203,7 +3210,13 @@ def _run_actual_supporting_familiar_merge(
         "first_unknown_has_no_event": first_events == [],
         "familiar_unknown_present": familiar is not None,
         "anonymous_id_present": bool(anonymous_id),
-        "merge_ok": merge["body"].get("ok") is True,
+        "teach_ok": teach["body"].get("ok") is True,
+        "teach_auto_merge_outcome": teach["body"].get("outcome") == "merged_anonymous_person",
+        "merged_anonymous_id_matches": teach["body"].get("merged_anonymous_id") == anonymous_id,
+        "person_id_present": bool(person_id),
+        "copied_embedding_count": (
+            isinstance(copied_embedding_count, int) and copied_embedding_count > 0
+        ),
         "old_anonymous_suppressed": not old_anonymous_events,
         "known_replay_present": known is not None,
     }
@@ -3215,10 +3228,12 @@ def _run_actual_supporting_familiar_merge(
             "anonymous_id": anonymous_id,
             "events": memory_e2e.compact_events(familiar_events),
         },
-        "merge_anonymous_person": {
+        "teach_auto_merge_anonymous": {
             "anonymous_id": anonymous_id,
             "person_id": person_id,
-            "merge": merge["body"],
+            "merged_anonymous_id": teach["body"].get("merged_anonymous_id"),
+            "copied_embedding_count": copied_embedding_count,
+            "teach": teach["body"],
             "old_anonymous_suppressed": not old_anonymous_events,
             "known_replay_present": known is not None,
             "events": memory_e2e.compact_events(merged_events),

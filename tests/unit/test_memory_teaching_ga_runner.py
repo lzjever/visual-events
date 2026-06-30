@@ -1202,7 +1202,7 @@ def test_actual_fake_runner_report_includes_supporting_contracts(
         "conversation_summary_context",
         "external_user_link",
         "familiar_unknown",
-        "merge_anonymous_person",
+        "teach_auto_merge_anonymous",
         "correct_identity",
         "resolve_target_states",
     } <= set(supporting)
@@ -1216,8 +1216,25 @@ def test_actual_fake_runner_report_includes_supporting_contracts(
     )
     assert supporting["external_user_link"]["lookup_conversation_summaries"]
     assert supporting["familiar_unknown"]["present"] is True
-    assert supporting["merge_anonymous_person"]["old_anonymous_suppressed"] is True
-    assert supporting["merge_anonymous_person"]["known_replay_present"] is True
+    assert supporting["teach_auto_merge_anonymous"]["old_anonymous_suppressed"] is True
+    assert supporting["teach_auto_merge_anonymous"]["known_replay_present"] is True
+    api_records = [
+        json.loads(line)
+        for line in (out / "api_responses.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    auto_merge_records = [
+        record
+        for record in api_records
+        if record.get("operation") == "supporting_teach_auto_merge_anonymous"
+    ]
+    assert [record["endpoint"] for record in auto_merge_records] == [
+        "/v1/memory/teach/person"
+    ]
+    assert auto_merge_records[0]["response"]["outcome"] == "merged_anonymous_person"
+    assert all(
+        record.get("operation") != "supporting_merge_anonymous_person"
+        for record in api_records
+    )
     assert supporting["correct_identity"]["wrong_person_not_returned"] is True
     resolve_states = supporting["resolve_target_states"]
     assert set(resolve_states) == {"resolved", "ambiguous", "not_found"}
@@ -1451,6 +1468,12 @@ def test_post_teach_scene_replay_uses_one_runner_case(
                 phase=f"{phase}:drain",
             )
             scene_name = self.source_frame.path.parent.name
+            if (
+                phase.startswith("post-teach-scene-replay:")
+                and scene_name in transcript_text_by_scene
+                and self.source_frame.path.name != "teach.jpeg"
+            ):
+                return []
             if scene_name == "pic_teach_me":
                 return [
                     {
@@ -1538,7 +1561,20 @@ def test_post_teach_scene_replay_uses_one_runner_case(
         "pic_teach_scene_galbot/teach.jpeg"
     )
     assert source_path_by_phase["post-teach-scene-replay:pic_teach_me:query"] == (
-        "pic_teach_me/img_000.jpeg"
+        "pic_teach_me/teach.jpeg"
+    )
+    assert source_path_by_phase[
+        "post-teach-scene-replay:pic_teach_person:query"
+    ] == (
+        "pic_teach_person/teach.jpeg"
+    )
+    assert source_path_by_phase[
+        "post-teach-scene-replay:pic_teach_scene_galbot:query"
+    ] == (
+        "pic_teach_scene_galbot/teach.jpeg"
+    )
+    assert source_path_by_phase["post-teach-scene-replay:other_scene:query"] == (
+        "other_scene/img_000.jpeg"
     )
     phases = [
         json.loads(line)["phase"]

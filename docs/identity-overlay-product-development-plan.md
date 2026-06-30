@@ -458,6 +458,8 @@ scene_activated
 
 普通人物事件可以附带 `identity_context`：
 
+该示例是 server `visual_state.semantic_events` 技术合同，`track_id` 只用于 server/CLI 内部关联；CLI/Botified/agent-facing projection 必须使用 opaque `target_ref`，不输出 raw `track_id`。
+
 ```json
 {
   "event": "person_approaching_robot",

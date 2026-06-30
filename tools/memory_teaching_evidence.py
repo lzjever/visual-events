@@ -763,6 +763,7 @@ def _build_identity_summary_items(artifact: Path) -> list[dict[str, Any]]:
         _visual_state_identity_overlay_item(overlay_state),
         _event_identity_context_item(event_state, botified_event_identity),
         _identify_current_response_item(api_response),
+        _teach_auto_merge_anonymous_item(Path(artifact) / "api_responses.jsonl"),
         _current_visual_snapshot_item(snapshot),
     ]
 
@@ -863,6 +864,40 @@ def _identify_current_response_item(record: dict[str, Any] | None) -> dict[str, 
         "status_code": record.get("status_code"),
         "identify_status": response.get("status"),
         "target_ref": person.get("target_ref") if isinstance(person, dict) else None,
+        **_identity_summary(identity),
+    }
+
+
+def _teach_auto_merge_anonymous_item(path: Path) -> dict[str, Any]:
+    base = {
+        "assertion_id": "teach_auto_merge_anonymous",
+        "kind": "identity_summary",
+        "path": None,
+        "scene": "sidecar",
+        "report_section": "api_responses.jsonl",
+    }
+    record = _first_teach_auto_merge_response(path)
+    if not isinstance(record, dict):
+        return _status_item(base, "not_present", "teach auto merge response not present")
+
+    response = record.get("response")
+    if not isinstance(response, dict):
+        return _status_item(base, "not_present", "teach auto merge response body not present")
+    identity = response.get("identity_context")
+    if not isinstance(identity, dict):
+        person = response.get("person")
+        if isinstance(person, dict):
+            identity = {"status": "known_person", "person": person}
+    return {
+        **base,
+        "status": "present",
+        "endpoint": record.get("endpoint"),
+        "operation": record.get("operation"),
+        "status_code": record.get("status_code"),
+        "outcome": response.get("outcome"),
+        "person_id": response.get("person_id"),
+        "merged_anonymous_id": response.get("merged_anonymous_id"),
+        "copied_embedding_count": response.get("copied_embedding_count"),
         **_identity_summary(identity),
     }
 
@@ -1007,6 +1042,16 @@ def _request_event_name(request: str) -> str | None:
 def _first_api_response_for_endpoint(path: Path, endpoint: str) -> dict[str, Any] | None:
     for record in _read_jsonl_objects(path):
         if record.get("endpoint") == endpoint:
+            return record
+    return None
+
+
+def _first_teach_auto_merge_response(path: Path) -> dict[str, Any] | None:
+    for record in _read_jsonl_objects(path):
+        if record.get("endpoint") != "/v1/memory/teach/person":
+            continue
+        response = record.get("response")
+        if isinstance(response, dict) and response.get("outcome") == "merged_anonymous_person":
             return record
     return None
 
