@@ -11,7 +11,16 @@ from typing import Any
 import pytest
 
 from tests.jpeg_fixtures import JPEG_1280X720
-from visual_events_cli.botified_output import BotifiedPipeClosed
+from tests.unit.test_cli_botified_output import (
+    assert_no_current_snapshot_forbidden_fields,
+    familiar_unknown_identity_context,
+    known_identity_context,
+    semantic_event,
+)
+from visual_events_cli.botified_output import (
+    BotifiedPipeClosed,
+    build_current_visual_snapshot,
+)
 from visual_events_cli.frame_pump import HeadMotion, InputFrame
 from visual_events_cli.target_mapper import (
     make_invalid_gaze_target,
@@ -220,6 +229,86 @@ async def run_tick(coordinator: Any) -> Any:
     )
     await asyncio.sleep(0)
     return result
+
+
+@pytest.mark.asyncio
+async def test_runtime_coordinator_current_visual_snapshot_reads_latest_summary():
+    runtime = import_runtime()
+    clock = FakeClock(1710000000082)
+    frame_source = FakeFrameSource([make_frame(timestamp_ms=1710000000000)])
+    event = semantic_event(event_id="front:runtime_snapshot", track_id=7)
+    event["stream_ref"] = "private/event-stream"
+    event["source_frame"] = {"request_snapshot_ref": "private/snapshot-ref"}
+    visual_state = load_visual_state_tracking(
+        frame_id=1,
+        frame_timestamp_ms=1710000000000,
+        stream_ref="private/state-stream",
+        identity_context={
+            "overlay_status": "ready",
+            "active_target": {"track_id": 8, "stream_ref": "private/target-stream"},
+            "tracks": [
+                {"track_id": 7, "identity": known_identity_context()},
+                {"track_id": 8, "identity": familiar_unknown_identity_context()},
+            ],
+            "stream_ref": "private/overlay-stream",
+        },
+        tracks=[
+            {
+                "track_id": 7,
+                "class": "person",
+                "bbox_xyxy": [420.0, 90.0, 780.0, 690.0],
+                "bbox_area_ratio": 0.24,
+                "center_uv": [600.0, 390.0],
+                "head_uv": [602.0, 180.0],
+                "lost_ms": 0,
+                "keypoints": [{"name": "nose"}],
+                "stream_ref": "private/track-stream-7",
+            },
+            {
+                "track_id": 8,
+                "class": "person",
+                "bbox_xyxy": [860.0, 160.0, 1030.0, 610.0],
+                "bbox_area_ratio": 0.083,
+                "center_uv": [945.0, 385.0],
+                "head_uv": [946.0, 230.0],
+                "lost_ms": 0,
+                "embedding": [0.1, 0.2],
+                "stream_ref": "private/track-stream-8",
+            },
+        ],
+        semantic_events=[event],
+    )
+    service = FakeServiceClient([service_result(visual_state)])
+    gaze = FakeGazePublisher()
+    coordinator = make_coordinator(
+        runtime,
+        frame_source=frame_source,
+        service=service,
+        gaze=gaze,
+        clock=clock,
+    )
+
+    empty_snapshot = coordinator.current_visual_snapshot(now_ms=1710000000100)
+    assert empty_snapshot["type"] == "current_visual_snapshot"
+    assert empty_snapshot["overlay_status"] == "unavailable"
+    assert empty_snapshot["people"] == []
+
+    snapshot = empty_snapshot
+    for _ in range(3):
+        await run_tick(coordinator)
+        snapshot = coordinator.current_visual_snapshot(now_ms=1710000000100)
+        if snapshot["overlay_status"] == "ready":
+            break
+
+    assert snapshot == build_current_visual_snapshot(
+        visual_state,
+        now_ms=1710000000100,
+    )
+    assert snapshot["active_target_ref"] == "current:front:person:1"
+    assert [event_summary["event"] for event_summary in snapshot["events"]] == [
+        "person_waving"
+    ]
+    assert_no_current_snapshot_forbidden_fields(snapshot)
 
 
 @pytest.mark.asyncio

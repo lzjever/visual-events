@@ -9,6 +9,11 @@ from typing import Any
 import pytest
 
 from tests.jpeg_fixtures import JPEG_1280X720
+from tests.unit.test_cli_botified_output import (
+    assert_no_current_snapshot_forbidden_fields,
+    familiar_unknown_identity_context,
+    known_identity_context,
+)
 from visual_events_cli.target_mapper import (
     make_invalid_gaze_target,
     map_visual_state_to_gaze_target,
@@ -334,6 +339,87 @@ async def test_process_one_uses_clock_after_service_response_for_publish_timesta
         stale_after_ms=250,
     ).to_dict()
     assert gaze.dicts() == [expected]
+
+
+@pytest.mark.asyncio
+async def test_current_visual_snapshot_uses_latest_service_visual_state_summary():
+    module = import_frame_pump()
+    slot = module.LatestFrameSlot()
+    event = semantic_event(event_id="front:evt_snapshot", event="person_waving")
+    event["stream_ref"] = "private/event-stream"
+    event["source_frame"] = {"request_snapshot_ref": "private/snapshot-ref"}
+    state = load_visual_state_tracking(
+        frame_id=1,
+        frame_timestamp_ms=1710000000000,
+        stream_ref="private/state-stream",
+        identity_context={
+            "overlay_status": "ready",
+            "active_target": {"track_id": 8, "stream_ref": "private/target-stream"},
+            "tracks": [
+                {
+                    "track_id": 7,
+                    "identity": known_identity_context(),
+                    "stream_ref": "private/identity-stream-7",
+                },
+                {
+                    "track_id": 8,
+                    "identity": familiar_unknown_identity_context(),
+                    "stream_ref": "private/identity-stream-8",
+                },
+            ],
+            "stream_ref": "private/overlay-stream",
+        },
+        tracks=[
+            {
+                "track_id": 7,
+                "class": "person",
+                "bbox_xyxy": [420.0, 90.0, 780.0, 690.0],
+                "bbox_area_ratio": 0.24,
+                "center_uv": [600.0, 390.0],
+                "head_uv": [602.0, 180.0],
+                "lost_ms": 0,
+                "keypoints": [{"name": "nose"}],
+                "crop_ref": "private/crop-7.jpg",
+                "stream_ref": "private/track-stream-7",
+            },
+            {
+                "track_id": 8,
+                "class": "person",
+                "bbox_xyxy": [860.0, 160.0, 1030.0, 610.0],
+                "bbox_area_ratio": 0.083,
+                "center_uv": [945.0, 385.0],
+                "head_uv": [946.0, 230.0],
+                "lost_ms": 0,
+                "embedding": [0.1, 0.2],
+                "stream_ref": "private/track-stream-8",
+            },
+        ],
+        semantic_events=[event],
+    )
+    service = FakeServiceClient([service_result(state)])
+    pump = make_pump(module, slot=slot, service=service)
+
+    slot.push(make_frame(module, timestamp_ms=1710000000000))
+    await pump.process_one(now_ms=1710000000082)
+
+    snapshot = pump.current_visual_snapshot(now_ms=1710000000100)
+
+    assert snapshot["type"] == "current_visual_snapshot"
+    assert snapshot["overlay_status"] == "ready"
+    assert snapshot["active_target_ref"] == "current:front:person:1"
+    assert [person["target_ref"] for person in snapshot["people"]] == [
+        "current:front:person:0",
+        "current:front:person:1",
+    ]
+    assert snapshot["events"] == [
+        {
+            "event": "person_waving",
+            "target_ref": "current:front:person:0",
+            "confidence": 0.86,
+            "identity_context": snapshot["people"][0]["identity_context"],
+        }
+    ]
+    assert_no_current_snapshot_forbidden_fields(snapshot)
 
 
 @pytest.mark.asyncio

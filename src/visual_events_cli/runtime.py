@@ -176,6 +176,9 @@ class RuntimeCoordinator:
 
         return None
 
+    def current_visual_snapshot(self, now_ms: int | None = None) -> dict[str, Any]:
+        return self._pump.current_visual_snapshot(now_ms=now_ms)
+
     async def _read_latest_frame(self) -> Any | None:
         reader = getattr(self._frame_source, "poll_latest", None)
         if reader is None:

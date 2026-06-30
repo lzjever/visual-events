@@ -4,7 +4,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from visual_events_cli.botified_output import BotifiedEventMapper
+from visual_events_cli.botified_output import (
+    BotifiedEventMapper,
+    build_current_visual_snapshot,
+)
 from visual_events_cli.target_mapper import (
     make_invalid_gaze_target,
     map_visual_state_to_gaze_target,
@@ -66,6 +69,7 @@ class FramePump:
         self._last_sent_metadata: dict[str, Any] | None = None
         self._last_sent_timestamp_ms: int | None = None
         self._stale_published_for_key: tuple[Any, ...] | None = None
+        self._latest_visual_state: dict[str, Any] | None = None
 
     async def process_one(self, now_ms: int) -> bool:
         frame = self._latest_frame_slot.pop_latest()
@@ -81,6 +85,7 @@ class FramePump:
 
         visual_state = getattr(result, "visual_state", None)
         if isinstance(visual_state, dict):
+            self._latest_visual_state = visual_state
             self._publish_fresh_visual_state(
                 visual_state,
                 publish_timestamp_ms=int(self._clock_ms()),
@@ -89,6 +94,12 @@ class FramePump:
             self._last_sent_timestamp_ms = None
             self._write_botified_frames(visual_state)
         return True
+
+    def current_visual_snapshot(self, now_ms: int | None = None) -> dict[str, Any]:
+        return build_current_visual_snapshot(
+            self._latest_visual_state,
+            now_ms=now_ms,
+        )
 
     def publish_stale_now(self, publish_timestamp_ms: int) -> bool:
         metadata = self._last_metadata or self._last_sent_metadata
