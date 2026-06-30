@@ -1,5 +1,9 @@
 # Familiar Unknown Recognition Improvement Plan
 
+> Deprecated: this focused plan has been superseded by
+> `docs/identity-overlay-product-development-plan.md`. Keep this file only as
+> historical context for the anonymous familiar scoring discussion.
+
 日期：2026-06-30
 
 ## 1. 目标
