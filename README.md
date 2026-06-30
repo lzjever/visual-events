@@ -30,6 +30,15 @@ DDS JPEG @10Hz
 
 身份、记忆和示教相关口径以 [Identity Overlay active plan](docs/identity-overlay-product-development-plan.md) 为准；其他早期 V1/GA 文档里的“不做身份/记忆”表述只限定其原始 baseline 或 PC core gate 范围。
 
+Identity demo / handoff evidence:
+
+```bash
+uv run python tools/run_memory_teaching_ga_e2e.py --data-dir val-data --out artifacts/memory-identity-handoff
+uv run python tools/generate_memory_teaching_evidence.py --artifact artifacts/memory-identity-handoff --out artifacts/memory-identity-handoff-evidence --strict-source-ok
+```
+
+Machine-readable authority 是 `artifacts/memory-identity-handoff/report.json`；human demo 是 `artifacts/memory-identity-handoff-evidence/index.html`，打开它查看 demo。
+
 - [Legacy V1 产品 baseline](docs/legacy/product-design-v1-baseline.md)
 - [Legacy 开发与测试背景](docs/legacy/development-test-plan.md)
 - [GA 后续开发计划](docs/ga-development-plan.md)
