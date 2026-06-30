@@ -502,19 +502,12 @@ class AppMemoryService:
                 source="event_recall",
                 include_anonymous=True,
             )
-            latest = self._cache.get_fresh_for_stream(
-                cached.connection_id,
-                cached.frame.camera,
-            )
-            if _source_frame_ref(latest) != source_frame_ref:
-                return
-            if not _cached_visible_person_track(latest, track_id):
-                return
-            self._put_identity_overlay_result(
-                latest,
+            self._put_identity_overlay_result_for_current_frame(
+                cached,
                 target,
                 result,
                 source="event_recall",
+                source_frame_ref=source_frame_ref,
             )
         except FrameCacheError:
             return
@@ -549,6 +542,7 @@ class AppMemoryService:
 
     async def identify_current(self, request: dict[str, Any]) -> dict[str, Any]:
         camera = _required_text(request, "camera")
+        stream_ref = _required_text(request, "stream_ref")
         scope = _optional_text(request.get("scope")) or "active_target"
         if scope != "active_target":
             raise MemoryServiceError(
@@ -557,6 +551,12 @@ class AppMemoryService:
             )
         timeout_ms = int(request.get("timeout_ms") or 500)
         timeout_ms = max(1, min(timeout_ms, 1000))
+        if not await self._drain_pending_query_for_stream(
+            stream_ref,
+            camera,
+            timeout_ms=timeout_ms,
+        ):
+            return _identify_current_response(status="timeout")
         try:
             cached = self._fresh_cached_frame(request)
         except MemoryServiceError as exc:
@@ -605,7 +605,7 @@ class AppMemoryService:
                 evidence=_identify_current_evidence(cached),
             )
 
-        self._put_identity_overlay_result(
+        self._put_identity_overlay_result_for_current_frame(
             cached,
             target,
             result,
@@ -1305,18 +1305,29 @@ class AppMemoryService:
         self,
         connection_id: str,
         camera: str,
-    ) -> None:
+        *,
+        timeout_ms: int | None = None,
+    ) -> bool:
         stream_key = _stream_key(connection_id, camera)
         pending = self._pending_queries_by_stream.get(stream_key)
         if pending is None:
-            return
+            return True
         if not pending.done():
             try:
-                await asyncio.shield(pending)
+                if timeout_ms is None:
+                    await asyncio.shield(pending)
+                else:
+                    await asyncio.wait_for(
+                        asyncio.shield(pending),
+                        timeout=max(1, int(timeout_ms)) / 1000.0,
+                    )
+            except TimeoutError:
+                return False
             except Exception:
                 pass
         if pending.done():
             self._collect_completed_query(stream_key, pending)
+        return True
 
     async def _wait_for_teach_embedding_futures(self) -> None:
         while True:
@@ -2418,6 +2429,36 @@ class AppMemoryService:
             camera=cached.frame.camera,
             track_id=target.track_id,
             reason=result.reason or "no_public_identity_match",
+            source=source,
+        )
+
+    def _put_identity_overlay_result_for_current_frame(
+        self,
+        cached: CachedFrame,
+        target: ResolvedTarget,
+        result: _PersonIdentifyResult,
+        *,
+        source: str,
+        source_frame_ref: str | None = None,
+    ) -> None:
+        if target.track_id is None:
+            return
+        expected_source_frame_ref = source_frame_ref or _source_frame_ref(cached)
+        try:
+            latest = self._cache.get_fresh_for_stream(
+                cached.connection_id,
+                cached.frame.camera,
+            )
+        except FrameCacheError:
+            return
+        if _source_frame_ref(latest) != expected_source_frame_ref:
+            return
+        if not _cached_visible_person_track(latest, target.track_id):
+            return
+        self._put_identity_overlay_result(
+            latest,
+            target,
+            result,
             source=source,
         )
 

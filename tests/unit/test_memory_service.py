@@ -5700,6 +5700,205 @@ async def test_identify_current_uses_stream_ref_and_never_camera_fallback(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_identify_current_waits_for_same_stream_pending_background_query(
+    tmp_path,
+):
+    backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_known_active_target(subject, backend)
+    backend.block_queries = True
+    frame_message = frame()
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame_message,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    assert await asyncio.to_thread(backend.entered.wait, 1.0)
+    backend.block_queries = False
+
+    task = asyncio.create_task(subject.identify_current(_identify_request()))
+    try:
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        backend.release.set()
+        response = await asyncio.wait_for(task, 1.0)
+
+        assert response["status"] == "identified"
+        assert response["people"][0]["identity_context"]["status"] == "known_person"
+        assert (
+            response["people"][0]["identity_context"]["person"]["person_id"]
+            == "person_known"
+        )
+    finally:
+        backend.release.set()
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(task, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_identify_current_pending_background_query_timeout_has_no_side_effects(
+    tmp_path,
+):
+    backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    backend.block_queries = True
+    frame_message = frame()
+    await subject.observe_visual_state(
+        connection_id="ws_1",
+        frame=frame_message,
+        visual_state=visual_state(),
+        memory_snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    assert await asyncio.to_thread(backend.entered.wait, 1.0)
+    backend.block_queries = False
+    before_counts = _store_counts(subject.store)
+
+    try:
+        response = await subject.identify_current(_identify_request(timeout_ms=25))
+
+        assert response["status"] == "timeout"
+        assert response["people"] == []
+        _assert_identify_current_response_redacted(response)
+        assert _store_counts(subject.store) == before_counts
+        assert (
+            await subject.drain_completed_events(
+                camera="front",
+                connection_id="ws_1",
+                frame_id=1,
+                frame_timestamp_ms=1_000,
+            )
+            == []
+        )
+        projected = subject.identity_context_for_visual_state(
+            connection_id="ws_1",
+            visual_state=visual_state(),
+        )
+        assert projected["tracks"][0]["identity"] == {
+            "status": "unknown",
+            "source": "none",
+        }
+    finally:
+        backend.release.set()
+
+
+@pytest.mark.asyncio
+async def test_identify_current_late_result_does_not_overwrite_latest_overlay(
+    tmp_path,
+):
+    backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_known_active_target(subject, backend)
+    backend.entered.clear()
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=first_frame,
+        state=visual_state(frame_id=1, timestamp_ms=1_000),
+        snapshot=memory_snapshot(frame_message=first_frame),
+    )
+    before_counts = _store_counts(subject.store)
+
+    backend.block_queries = True
+    task = asyncio.create_task(subject.identify_current(_identify_request()))
+    try:
+        assert await asyncio.to_thread(backend.entered.wait, 1.0)
+
+        latest_frame = frame(frame_id=2, timestamp_ms=1_100)
+        latest_state = visual_state(frame_id=2, timestamp_ms=1_100)
+        await _observe_without_background_query(
+            subject,
+            connection_id="ws_1",
+            frame_message=latest_frame,
+            state=latest_state,
+            snapshot=memory_snapshot(frame_message=latest_frame),
+        )
+
+        backend.release.set()
+        response = await asyncio.wait_for(task, 1.0)
+
+        assert response["status"] == "identified"
+        assert response["evidence"] == {
+            "source_frame_ref": "front:1:1000",
+            "request_snapshot_ref": "snapshot:front:1",
+        }
+        assert response["people"][0]["identity_context"]["status"] == "known_person"
+        assert _store_counts(subject.store) == before_counts
+        projected = subject.identity_context_for_visual_state(
+            connection_id="ws_1",
+            visual_state=latest_state,
+        )
+        assert projected["tracks"][0]["identity"] == {
+            "status": "unknown",
+            "source": "none",
+        }
+    finally:
+        backend.release.set()
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(task, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_identify_current_late_result_ignores_reused_memory_snapshot(
+    tmp_path,
+):
+    backend = BlockingQueryEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_known_active_target(subject, backend)
+    backend.entered.clear()
+    first_frame = frame(frame_id=1, timestamp_ms=1_000)
+    first_snapshot = memory_snapshot(frame_message=first_frame)
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=first_frame,
+        state=visual_state(frame_id=1, timestamp_ms=1_000),
+        snapshot=first_snapshot,
+    )
+    before_counts = _store_counts(subject.store)
+
+    backend.block_queries = True
+    task = asyncio.create_task(subject.identify_current(_identify_request()))
+    try:
+        assert await asyncio.to_thread(backend.entered.wait, 1.0)
+
+        latest_frame = frame(frame_id=2, timestamp_ms=1_100)
+        latest_state = visual_state(frame_id=2, timestamp_ms=1_100)
+        await _observe_without_background_query(
+            subject,
+            connection_id="ws_1",
+            frame_message=latest_frame,
+            state=latest_state,
+            snapshot=first_snapshot,
+        )
+
+        backend.release.set()
+        response = await asyncio.wait_for(task, 1.0)
+
+        assert response["status"] == "identified"
+        assert response["evidence"] == {
+            "source_frame_ref": "front:1:1000",
+            "request_snapshot_ref": "snapshot:front:1",
+        }
+        assert response["people"][0]["identity_context"]["status"] == "known_person"
+        assert _store_counts(subject.store) == before_counts
+        projected = subject.identity_context_for_visual_state(
+            connection_id="ws_1",
+            visual_state=latest_state,
+        )
+        assert projected["tracks"][0]["identity"] == {
+            "status": "unknown",
+            "source": "none",
+        }
+    finally:
+        backend.release.set()
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(task, 1.0)
+
+
+@pytest.mark.asyncio
 async def test_teach_person_uses_stream_ref_and_never_camera_fallback(tmp_path):
     subject = service(tmp_path)
     frame_b = frame(frame_id=1, timestamp_ms=1_000)
