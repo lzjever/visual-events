@@ -30,8 +30,8 @@ DDS JPEG @10Hz
 
 身份、记忆和示教相关口径以 [Identity Overlay active plan](docs/identity-overlay-product-development-plan.md) 为准；其他早期 V1/GA 文档里的“不做身份/记忆”表述只限定其原始 baseline 或 PC core gate 范围。
 
-- [产品设计](docs/legacy/product-design-v1-baseline.md)
-- [开发与测试计划](docs/legacy/development-test-plan.md)
+- [Legacy V1 产品 baseline](docs/legacy/product-design-v1-baseline.md)
+- [Legacy 开发与测试背景](docs/legacy/development-test-plan.md)
 - [GA 后续开发计划](docs/ga-development-plan.md)
 - [Identity Overlay active plan](docs/identity-overlay-product-development-plan.md)
 - [Visual Evidence Tool Development Plan](docs/visual-evidence-tool-development-plan.md)
