@@ -241,11 +241,15 @@ def assert_no_active_memory_forbidden_fields(response: dict[str, Any]) -> None:
         "bbox",
         "keypoints",
         "embedding",
+        "embedding_id",
         "crop",
         "source_frame",
         "request_snapshot_ref",
         "evidence",
         "store_delta",
+        "memory_match_id",
+        "source_target_mode",
+        "runtime_person_slot",
     ):
         assert forbidden not in serialized
 
@@ -327,9 +331,13 @@ async def test_identify_current_uses_latest_camera_stream_ref_and_redacts_respon
                 "target_ref": "current:front:active_target",
                 "track_id": 7,
                 "stream_ref": "private/track-stream",
+                "memory_match_id": "match_000001",
+                "source_target_mode": "track_id",
+                "runtime_person_slot": 3,
                 "identity_context": {
                     "status": "known_person",
                     "display_name": "张三",
+                    "embedding_id": "emb_face_000001",
                     "embedding": [0.1, 0.2],
                 },
             }
@@ -390,6 +398,10 @@ async def test_teach_person_uses_self_introduction_default_or_explicit_target_an
         "person": {
             "display_name": "张三",
             "source_frame_ref": "private/frame",
+            "memory_match_id": "match_000001",
+            "embedding_id": "emb_face_000001",
+            "source_target_mode": "track_id",
+            "runtime_person_slot": 3,
         },
         "evidence": {"crop_ref": "private/crop.jpg"},
         "store_delta": {"person": 1},

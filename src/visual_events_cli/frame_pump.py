@@ -269,6 +269,10 @@ _ACTIVE_MEMORY_FORBIDDEN_KEYS = frozenset(
         "source_frame",
         "source_frame_ref",
         "request_snapshot_ref",
+        "memory_match_id",
+        "embedding_id",
+        "source_target_mode",
+        "runtime_person_slot",
         "evidence",
         "store_delta",
     }
