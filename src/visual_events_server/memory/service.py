@@ -11,6 +11,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,13 @@ from .frame_cache import (
     MemoryFrameSnapshotWindow,
     RequestInteractionSnapshot,
 )
-from .identity_overlay import IdentityOverlay
+from .identity_overlay import (
+    IdentityOverlay,
+    familiar_unknown_identity_context,
+    known_person_identity_context,
+    unavailable_person_identity_context,
+    unknown_identity_context,
+)
 from .retriever import MemoryRetriever
 from .store import MemoryStore
 from .target_resolver import (
@@ -78,6 +85,17 @@ class MemoryServiceError(RuntimeError):
 @dataclass(frozen=True)
 class _QueryPlan:
     cached: CachedFrame
+
+
+@dataclass(frozen=True)
+class _PersonIdentifyResult:
+    status: str
+    identity_context: dict[str, Any]
+    reason: str | None = None
+    match: MemoryMatch | None = None
+    profile: dict[str, Any] | None = None
+    embedding: EmbeddingResult | None = None
+    embedding_bytes: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -327,6 +345,88 @@ class AppMemoryService:
             camera=camera,
             visual_state=visual_state,
         )
+
+    async def identify_current(self, request: dict[str, Any]) -> dict[str, Any]:
+        camera = _required_text(request, "camera")
+        scope = _optional_text(request.get("scope")) or "active_target"
+        if scope != "active_target":
+            raise MemoryServiceError(
+                "invalid_memory_request",
+                "identify-current only supports scope=active_target",
+            )
+        timeout_ms = int(request.get("timeout_ms") or 500)
+        timeout_ms = max(1, min(timeout_ms, 1000))
+        try:
+            cached = self._fresh_cached_frame(request)
+        except MemoryServiceError as exc:
+            if exc.code == "frame_cache_expired":
+                return _identify_current_response(
+                    status="stale_interaction",
+                    reason="frame_cache_expired",
+                )
+            if exc.code == "no_active_frame":
+                return _identify_current_response(status="no_active_frame")
+            raise
+
+        target, ambiguity_type = self._active_interaction_target_from_frame(cached)
+        if target is None:
+            status = (
+                "stale_interaction"
+                if ambiguity_type == "stale_interaction"
+                else "ambiguous"
+            )
+            return _identify_current_response(
+                status=status,
+                reason=ambiguity_type,
+                evidence=_identify_current_evidence(cached),
+            )
+
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(
+            None,
+            partial(
+                self._identify_person_target,
+                cached,
+                target,
+                source="active_identify",
+                include_anonymous=True,
+            ),
+        )
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(future),
+                timeout=timeout_ms / 1000.0,
+            )
+        except TimeoutError:
+            future.add_done_callback(_consume_identify_future_exception)
+            return _identify_current_response(
+                status="timeout",
+                evidence=_identify_current_evidence(cached),
+            )
+
+        self._put_identity_overlay_result(
+            cached,
+            target,
+            result,
+            source="active_identify",
+        )
+        status = (
+            "identified"
+            if result.status in {"known_person", "familiar_unknown"}
+            else result.status
+        )
+        response = _identify_current_response(
+            status=status,
+            reason=result.reason,
+            people=[
+                {
+                    "target_ref": f"current:{camera}:active_target",
+                    "identity_context": result.identity_context,
+                }
+            ],
+            evidence=_identify_current_evidence(cached),
+        )
+        return response
 
     async def teach_person(self, request: dict[str, Any]) -> dict[str, Any]:
         await self._enter_teach_request()
@@ -1710,67 +1810,47 @@ class AppMemoryService:
         *,
         updated_anonymous_ids: set[str],
     ) -> dict[str, Any] | None:
-        embedding: EmbeddingResult | None = None
-        embedding_bytes: bytes | None = None
-        saw_no_usable_face = False
-        for candidate_bytes in _person_embedding_input_candidates(
-            plan.cached.frame.jpeg_bytes,
+        result = self._identify_person_target(
+            plan.cached,
             target,
-            tracks=(
-                plan.cached.memory_snapshot.tracks
-                if plan.cached.memory_snapshot is not None
-                else None
-            ),
-        ):
-            try:
-                embedding = self.embedding_backend.embed_person(candidate_bytes)
-            except EmbeddingUnavailable as exc:
-                if exc.code == "no_usable_face":
-                    saw_no_usable_face = True
-                    continue
-                return None
-            embedding_bytes = candidate_bytes
-            break
-        if embedding is None or embedding_bytes is None:
-            if saw_no_usable_face:
-                self._identity_overlay.put_unavailable(
-                    connection_id=plan.cached.connection_id,
-                    camera=plan.cached.frame.camera,
-                    track_id=target.track_id,
-                    reason="no_usable_face",
+            source="background_recall",
+            include_anonymous=False,
+        )
+        if result.status == "unavailable":
+            if result.reason == "no_usable_face":
+                self._put_identity_overlay_result(
+                    plan.cached,
+                    target,
+                    result,
+                    source="background_recall",
                 )
             return None
-        match = self._retriever.query_person(
-            embedding,
-            threshold=self.known_person_threshold,
-            margin=self.known_person_margin,
-        )
-        if match is None:
+        if result.status != "known_person":
+            if result.embedding is None or result.embedding_bytes is None:
+                return None
             return self._query_anonymous_person(
                 plan,
                 target,
-                embedding,
-                embedding_bytes,
+                result.embedding,
+                result.embedding_bytes,
                 updated_anonymous_ids=updated_anonymous_ids,
             )
-        profile = self.store.get_person_profile(match.matched_id)
-        if profile is None:
+        if result.match is None or result.profile is None:
             return None
         conversation_summaries = tuple(
-            self.store.get_conversation_summaries(match.matched_id, limit=3)
+            self.store.get_conversation_summaries(result.match.matched_id, limit=3)
         )
-        self._identity_overlay.put_known_person(
-            connection_id=plan.cached.connection_id,
-            camera=plan.cached.frame.camera,
-            track_id=target.track_id,
-            person_profile=profile,
-            match=match,
+        self._put_identity_overlay_result(
+            plan.cached,
+            target,
+            result,
+            source="background_recall",
         )
         with self._query_state_lock:
             if not self._gate.allow(
                 _event_gate_scope(plan.cached),
                 "known_person_present",
-                match.matched_id,
+                result.match.matched_id,
                 now_ms=plan.cached.frame.timestamp_ms,
             ):
                 return None
@@ -1782,13 +1862,221 @@ class AppMemoryService:
             source_target_mode=target.source_target_mode,
             track_id=target.track_id,
         )
-        self._record_match(match, event_id=event_id, source=source)
+        self._record_match(result.match, event_id=event_id, source=source)
         return build_known_person_event(
             event_id=event_id,
-            match=match,
+            match=result.match,
             source=source,
-            person_profile=profile,
+            person_profile=result.profile,
             conversation_summaries=conversation_summaries,
+        )
+
+    def _identify_person_target(
+        self,
+        cached: CachedFrame,
+        target: ResolvedTarget,
+        *,
+        source: str,
+        include_anonymous: bool,
+    ) -> _PersonIdentifyResult:
+        embedding: EmbeddingResult | None = None
+        embedding_bytes: bytes | None = None
+        saw_no_usable_face = False
+        for candidate_bytes in _person_embedding_input_candidates(
+            cached.frame.jpeg_bytes,
+            target,
+            tracks=(
+                cached.memory_snapshot.tracks
+                if cached.memory_snapshot is not None
+                else None
+            ),
+        ):
+            try:
+                embedding = self.embedding_backend.embed_person(candidate_bytes)
+            except EmbeddingUnavailable as exc:
+                if exc.code == "no_usable_face":
+                    saw_no_usable_face = True
+                    continue
+                return _PersonIdentifyResult(
+                    status="unavailable",
+                    reason=exc.code or "embedding_unavailable",
+                    identity_context=unavailable_person_identity_context(
+                        reason=exc.code or "embedding_unavailable",
+                        source=source,
+                    ),
+                )
+            embedding_bytes = candidate_bytes
+            break
+        if embedding is None or embedding_bytes is None:
+            reason = "no_usable_face" if saw_no_usable_face else "embedding_unavailable"
+            return _PersonIdentifyResult(
+                status="unavailable",
+                reason=reason,
+                identity_context=unavailable_person_identity_context(
+                    reason=reason,
+                    source=source,
+                ),
+            )
+
+        match = self._retriever.query_person(
+            embedding,
+            threshold=self.known_person_threshold,
+            margin=self.known_person_margin,
+        )
+        if match is not None:
+            profile = self.store.get_person_profile(match.matched_id)
+            if profile is not None:
+                return _PersonIdentifyResult(
+                    status="known_person",
+                    identity_context=known_person_identity_context(
+                        profile,
+                        match,
+                        source=source,
+                    ),
+                    match=match,
+                    profile=profile,
+                    embedding=embedding,
+                    embedding_bytes=embedding_bytes,
+                )
+
+        if include_anonymous:
+            anonymous_result = self._identify_existing_anonymous_person(
+                target,
+                embedding,
+                source=source,
+            )
+            return replace(
+                anonymous_result,
+                embedding=embedding,
+                embedding_bytes=embedding_bytes,
+            )
+
+        return _PersonIdentifyResult(
+            status="unknown",
+            reason="no_known_person_match",
+            identity_context=unknown_identity_context(
+                reason="no_known_person_match",
+                source=source,
+            ),
+            embedding=embedding,
+            embedding_bytes=embedding_bytes,
+        )
+
+    def _identify_existing_anonymous_person(
+        self,
+        target: ResolvedTarget,
+        embedding: EmbeddingResult,
+        *,
+        source: str,
+    ) -> _PersonIdentifyResult:
+        if target.quality != "usable":
+            return _PersonIdentifyResult(
+                status="unknown",
+                reason="target_quality_not_usable",
+                identity_context=unknown_identity_context(
+                    reason="target_quality_not_usable",
+                    source=source,
+                ),
+            )
+        match = self._retriever.query_anonymous_person(
+            embedding,
+            threshold=self.anonymous_threshold,
+            margin=self.anonymous_margin,
+        )
+        if match is None:
+            return _PersonIdentifyResult(
+                status="unknown",
+                reason="no_public_identity_match",
+                identity_context=unknown_identity_context(
+                    reason="no_public_identity_match",
+                    source=source,
+                ),
+            )
+        profile = self.store.get_active_anonymous_profile(match.matched_id)
+        if profile is None:
+            return _PersonIdentifyResult(
+                status="unknown",
+                reason="anonymous_profile_unavailable",
+                identity_context=unknown_identity_context(
+                    reason="anonymous_profile_unavailable",
+                    source=source,
+                ),
+            )
+        if not self._anonymous_profile_is_familiar(profile):
+            return _PersonIdentifyResult(
+                status="unknown",
+                reason="not_familiar",
+                identity_context=unknown_identity_context(
+                    reason="not_familiar",
+                    source=source,
+                ),
+                match=match,
+                profile=profile,
+            )
+        return _PersonIdentifyResult(
+            status="familiar_unknown",
+            identity_context=familiar_unknown_identity_context(
+                profile,
+                match,
+                source=source,
+            ),
+            match=match,
+            profile=profile,
+        )
+
+    def _anonymous_profile_is_familiar(self, profile: dict[str, Any]) -> bool:
+        return (
+            int(profile["seen_count"]) >= self.familiar_seen_count
+            and int(profile.get("observed_duration_ms", 0))
+            >= self.familiar_observed_duration_ms
+            and float(profile["familiar_score"]) >= self.familiar_threshold
+        )
+
+    def _put_identity_overlay_result(
+        self,
+        cached: CachedFrame,
+        target: ResolvedTarget,
+        result: _PersonIdentifyResult,
+        *,
+        source: str,
+    ) -> None:
+        if result.status == "known_person" and result.match is not None:
+            if result.profile is not None:
+                self._identity_overlay.put_known_person(
+                    connection_id=cached.connection_id,
+                    camera=cached.frame.camera,
+                    track_id=target.track_id,
+                    person_profile=result.profile,
+                    match=result.match,
+                    source=source,
+                )
+            return
+        if result.status == "familiar_unknown" and result.match is not None:
+            if result.profile is not None:
+                self._identity_overlay.put_familiar_unknown(
+                    connection_id=cached.connection_id,
+                    camera=cached.frame.camera,
+                    track_id=target.track_id,
+                    anonymous_profile=result.profile,
+                    match=result.match,
+                    source=source,
+                )
+            return
+        if result.status == "unavailable":
+            self._identity_overlay.put_unavailable(
+                connection_id=cached.connection_id,
+                camera=cached.frame.camera,
+                track_id=target.track_id,
+                reason=result.reason or "embedding_unavailable",
+                source=source,
+            )
+            return
+        self._identity_overlay.put_unknown(
+            connection_id=cached.connection_id,
+            camera=cached.frame.camera,
+            track_id=target.track_id,
+            reason=result.reason or "no_public_identity_match",
+            source=source,
         )
 
     def _query_anonymous_person(
@@ -2257,6 +2545,42 @@ class AppMemoryService:
         if getattr(preview, "evidence", None):
             evidence.update(preview.evidence)
         return evidence
+
+
+def _identify_current_response(
+    *,
+    status: str,
+    reason: str | None = None,
+    people: list[dict[str, Any]] | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "ok": True,
+        "status": status,
+        "people": list(people or []),
+        "evidence": dict(evidence or {}),
+    }
+    if reason is not None:
+        response["reason"] = reason
+    return response
+
+
+def _consume_identify_future_exception(
+    future: asyncio.Future[_PersonIdentifyResult],
+) -> None:
+    try:
+        future.result()
+    except Exception:
+        _LOGGER.debug("timed-out identify-current worker failed", exc_info=True)
+
+
+def _identify_current_evidence(cached: CachedFrame) -> dict[str, Any]:
+    evidence: dict[str, Any] = {"source_frame_ref": _source_frame_ref(cached)}
+    snapshot = cached.memory_snapshot
+    if snapshot is not None:
+        evidence["source_frame_ref"] = snapshot.source_frame_ref
+        evidence["request_snapshot_ref"] = snapshot.snapshot_ref
+    return evidence
 
 
 def _person_visual_evidence(

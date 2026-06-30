@@ -8,6 +8,7 @@ import time
 from contextlib import suppress
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PIL import Image, ImageDraw
@@ -3852,6 +3853,144 @@ def _store_counts(store: MemoryStore) -> dict[str, int]:
     return store.memory_table_counts()
 
 
+async def _observe_without_background_query(
+    subject: AppMemoryService,
+    *,
+    connection_id: str,
+    frame_message: FrameMessage,
+    state: dict,
+    snapshot: MemoryFrameSnapshot | None,
+) -> None:
+    subject._last_query_frame_timestamp_ms_by_stream[  # noqa: SLF001
+        (connection_id, frame_message.camera)
+    ] = frame_message.timestamp_ms
+    await subject.observe_visual_state(
+        connection_id=connection_id,
+        frame=frame_message,
+        visual_state=state,
+        memory_snapshot=snapshot,
+    )
+
+
+def _identify_request(
+    *,
+    stream_ref: str = "ws_1",
+    camera: str = "front",
+    timeout_ms: int = 500,
+) -> dict[str, Any]:
+    return {
+        "camera": camera,
+        "stream_ref": stream_ref,
+        "target": {
+            "kind": "person",
+            "intent": "identify_current",
+            "referent_text": "当前这个人",
+        },
+        "scope": "active_target",
+        "timeout_ms": timeout_ms,
+    }
+
+
+def _assert_identify_current_response_redacted(response: dict[str, Any]) -> None:
+    forbidden_low_level_keys = {
+        "source_frame",
+        "source_scene",
+        "track_id",
+        "bbox",
+        "bbox_xyxy",
+        "keypoints",
+        "embedding",
+        "crop",
+        "crop_ref",
+        "stream_ref",
+    }
+    assert set(response) <= {"ok", "status", "reason", "people", "evidence"}
+    assert response.get("ok") is True
+    assert isinstance(response.get("status"), str)
+    assert isinstance(response.get("people"), list)
+    assert isinstance(response.get("evidence"), dict)
+    if "reason" in response:
+        assert isinstance(response["reason"], str)
+
+    for item in response["people"]:
+        assert isinstance(item, dict)
+        assert set(item) == {"target_ref", "identity_context"}
+        assert isinstance(item["target_ref"], str)
+        _assert_identify_current_identity_context_shape(item["identity_context"])
+
+    assert set(response["evidence"]) <= {"source_frame_ref", "request_snapshot_ref"}
+    for value in response["evidence"].values():
+        assert isinstance(value, str)
+
+    def walk(value: Any, *, path: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key)
+                assert key_text not in forbidden_low_level_keys
+                walk(item, path=(*path, key_text))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, path=(*path, str(index)))
+
+    walk(response)
+
+
+def _assert_identify_current_identity_context_shape(identity: dict[str, Any]) -> None:
+    assert isinstance(identity, dict)
+    status = identity.get("status")
+    assert status in {
+        "known_person",
+        "familiar_unknown",
+        "unknown",
+        "pending",
+        "unavailable",
+    }
+    assert identity.get("source") == "active_identify"
+    base_keys = {"status", "source", "confidence", "person", "anonymous_person", "reason"}
+    assert set(identity) <= base_keys
+
+    if status == "known_person":
+        assert set(identity) <= {"status", "source", "confidence", "person"}
+        assert isinstance(identity.get("confidence"), float)
+        person = identity.get("person")
+        assert isinstance(person, dict)
+        assert set(person) <= {"person_id", "display_name", "description", "tags"}
+        assert isinstance(person.get("person_id"), str)
+        assert isinstance(person.get("display_name"), str)
+        assert isinstance(person.get("description"), str)
+        assert isinstance(person.get("tags"), list)
+        return
+
+    if status == "familiar_unknown":
+        assert set(identity) <= {
+            "status",
+            "source",
+            "confidence",
+            "anonymous_person",
+        }
+        assert isinstance(identity.get("confidence"), float)
+        anonymous = identity.get("anonymous_person")
+        assert isinstance(anonymous, dict)
+        assert set(anonymous) <= {
+            "anonymous_id",
+            "seen_count",
+            "observed_duration_ms",
+            "familiar_score",
+        }
+        assert isinstance(anonymous.get("anonymous_id"), str)
+        assert isinstance(anonymous.get("seen_count"), int)
+        assert isinstance(anonymous.get("observed_duration_ms"), int)
+        assert isinstance(anonymous.get("familiar_score"), float)
+        return
+
+    if status in {"unknown", "unavailable"}:
+        assert set(identity) <= {"status", "source", "reason"}
+        assert isinstance(identity.get("reason"), str)
+        return
+
+    assert set(identity) == {"status", "source"}
+
+
 def _assert_zero_store_delta(store_delta: dict) -> None:
     assert {
         "embedding_provenance",
@@ -3906,6 +4045,431 @@ def _seed_person(
         source_target_type="test_seed",
         now_ms=now_ms,
     )
+
+
+def _active_target_embedding_bytes() -> bytes:
+    target = ResolvedTarget(
+        source_target_mode="active_interaction_target",
+        target_type="person",
+        bbox_xyxy=(300.0, 100.0, 700.0, 650.0),
+        track_id=7,
+        quality="usable",
+    )
+    return next(
+        _person_embedding_input_candidates(
+            JPEG_1280X720,
+            target,
+            tracks=memory_snapshot().tracks,
+        )
+    )
+
+
+def _seed_known_active_target(
+    subject: AppMemoryService,
+    backend: FakeEmbeddingBackend,
+    *,
+    person_id: str = "person_known",
+    display_name: str = "张三",
+) -> None:
+    embedding = backend.embed_person(_active_target_embedding_bytes())
+    _seed_person(
+        subject,
+        backend,
+        vector=tuple(embedding.vector),
+        display_name=display_name,
+        person_id=person_id,
+    )
+
+
+def _seed_familiar_unknown_active_target(
+    subject: AppMemoryService,
+    backend: FakeEmbeddingBackend,
+    *,
+    anonymous_id: str = "anon_known",
+) -> None:
+    subject.store.create_anonymous_profile(
+        anonymous_id=anonymous_id,
+        seen_count=3,
+        first_seen_at_ms=9_000,
+        last_seen_at_ms=10_000,
+        familiar_score=1.0,
+        observed_duration_ms=1_000,
+    )
+    subject.store.add_anonymous_embedding(
+        anonymous_id=anonymous_id,
+        result=backend.embed_person(_active_target_embedding_bytes()),
+        source_target_type="test_seed",
+        now_ms=10_000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_identify_current_active_target_known_person_updates_overlay_without_writes(tmp_path):
+    backend = FakeEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_known_active_target(subject, backend)
+    frame_message = frame()
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=visual_state(),
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    before_counts = _store_counts(subject.store)
+
+    response = await subject.identify_current(_identify_request())
+
+    assert response["ok"] is True
+    assert response["status"] == "identified"
+    assert response["people"][0]["target_ref"] == "current:front:active_target"
+    identity = response["people"][0]["identity_context"]
+    assert identity["status"] == "known_person"
+    assert identity["source"] == "active_identify"
+    assert identity["person"]["person_id"] == "person_known"
+    assert response["evidence"] == {
+        "source_frame_ref": "front:1:1000",
+        "request_snapshot_ref": "snapshot:front:1",
+    }
+    _assert_identify_current_response_redacted(response)
+    assert _store_counts(subject.store) == before_counts
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=1,
+            frame_timestamp_ms=1_000,
+        )
+        == []
+    )
+
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visual_state(),
+    )
+    assert projected["tracks"][0]["identity"]["status"] == "known_person"
+    assert projected["tracks"][0]["identity"]["source"] == "active_identify"
+
+
+@pytest.mark.asyncio
+async def test_identify_current_existing_familiar_unknown_does_not_create_anonymous(tmp_path):
+    backend = FakeEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_familiar_unknown_active_target(subject, backend)
+    frame_message = frame()
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=visual_state(),
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    before_counts = _store_counts(subject.store)
+
+    response = await subject.identify_current(_identify_request())
+
+    assert response["status"] == "identified"
+    identity = response["people"][0]["identity_context"]
+    assert identity["status"] == "familiar_unknown"
+    assert identity["source"] == "active_identify"
+    assert identity["anonymous_person"]["anonymous_id"] == "anon_known"
+    _assert_identify_current_response_redacted(response)
+    assert _store_counts(subject.store) == before_counts
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=1,
+            frame_timestamp_ms=1_000,
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_identify_current_active_target_unknown_updates_overlay_without_writes(tmp_path):
+    subject = service(tmp_path)
+    frame_message = frame()
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=visual_state(),
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    before_counts = _store_counts(subject.store)
+
+    response = await subject.identify_current(_identify_request())
+
+    assert response["status"] == "unknown"
+    assert response["reason"] == "no_public_identity_match"
+    assert response["people"][0]["identity_context"] == {
+        "status": "unknown",
+        "source": "active_identify",
+        "reason": "no_public_identity_match",
+    }
+    _assert_identify_current_response_redacted(response)
+    assert _store_counts(subject.store) == before_counts
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=1,
+            frame_timestamp_ms=1_000,
+        )
+        == []
+    )
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visual_state(),
+    )
+    assert projected["tracks"][0]["identity"]["status"] == "unknown"
+    assert projected["tracks"][0]["identity"]["source"] == "active_identify"
+    assert projected["tracks"][0]["identity"]["reason"] == "no_public_identity_match"
+
+
+@pytest.mark.asyncio
+async def test_identify_current_business_failure_states(tmp_path):
+    subject = service(tmp_path)
+
+    before_missing_counts = _store_counts(subject.store)
+    no_active = await subject.identify_current(_identify_request())
+    assert no_active["status"] == "no_active_frame"
+    _assert_identify_current_response_redacted(no_active)
+    assert _store_counts(subject.store) == before_missing_counts
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=1,
+            frame_timestamp_ms=1_000,
+        )
+        == []
+    )
+
+    frame_message = frame()
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=visual_state(),
+        snapshot=memory_snapshot(
+            frame_message=frame_message,
+            engagement_state="not_available",
+        ),
+    )
+
+    before_ambiguous_counts = _store_counts(subject.store)
+    ambiguous = await subject.identify_current(_identify_request())
+    assert ambiguous["status"] == "ambiguous"
+    assert ambiguous["reason"] == "no_active_interaction_target"
+    _assert_identify_current_response_redacted(ambiguous)
+    assert _store_counts(subject.store) == before_ambiguous_counts
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=1,
+            frame_timestamp_ms=1_000,
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_identify_current_stale_frame_returns_business_status(tmp_path):
+    now = 10_000
+    clock = lambda: now
+    store = MemoryStore.open(tmp_path / "memory.sqlite3", person_dim=8, scene_dim=8)
+    subject = _track_service(
+        AppMemoryService(
+            store=store,
+            embedding_backend=FakeEmbeddingBackend(person_dim=8, scene_dim=8),
+            frame_cache_seconds=1,
+            query_interval_ms=500,
+            queue_size=4,
+            known_person_threshold=0.95,
+            known_person_margin=0.05,
+            anonymous_threshold=0.95,
+            anonymous_margin=0.05,
+            familiar_seen_count=3,
+            familiar_observed_duration_ms=0,
+            familiar_threshold=0.95,
+            scene_threshold=0.95,
+            event_cooldown_ms=5_000,
+            clock_ms=clock,
+        )
+    )
+    frame_message = frame()
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=visual_state(),
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    before_counts = _store_counts(subject.store)
+    now = 11_001
+
+    response = await subject.identify_current(_identify_request())
+
+    assert response["status"] == "stale_interaction"
+    assert response["reason"] == "frame_cache_expired"
+    _assert_identify_current_response_redacted(response)
+    assert _store_counts(subject.store) == before_counts
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=1,
+            frame_timestamp_ms=1_000,
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_identify_current_no_usable_face_updates_unavailable_overlay_without_writes(tmp_path):
+    backend = ScriptedPersonEmbeddingBackend(
+        person_outcomes=[_no_usable_face(), _no_usable_face()],
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    frame_message = frame()
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=visual_state(),
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    before_counts = _store_counts(subject.store)
+
+    response = await subject.identify_current(_identify_request())
+
+    assert response["status"] == "unavailable"
+    assert response["reason"] == "no_usable_face"
+    assert response["people"][0]["identity_context"] == {
+        "status": "unavailable",
+        "source": "active_identify",
+        "reason": "no_usable_face",
+    }
+    assert _store_counts(subject.store) == before_counts
+    assert (
+        await subject.drain_completed_events(
+            camera="front",
+            connection_id="ws_1",
+            frame_id=1,
+            frame_timestamp_ms=1_000,
+        )
+        == []
+    )
+    projected = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visual_state(),
+    )
+    assert projected["tracks"][0]["identity"]["status"] == "unavailable"
+    assert projected["tracks"][0]["identity"]["source"] == "active_identify"
+    assert projected["tracks"][0]["identity"]["reason"] == "no_usable_face"
+
+
+@pytest.mark.asyncio
+async def test_identify_current_timeout_does_not_block_or_write_overlay(tmp_path):
+    backend = BlockingTeachEmbeddingBackend(
+        person_dim=8,
+        scene_dim=8,
+        block_person=True,
+        wait_timeout_s=2.0,
+    )
+    subject = service(tmp_path, embedding_backend=backend)
+    frame_message = frame()
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_1",
+        frame_message=frame_message,
+        state=visual_state(),
+        snapshot=memory_snapshot(frame_message=frame_message),
+    )
+    before_counts = _store_counts(subject.store)
+
+    started = time.perf_counter()
+    task = asyncio.create_task(
+        subject.identify_current(_identify_request(timeout_ms=25))
+    )
+    try:
+        await asyncio.sleep(0)
+        assert await asyncio.to_thread(backend.person_entered.wait, 1.0)
+        response = await asyncio.wait_for(task, 0.5)
+
+        assert time.perf_counter() - started < 0.5
+        assert response["status"] == "timeout"
+        assert response["people"] == []
+        _assert_identify_current_response_redacted(response)
+        assert _store_counts(subject.store) == before_counts
+        assert (
+            await subject.drain_completed_events(
+                camera="front",
+                connection_id="ws_1",
+                frame_id=1,
+                frame_timestamp_ms=1_000,
+            )
+            == []
+        )
+        projected = subject.identity_context_for_visual_state(
+            connection_id="ws_1",
+            visual_state=visual_state(),
+        )
+        assert projected["tracks"][0]["identity"] == {
+            "status": "pending",
+            "source": "none",
+        }
+    finally:
+        backend.release.set()
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(task, 0.5)
+
+    await asyncio.sleep(0.05)
+    projected_after_release = subject.identity_context_for_visual_state(
+        connection_id="ws_1",
+        visual_state=visual_state(),
+    )
+    assert projected_after_release["tracks"][0]["identity"] == {
+        "status": "pending",
+        "source": "none",
+    }
+
+
+@pytest.mark.asyncio
+async def test_identify_current_uses_stream_ref_and_never_camera_fallback(tmp_path):
+    backend = FakeEmbeddingBackend(person_dim=8, scene_dim=8)
+    subject = service(tmp_path, embedding_backend=backend)
+    _seed_known_active_target(subject, backend)
+    frame_a = frame(frame_id=1, timestamp_ms=1_000)
+    frame_b = frame(frame_id=2, timestamp_ms=1_100)
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_a",
+        frame_message=frame_a,
+        state=visual_state(frame_id=1, timestamp_ms=1_000),
+        snapshot=memory_snapshot(frame_message=frame_a),
+    )
+    await _observe_without_background_query(
+        subject,
+        connection_id="ws_b",
+        frame_message=frame_b,
+        state=visual_state(frame_id=2, timestamp_ms=1_100),
+        snapshot=memory_snapshot(
+            frame_message=frame_b,
+            engagement_state="not_available",
+        ),
+    )
+
+    assert (
+        await subject.identify_current(_identify_request(stream_ref="ws_a"))
+    )["status"] == "identified"
+    ws_b = await subject.identify_current(_identify_request(stream_ref="ws_b"))
+    assert ws_b["status"] == "ambiguous"
+    missing = await subject.identify_current(_identify_request(stream_ref="ws_missing"))
+    assert missing["status"] == "no_active_frame"
 
 
 @pytest.mark.asyncio

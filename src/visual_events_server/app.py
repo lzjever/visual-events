@@ -26,6 +26,7 @@ from .memory import (
 from .memory.api_contract import (
     ConversationSummaryRequest,
     CorrectIdentityRequest,
+    IdentifyCurrentRequest,
     LinkExternalUserRequest,
     MergeAnonymousPersonRequest,
     ResolveTargetRequest,
@@ -77,6 +78,9 @@ class MemoryService(Protocol):
         ...
 
     async def teach_scene(self, request: dict[str, Any]) -> dict[str, Any]:
+        ...
+
+    async def identify_current(self, request: dict[str, Any]) -> dict[str, Any]:
         ...
 
     async def add_conversation_summary(
@@ -139,6 +143,15 @@ class DisabledMemoryService:
 
     async def teach_scene(self, request: dict[str, Any]) -> dict[str, Any]:
         raise self._disabled()
+
+    async def identify_current(self, request: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "unavailable",
+            "reason": "memory_disabled",
+            "people": [],
+            "evidence": {},
+        }
 
     async def add_conversation_summary(
         self,
@@ -241,6 +254,14 @@ def create_app(
     ) -> dict[str, Any]:
         return await _memory_response(
             app.state.memory_service.teach_scene(payload.to_internal_request())
+        )
+
+    @app.post("/v1/memory/identify-current")
+    async def identify_current(
+        payload: IdentifyCurrentRequest = Body(...),
+    ) -> dict[str, Any]:
+        return await _memory_response(
+            app.state.memory_service.identify_current(payload.to_internal_request())
         )
 
     @app.post("/v1/memory/person/{person_id}/conversation-summary")

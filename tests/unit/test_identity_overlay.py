@@ -202,6 +202,61 @@ def test_familiar_unknown_unknown_and_unavailable_public_shapes() -> None:
     }
 
 
+def test_overlay_source_override_public_shape_and_redaction() -> None:
+    overlay = IdentityOverlay(ttl_ms=1_000, clock_ms=lambda: 5_000)
+    overlay.put_known_person(
+        connection_id="ws_a",
+        camera="front",
+        track_id=7,
+        person_profile={
+            "person_id": "person_1",
+            "display_name": "张三",
+            "description": "店长",
+            "tags": ["staff"],
+        },
+        match=match(),
+        source="active_identify",
+    )
+    overlay.put_unknown(
+        connection_id="ws_a",
+        camera="front",
+        track_id=8,
+        reason="no_public_identity_match",
+        source="active_identify",
+    )
+    overlay.put_unavailable(
+        connection_id="ws_a",
+        camera="front",
+        track_id=9,
+        reason="no_usable_face",
+        source="active_identify",
+    )
+    state = {
+        "camera": "front",
+        "tracks": [person_track(7), person_track(8), person_track(9)],
+    }
+
+    projected = overlay.project(
+        connection_id="ws_a",
+        camera="front",
+        visual_state=state,
+    )
+
+    identities = [track["identity"] for track in projected["tracks"]]
+    assert [identity["source"] for identity in identities] == [
+        "active_identify",
+        "active_identify",
+        "active_identify",
+    ]
+    assert identities[0]["status"] == "known_person"
+    assert identities[1]["reason"] == "no_public_identity_match"
+    assert identities[2]["reason"] == "no_usable_face"
+    assert "bbox_xyxy" not in str(projected)
+    assert "keypoints" not in str(projected)
+    assert "embedding" not in str(projected)
+    assert "crop" not in str(projected)
+
+
 def test_rejects_invalid_overlay_inputs() -> None:
     with pytest.raises(ValueError, match="ttl_ms"):
         IdentityOverlay(ttl_ms=0, clock_ms=lambda: 0)

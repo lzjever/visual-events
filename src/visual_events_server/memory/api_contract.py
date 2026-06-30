@@ -11,9 +11,15 @@ FORBIDDEN_AGENT_FIELDS = frozenset(
         "bbox",
         "bbox_xyxy",
         "point_uv",
+        "keypoints",
+        "embedding",
+        "crop",
+        "crop_ref",
         "test_hint",
         "source_scene",
         "source_frame",
+        "source_frame_ref",
+        "request_snapshot_ref",
     }
 )
 RESOLVE_TARGET_STATUSES = frozenset({"resolved", "ambiguous", "not_found"})
@@ -70,6 +76,20 @@ class TeachPersonRequest(_BaseMemoryRequest):
             **self._base_internal_request(),
             "target": self.target.model_dump(),
             "profile": dict(self.profile),
+        }
+
+
+class IdentifyCurrentRequest(_BaseMemoryRequest):
+    target: PersonTarget
+    scope: Literal["active_target"] = "active_target"
+    timeout_ms: int = Field(default=500, ge=1, le=1000)
+
+    def to_internal_request(self) -> dict[str, Any]:
+        return {
+            **self._base_internal_request(),
+            "target": self.target.model_dump(),
+            "scope": self.scope,
+            "timeout_ms": self.timeout_ms,
         }
 
 

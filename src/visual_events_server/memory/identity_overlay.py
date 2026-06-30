@@ -46,13 +46,14 @@ class IdentityOverlay:
         track_id: int | None,
         person_profile: dict[str, Any],
         match: MemoryMatch,
+        source: str = "background_recall",
     ) -> None:
         if track_id is None:
             return
         with self._lock:
             self._records[(connection_id, camera, int(track_id))] = _OverlayRecord(
                 status="known_person",
-                source="background_recall",
+                source=source,
                 observed_at_ms=self._clock_ms(),
                 confidence=_rounded(match.match_score),
                 person=_public_person(person_profile),
@@ -66,13 +67,14 @@ class IdentityOverlay:
         track_id: int | None,
         anonymous_profile: dict[str, Any],
         match: MemoryMatch,
+        source: str = "background_recall",
     ) -> None:
         if track_id is None:
             return
         with self._lock:
             self._records[(connection_id, camera, int(track_id))] = _OverlayRecord(
                 status="familiar_unknown",
-                source="background_recall",
+                source=source,
                 observed_at_ms=self._clock_ms(),
                 confidence=_rounded(match.match_score),
                 anonymous_person=_public_anonymous(anonymous_profile),
@@ -85,13 +87,14 @@ class IdentityOverlay:
         camera: str,
         track_id: int | None,
         reason: str,
+        source: str = "background_recall",
     ) -> None:
         if track_id is None:
             return
         with self._lock:
             self._records[(connection_id, camera, int(track_id))] = _OverlayRecord(
                 status="unknown",
-                source="background_recall",
+                source=source,
                 observed_at_ms=self._clock_ms(),
                 reason=reason,
             )
@@ -103,13 +106,14 @@ class IdentityOverlay:
         camera: str,
         track_id: int | None,
         reason: str,
+        source: str = "background_recall",
     ) -> None:
         if track_id is None:
             return
         with self._lock:
             self._records[(connection_id, camera, int(track_id))] = _OverlayRecord(
                 status="unavailable",
-                source="background_recall",
+                source=source,
                 observed_at_ms=self._clock_ms(),
                 reason=reason,
             )
@@ -186,24 +190,80 @@ def unavailable_identity_context(reason: str) -> dict[str, Any]:
     }
 
 
+def known_person_identity_context(
+    person_profile: dict[str, Any],
+    match: MemoryMatch,
+    *,
+    source: str,
+) -> dict[str, Any]:
+    return _identity_base(
+        status="known_person",
+        source=source,
+        confidence=_rounded(match.match_score),
+        person=_public_person(person_profile),
+    )
+
+
+def familiar_unknown_identity_context(
+    anonymous_profile: dict[str, Any],
+    match: MemoryMatch,
+    *,
+    source: str,
+) -> dict[str, Any]:
+    return _identity_base(
+        status="familiar_unknown",
+        source=source,
+        confidence=_rounded(match.match_score),
+        anonymous_person=_public_anonymous(anonymous_profile),
+    )
+
+
+def unknown_identity_context(*, reason: str, source: str) -> dict[str, Any]:
+    return _identity_base(status="unknown", source=source, reason=reason)
+
+
+def unavailable_person_identity_context(*, reason: str, source: str) -> dict[str, Any]:
+    return _identity_base(status="unavailable", source=source, reason=reason)
+
+
 def _record_to_public(
     record: _OverlayRecord,
     *,
     now_ms: int,
 ) -> dict[str, Any]:
+    identity = _identity_base(
+        status=record.status,
+        source=record.source,
+        confidence=record.confidence,
+        person=record.person,
+        anonymous_person=record.anonymous_person,
+        reason=record.reason,
+    )
+    identity["fresh_ms"] = max(0, int(now_ms - record.observed_at_ms))
+    return identity
+
+
+def _identity_base(
+    *,
+    status: str,
+    source: str,
+    confidence: float | None = None,
+    person: dict[str, Any] | None = None,
+    anonymous_person: dict[str, Any] | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
     identity: dict[str, Any] = {
-        "status": record.status,
-        "source": record.source,
-        "fresh_ms": max(0, int(now_ms - record.observed_at_ms)),
+        "status": status,
+        "source": source,
     }
-    if record.confidence is not None:
-        identity["confidence"] = record.confidence
-    if record.person is not None:
-        identity["person"] = dict(record.person)
-    if record.anonymous_person is not None:
-        identity["anonymous_person"] = dict(record.anonymous_person)
-    if record.reason is not None:
-        identity["reason"] = record.reason
+    if confidence is not None:
+        identity["confidence"] = confidence
+    if person is not None:
+        identity["person"] = dict(person)
+    if anonymous_person is not None:
+        identity["anonymous_person"] = dict(anonymous_person)
+    if reason is not None:
+        identity["reason"] = reason
     return identity
 
 

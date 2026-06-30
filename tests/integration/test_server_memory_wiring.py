@@ -145,6 +145,20 @@ class FakeMemoryService:
         self.calls.append(("teach_scene", request))
         return {"ok": True, "scene_id": "scene_000001"}
 
+    async def identify_current(self, request: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("identify_current", request))
+        return {
+            "ok": True,
+            "status": "identified",
+            "people": [
+                {
+                    "target_ref": "current:front:active_target",
+                    "identity_context": {"status": "known_person"},
+                }
+            ],
+            "evidence": {"source_frame_ref": "front:7:1710000000000"},
+        }
+
     async def add_conversation_summary(
         self,
         person_id: str,
@@ -254,6 +268,32 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
         "scene_id": "scene_000001",
     }
 
+    identify_request = {
+        "camera": "front",
+        "stream_ref": "ws_1",
+        "target": {
+            "kind": "person",
+            "intent": "identify_current",
+            "referent_text": "当前这个人",
+        },
+        "scope": "active_target",
+        "timeout_ms": 500,
+    }
+    assert client.post(
+        "/v1/memory/identify-current",
+        json=identify_request,
+    ).json() == {
+        "ok": True,
+        "status": "identified",
+        "people": [
+            {
+                "target_ref": "current:front:active_target",
+                "identity_context": {"status": "known_person"},
+            }
+        ],
+        "evidence": {"source_frame_ref": "front:7:1710000000000"},
+    }
+
     summary_request = {"summary": "上次问过新品尺码。", "source": "agent"}
     assert client.post(
         "/v1/memory/person/person_000001/conversation-summary",
@@ -353,6 +393,7 @@ def test_memory_http_endpoints_delegate_to_app_level_service():
                 "memory": {"title": "新品展示区"},
             },
         ),
+        ("identify_current", identify_request),
         ("add_conversation_summary", ("person_000001", summary_request)),
         ("link_external_user", link_request),
         ("get_person_by_external_user", "wechat:zhangsan"),
@@ -400,15 +441,31 @@ def test_public_memory_routes_reject_low_level_agent_payload_fields():
             },
             "memory": {"title": "新品展示区"},
         },
+        "/v1/memory/identify-current": {
+            "camera": "front",
+            "stream_ref": "ws_1",
+            "target": {
+                "kind": "person",
+                "intent": "identify_current",
+                "referent_text": "当前这个人",
+            },
+            "scope": "active_target",
+        },
     }
     forbidden_values = {
         "track_id": 7,
         "bbox": [0, 0, 10, 10],
         "bbox_xyxy": [0, 0, 10, 10],
         "point_uv": [0.5, 0.5],
+        "keypoints": [{"name": "nose", "x": 0.5, "y": 0.5}],
+        "embedding": [1.0, 0.0],
+        "crop": "private-crop-bytes",
+        "crop_ref": "runtime/private/crop.jpg",
         "test_hint": "fixture",
         "source_scene": "pic_teach_scene",
         "source_frame": 7,
+        "source_frame_ref": "front:7:1710000000000",
+        "request_snapshot_ref": "snapshot:front:7",
     }
     service = FakeMemoryService()
     client = TestClient(create_app(memory_service=service))
@@ -499,12 +556,72 @@ def test_public_frame_bound_memory_routes_require_stream_ref():
                 "memory": {"title": "新品展示区"},
             },
         ),
+        (
+            "/v1/memory/identify-current",
+            {
+                "camera": "front",
+                "target": {
+                    "kind": "person",
+                    "intent": "identify_current",
+                    "referent_text": "当前这个人",
+                },
+                "scope": "active_target",
+            },
+        ),
     ]
 
     for path, payload in payloads:
         response = client.post(path, json=payload)
         assert response.status_code == 422
 
+    assert service.calls == []
+
+
+def test_identify_current_disabled_memory_returns_business_unavailable():
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/v1/memory/identify-current",
+        json={
+            "camera": "front",
+            "stream_ref": "ws_1",
+            "target": {
+                "kind": "person",
+                "intent": "identify_current",
+                "referent_text": "当前这个人",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "status": "unavailable",
+        "reason": "memory_disabled",
+        "people": [],
+        "evidence": {},
+    }
+
+
+def test_identify_current_rejects_unsupported_scope_by_schema():
+    service = FakeMemoryService()
+    client = TestClient(create_app(memory_service=service))
+
+    response = client.post(
+        "/v1/memory/identify-current",
+        json={
+            "camera": "front",
+            "stream_ref": "ws_1",
+            "target": {
+                "kind": "person",
+                "intent": "identify_current",
+                "referent_text": "当前这个人",
+            },
+            "scope": "visible_people",
+        },
+    )
+
+    assert response.status_code == 422
     assert service.calls == []
 
 
@@ -532,9 +649,15 @@ def test_public_memory_management_routes_reject_unknown_and_low_level_fields_wit
         "bbox": [0, 0, 10, 10],
         "bbox_xyxy": [0, 0, 10, 10],
         "point_uv": [0.5, 0.5],
+        "keypoints": [{"name": "nose", "x": 0.5, "y": 0.5}],
+        "embedding": [1.0, 0.0],
+        "crop": "private-crop-bytes",
+        "crop_ref": "runtime/private/crop.jpg",
         "test_hint": "fixture",
         "source_scene": "pic_teach_scene",
         "source_frame": 7,
+        "source_frame_ref": "front:7:1710000000000",
+        "request_snapshot_ref": "snapshot:front:7",
     }
     service = FakeMemoryService()
     client = TestClient(create_app(memory_service=service))
