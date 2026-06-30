@@ -1128,10 +1128,14 @@ def test_actual_fake_runner_replays_scenes_and_writes_real_api_artifacts(
     object_response = next(
         response
         for response in responses
-        if response["scene"] == "pic_teach_item_phone"
+        if response["operation"] == "resolve_object_unsupported"
     )
     assert object_response["response"]["status"] == "not_found"
     assert object_response["response"]["error_code"] == "unsupported_target_kind"
+    object_stream_ref = object_response["payload"].get("stream_ref")
+    assert isinstance(object_stream_ref, str)
+    assert object_stream_ref.startswith("ws_")
+    assert object_stream_ref != memory_e2e.PAYLOAD_FIXTURE_STREAM_REF
 
     botified_frames = [
         json.loads(line)
@@ -1196,6 +1200,109 @@ def test_actual_api_response_gate_fails_identify_current_failure(
     assert actual_api["details"]["assertions"]["status_codes_ok"] is False
     assert actual_api["details"]["gate_response_count"] == 2
     assert actual_api["details"]["evidence_only_response_count"] == 0
+
+
+def test_actual_api_response_gate_fails_frame_bound_fixture_or_missing_stream_ref(
+    tmp_path: Path,
+) -> None:
+    fixture_record = {
+        "operation": "resolve_object_unsupported",
+        "endpoint": "/v1/memory/resolve-target",
+        "dry_run": False,
+        "status_code": 200,
+        "payload": {
+            "camera": "front",
+            "stream_ref": memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
+            "target": {"kind": "object"},
+        },
+        "response": {"ok": False, "status": "not_found"},
+    }
+    missing_record = {
+        "operation": "supporting_identify_current",
+        "endpoint": "/v1/memory/identify-current",
+        "dry_run": False,
+        "status_code": 200,
+        "payload": {
+            "camera": "front",
+            "target": {"kind": "person"},
+        },
+        "response": {"ok": True, "status": "identified"},
+    }
+
+    for api_response_records in (
+        [fixture_record],
+        [missing_record],
+    ):
+        checks = module._build_actual_checks(  # noqa: SLF001
+            scenes=[],
+            payload_records=[],
+            forbidden_payload_fields={},
+            out=tmp_path,
+            artifact_paths={},
+            visual_evidence_index=[],
+            replay_result={"replayed_scene_count": 0},
+            api_response_records=api_response_records,
+            self_result={},
+            third_person_result={},
+            scene_result={},
+            post_teach_scene_replay_result={},
+            object_result={},
+            supporting_contracts_result={},
+            botified_frame_records=[],
+            bounded_multi_person_recognition={},
+        )
+
+        actual_api = next(
+            check for check in checks if check["name"] == "actual_api_responses"
+        )
+        assert actual_api["passed"] is False
+        assertions = actual_api["details"]["assertions"]
+        assert assertions["status_codes_ok"] is True
+        assert assertions["frame_bound_stream_refs_ok"] is False
+
+
+def test_actual_api_response_gate_passes_frame_bound_runtime_stream_ref(
+    tmp_path: Path,
+) -> None:
+    api_response_records = [
+        {
+            "operation": "resolve_object_unsupported",
+            "endpoint": "/v1/memory/resolve-target",
+            "dry_run": False,
+            "status_code": 200,
+            "payload": {
+                "camera": "front",
+                "stream_ref": "ws_runtime_1",
+                "target": {"kind": "object"},
+            },
+            "response": {"ok": False, "status": "not_found"},
+        }
+    ]
+
+    checks = module._build_actual_checks(  # noqa: SLF001
+        scenes=[],
+        payload_records=[],
+        forbidden_payload_fields={},
+        out=tmp_path,
+        artifact_paths={},
+        visual_evidence_index=[],
+        replay_result={"replayed_scene_count": 0},
+        api_response_records=api_response_records,
+        self_result={},
+        third_person_result={},
+        scene_result={},
+        post_teach_scene_replay_result={},
+        object_result={},
+        supporting_contracts_result={},
+        botified_frame_records=[],
+        bounded_multi_person_recognition={},
+    )
+
+    actual_api = next(check for check in checks if check["name"] == "actual_api_responses")
+    assert actual_api["passed"] is True
+    assertions = actual_api["details"]["assertions"]
+    assert assertions["status_codes_ok"] is True
+    assert assertions["frame_bound_stream_refs_ok"] is True
 
 
 def test_identify_current_summary_includes_familiar_unknown_anonymous_id() -> None:
@@ -1917,6 +2024,24 @@ def test_local_runner_frame_bound_posts_include_latest_stream_ref(
     assert payload["stream_ref"] == runner.latest_stream_ref
     assert payload["stream_ref"].startswith("ws_")
     assert payload["stream_ref"] != memory_e2e.PAYLOAD_FIXTURE_STREAM_REF
+
+
+def test_identify_current_payload_injects_latest_stream_ref() -> None:
+    payload = memory_e2e._with_stream_ref_for_endpoint(  # noqa: SLF001
+        endpoint="/v1/memory/identify-current",
+        payload={
+            "camera": "front",
+            "stream_ref": memory_e2e.PAYLOAD_FIXTURE_STREAM_REF,
+            "target": {
+                "kind": "person",
+                "intent": "identify_current",
+                "referent_text": "当前这个人",
+            },
+        },
+        stream_ref="ws_latest",
+    )
+
+    assert payload["stream_ref"] == "ws_latest"
 
 
 def test_local_smoke_report_fails_insufficient_third_person_without_models(

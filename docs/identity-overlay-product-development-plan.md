@@ -56,24 +56,23 @@
 
 ## 4. 当前实现事实
 
-已有基础：
+当前已覆盖：
 
-- `processor.py` 已产生 detection/tracking/attention/events 和内部 `MemoryFrameSnapshot`。
-- `visual_state.tracks` 当前只包含公开 track 字段，没有 identity，也没有 keypoints。
-- `MemoryFrameSnapshot` 已在内存侧保存 `TrackSnapshot`、keypoints、attention、scene_context 和 semantic_events，可用于 resolver / recall，不需要把 keypoints 暴露给 public protocol。
-- `FrameCache` 已保存最近帧和 3 帧窗口，可以支撑 request-arrival snapshot、hot buffer 选最佳脸。
-- `AppMemoryService` 已有低频 background recognition、known person 查询、anonymous profile、scene 查询和 memory event gate。
-- CLI 已能投影 `memory_context`，并且不做人脸匹配、不写 memory DB。
-- `merge-anonymous-person` API 已存在，可把 anonymous profile 合并到 person。
+- `processor.py` 已产生 detection/tracking/attention/events 和内部 `MemoryFrameSnapshot`；`MemoryFrameSnapshot` 保存 `TrackSnapshot`、keypoints、attention、scene_context 和 semantic_events，供 resolver / recall 使用，不把 keypoints 暴露给 public protocol。
+- WebSocket `visual_state` 已包含 server 生成的 opaque `stream_ref`，并在顶层 `identity_context.tracks[]` 表达当前画面人物的 Identity Overlay；公开 `tracks[]` 字段形状保持稳定。
+- `FrameCache` / hot buffer 已按 `stream_ref + camera` 选择当前帧；frame-bound active API 不再使用 camera-only fallback。
+- `AppMemoryService` 已有低频 background recognition、known person 查询、anonymous / familiar unknown 查询、scene 查询、memory event gate 和短期 identity overlay。
+- 非 memory 人物事件已支持身份增强：事件相关 track 可附带统一 `identity_context`，cache miss 走受控 recall，身份缺失不阻塞原事件。
+- `teach_person` 已把 active anonymous / familiar unknown 自动合并成正式 person；`merge-anonymous-person` 保留为 maintenance / debug / backfill API，不再是 agent/CLI 产品主路径。
+- `POST /v1/memory/identify-current` 已存在，支持 `scope="active_target"`，由 CLI 自动带回最新 `stream_ref` 主动刷新当前目标身份。
+- CLI 已能缓存最新 `visual_state.stream_ref` 和 `identity_context`，并投影 current visual snapshot / Botified event context；CLI 不做人脸匹配、不写 memory DB。
+- runner/report/evidence 已覆盖 identity overlay、teach auto-merge、identify-current、event identity enrichment、CLI current visual snapshot、object unsupported no-write 和 active API payload 证据。
 
-当前缺口：
+剩余缺口：
 
-- `teach_person` 命中 active anonymous 时当前返回 `anonymous_merge_required`，需要 client/runner 再调用 merge。这个主路径要废弃。
-- `visual_state` 不能表达当前画面中 track 的身份。
-- 普通事件没有身份增强，只有独立 memory events。
-- 没有 `identify-current` 主动识别 API。
-- 匿名熟悉人还缺 `observed_duration_ms` 和同 tick 去重等更可靠规则。
-- evidence 还不能稳定展示 identity overlay、event enrichment 和 identify-current 结果。
+- 还需要更完整的端到端 demo / 长时间运行证据，证明真实模型、真实摄像头和现场光照下的稳定性。
+- familiar unknown 的长期质量仍可继续优化，例如更稳的时长统计、去重、阈值和过期策略。
+- RK / 现场部署、运维观测和性能长期趋势属于后续产品化工作，不是当前 identity overlay 合同 blocker。
 
 ## 5. 核心产品模型
 

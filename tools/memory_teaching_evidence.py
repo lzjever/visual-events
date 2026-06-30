@@ -64,6 +64,7 @@ def render_memory_teaching_evidence(
 
     scenes = scenes_from_report(report, artifact=artifact)
     payload_records = load_payload_records(artifact)
+    actual_posted_payload_summary = load_actual_posted_payload_summary(artifact)
     manifest = report.get("manifest") if isinstance(report.get("manifest"), dict) else {}
     source_summary = source_report_summary(report, artifact=artifact)
 
@@ -93,6 +94,7 @@ def render_memory_teaching_evidence(
         mode=str(report.get("mode") or "unknown"),
         visual_evidence_index=visual_evidence_index,
         source_summary=source_summary,
+        actual_posted_payload_summary=actual_posted_payload_summary,
     )
     _write_json(out / "visual_evidence_index.json", visual_evidence_index)
     _write_json(
@@ -185,6 +187,26 @@ def load_payload_records(artifact: Path) -> list[dict[str, Any]]:
         return []
     records = payloads.get("payloads") if isinstance(payloads, dict) else None
     return [record for record in records if isinstance(record, dict)] if isinstance(records, list) else []
+
+
+def load_actual_posted_payload_summary(artifact: Path) -> dict[str, Any]:
+    path = Path(artifact) / "api_responses.jsonl"
+    if not path.is_file():
+        return {
+            "status": "not_present",
+            "source_path": "api_responses.jsonl",
+            "records": [],
+        }
+    records = [
+        _actual_posted_payload_summary_record(record)
+        for record in _read_jsonl_objects(path)
+        if _is_actual_post_record(record)
+    ]
+    return {
+        "status": "present" if records else "empty",
+        "source_path": "api_responses.jsonl",
+        "records": records,
+    }
 
 
 def build_artifact_visual_evidence_index(
@@ -1082,6 +1104,36 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _is_actual_post_record(record: dict[str, Any]) -> bool:
+    method = str(record.get("method") or "POST").upper()
+    return (
+        method == "POST"
+        and record.get("dry_run") is not True
+        and isinstance(record.get("payload"), dict)
+    )
+
+
+def _actual_posted_payload_summary_record(record: dict[str, Any]) -> dict[str, Any]:
+    payload = record.get("payload")
+    response = record.get("response")
+    stream_ref = payload.get("stream_ref") if isinstance(payload, dict) else None
+    return {
+        "scene": record.get("scene"),
+        "operation": record.get("operation"),
+        "endpoint": record.get("endpoint"),
+        "stream_ref": stream_ref,
+        "status_code": record.get("status_code"),
+        "response_status": response.get("status") if isinstance(response, dict) else None,
+        "response_outcome": _response_outcome(response),
+    }
+
+
+def _response_outcome(response: Any) -> Any:
+    if not isinstance(response, dict):
+        return None
+    return response.get("outcome") or response.get("teach_person_outcome")
+
+
 def _first_overlay_identity(overlay: dict[str, Any]) -> dict[str, Any] | None:
     tracks = overlay.get("tracks")
     if not isinstance(tracks, list):
@@ -1137,6 +1189,7 @@ def write_visual_evidence_index(
     mode: str = "dry-run",
     visual_evidence_index: list[dict[str, Any]] | None = None,
     source_summary: dict[str, Any] | None = None,
+    actual_posted_payload_summary: dict[str, Any] | None = None,
 ) -> None:
     scene_items = "\n".join(
         (
@@ -1155,6 +1208,8 @@ def write_visual_evidence_index(
         )
         for record in payload_records
     )
+    if not payload_items:
+        payload_items = "<li><em>empty</em></li>"
     manifest_note = html.escape(
         "matches actual scene dirs"
         if manifest.get("matches_actual_scene_dirs")
@@ -1162,6 +1217,13 @@ def write_visual_evidence_index(
     )
     source_block = _source_summary_html(source_summary) if source_summary else ""
     overlay_items = visual_evidence_items_html(visual_evidence_index or [])
+    if actual_posted_payload_summary is None:
+        actual_posted_payload_summary = load_actual_posted_payload_summary(
+            path.parent.parent
+        )
+    actual_posted_payload_block = actual_posted_payload_summary_html(
+        actual_posted_payload_summary
+    )
     document = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1186,15 +1248,54 @@ def write_visual_evidence_index(
   <ul>
     {scene_items}
   </ul>
-  <h2>Teach Payloads</h2>
+  <h2>Transcript request templates</h2>
+  <p>These entries come from <code>teach_payloads.json</code>. They are transcript-derived request templates and are not posted as-is. <code>ws_payload_fixture</code> is a placeholder/template stream ref; use the actual posted payload summary below for runtime POST payloads.</p>
   <ul>
     {payload_items}
   </ul>
+  {actual_posted_payload_block}
   <p>Manifest: {manifest_note}</p>
 </body>
 </html>
 """
     path.write_text(document, encoding="utf-8")
+
+
+def actual_posted_payload_summary_html(summary: dict[str, Any]) -> str:
+    status = str(summary.get("status") or "unknown")
+    records = summary.get("records")
+    if not isinstance(records, list):
+        records = []
+    if not records:
+        return (
+            "<h2>Actual posted payload summary</h2>"
+            "<p><code>api_responses.jsonl</code>: "
+            f"{html.escape(status)}</p>"
+        )
+
+    rows = []
+    for record in records:
+        rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(str(record.get('scene') or ''))}</code></td>"
+            f"<td><code>{html.escape(str(record.get('operation') or ''))}</code></td>"
+            f"<td><code>{html.escape(str(record.get('endpoint') or ''))}</code></td>"
+            f"<td><code>{html.escape(str(record.get('stream_ref') or ''))}</code></td>"
+            f"<td>{html.escape(str(record.get('status_code') or ''))}</td>"
+            f"<td>{html.escape(str(record.get('response_status') or ''))}</td>"
+            f"<td>{html.escape(str(record.get('response_outcome') or ''))}</td>"
+            "</tr>"
+        )
+    return (
+        "<h2>Actual posted payload summary</h2>"
+        "<p>Read from <code>api_responses.jsonl</code>; this is the source of truth for POST payloads sent by the runner.</p>"
+        "<table><thead><tr>"
+        "<th>scene</th><th>operation</th><th>endpoint</th><th>stream_ref</th>"
+        "<th>status_code</th><th>response status</th><th>response outcome</th>"
+        "</tr></thead><tbody>"
+        + "\n".join(rows)
+        + "</tbody></table>"
+    )
 
 
 def visual_evidence_items_html(

@@ -425,6 +425,110 @@ def test_offline_renderer_generates_html_json_images_and_crop_previews(
     assert "real_model_evidence" in root_html
     assert "third-person-pose-pointing.jpg" in visual_html
     assert "face_detection" in visual_html
+    assert "Actual posted payload summary" in visual_html
+    assert "<code>api_responses.jsonl</code>: not_present" in visual_html
+
+
+def test_offline_renderer_separates_transcript_templates_from_actual_posts(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    _write_artifact(artifact)
+    (artifact / "teach_payloads.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "payloads": [
+                    {
+                        "scene": "pic_teach_me",
+                        "endpoint": "/v1/memory/teach/person",
+                        "payload": {
+                            "camera": "front",
+                            "stream_ref": "ws_payload_fixture",
+                            "target": {
+                                "kind": "person",
+                                "intent": "self_introduction",
+                            },
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        artifact / "api_responses.jsonl",
+        [
+            {
+                "scene": "pic_teach_me",
+                "endpoint": "/v1/memory/teach/person",
+                "operation": "local_teach_person_self",
+                "status_code": 200,
+                "payload": {
+                    "camera": "front",
+                    "stream_ref": "ws_runtime_self",
+                },
+                "response": {
+                    "ok": True,
+                    "status": "stored",
+                    "outcome": "created_person",
+                },
+            },
+            {
+                "scene": "pic_teach_item_phone",
+                "endpoint": "/v1/memory/resolve-target",
+                "operation": "resolve_object_unsupported",
+                "status_code": 200,
+                "payload": {
+                    "camera": "front",
+                    "stream_ref": "ws_runtime_object",
+                },
+                "response": {
+                    "ok": False,
+                    "status": "not_found",
+                    "error_code": "unsupported_target_kind",
+                },
+            },
+        ],
+    )
+    out = tmp_path / "evidence"
+
+    exit_code = module.main(["--artifact", str(artifact), "--out", str(out)])
+
+    assert exit_code == 0
+    visual_html = (out / "visual-evidence" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "Teach Payloads" not in visual_html
+    assert "Transcript request templates" in visual_html
+    assert "not posted as-is" in visual_html
+    assert "ws_payload_fixture" in visual_html
+    assert "placeholder/template stream ref" in visual_html
+    assert "Actual posted payload summary" in visual_html
+    for label in [
+        "scene",
+        "operation",
+        "endpoint",
+        "stream_ref",
+        "status_code",
+        "response status",
+        "response outcome",
+    ]:
+        assert label in visual_html
+    assert "pic_teach_me" in visual_html
+    assert "local_teach_person_self" in visual_html
+    assert "/v1/memory/teach/person" in visual_html
+    assert "ws_runtime_self" in visual_html
+    assert "200" in visual_html
+    assert "stored" in visual_html
+    assert "created_person" in visual_html
+    assert "pic_teach_item_phone" in visual_html
+    assert "resolve_object_unsupported" in visual_html
+    assert "/v1/memory/resolve-target" in visual_html
+    assert "ws_runtime_object" in visual_html
+    assert "not_found" in visual_html
 
 
 def test_offline_renderer_prefers_payload_source_image_over_scene_first_frame(

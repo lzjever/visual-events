@@ -513,6 +513,7 @@ def run_actual(
                 scene=object_scene,
                 record=object_record,
                 camera=camera,
+                states_file=states_file,
                 api_response_records=api_response_records,
             )
 
@@ -2853,6 +2854,7 @@ def _run_actual_object_negative(
     scene: SceneDir,
     record: dict[str, Any],
     camera: str,
+    states_file: Any,
     api_response_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
     runner = _actual_runner(
@@ -2862,16 +2864,24 @@ def _run_actual_object_negative(
         camera=camera,
     )
     store = runner.client.app.state.memory_service.store
-    before_counts = memory_e2e._memory_write_counts(store)
-    response = _post_and_record_api_response(
-        runner=runner,
-        api_response_records=api_response_records,
-        payload_index=_payload_index(record),
-        scene=record["scene"],
-        endpoint=record["endpoint"],
-        payload=record["payload"],
-        operation="resolve_object_unsupported",
-    )
+    with runner.open_stream() as websocket:
+        _seed_stable_interaction_window(
+            runner,
+            websocket,
+            start_timestamp_ms=1_000,
+            states_file=states_file,
+            phase="object-negative-seed",
+        )
+        before_counts = memory_e2e._memory_write_counts(store)
+        response = _post_and_record_api_response(
+            runner=runner,
+            api_response_records=api_response_records,
+            payload_index=_payload_index(record),
+            scene=record["scene"],
+            endpoint=record["endpoint"],
+            payload=record["payload"],
+            operation="resolve_object_unsupported",
+        )
     after_counts = memory_e2e._memory_write_counts(store)
     store_delta = memory_e2e._memory_store_delta(before_counts, after_counts)
     body = response["body"]
@@ -4172,6 +4182,10 @@ def _build_actual_checks(
             _api_response_status_ok(record)
             for record in gate_api_response_records
         ),
+        "frame_bound_stream_refs_ok": all(
+            _frame_bound_api_response_stream_ref_ok(record)
+            for record in gate_api_response_records
+        ),
     }
     botified_event_counts: dict[str, int] = {}
     for record in botified_frame_records:
@@ -4293,6 +4307,21 @@ def _build_actual_checks(
 def _api_response_status_ok(record: dict[str, Any]) -> bool:
     status_code = int(record.get("status_code") or 0)
     return status_code < 400
+
+
+def _frame_bound_api_response_stream_ref_ok(record: dict[str, Any]) -> bool:
+    endpoint = record.get("endpoint")
+    if endpoint not in memory_e2e.FRAME_BOUND_MEMORY_ENDPOINTS:
+        return True
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    stream_ref = payload.get("stream_ref")
+    return (
+        isinstance(stream_ref, str)
+        and bool(stream_ref)
+        and stream_ref != PAYLOAD_FIXTURE_STREAM_REF
+    )
 
 
 def _gate_api_response_records(

@@ -43,6 +43,7 @@ FRAME_BOUND_MEMORY_ENDPOINTS = frozenset(
     {
         "/v1/memory/teach/person",
         "/v1/memory/teach/scene",
+        "/v1/memory/identify-current",
         "/v1/memory/resolve-target",
     }
 )
