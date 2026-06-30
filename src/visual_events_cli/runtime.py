@@ -179,6 +179,16 @@ class RuntimeCoordinator:
     def current_visual_snapshot(self, now_ms: int | None = None) -> dict[str, Any]:
         return self._pump.current_visual_snapshot(now_ms=now_ms)
 
+    async def identify_current(self, timeout_ms: int = 500) -> dict[str, Any]:
+        return await self._pump.identify_current(timeout_ms=timeout_ms)
+
+    async def teach_person(
+        self,
+        profile: dict[str, Any],
+        target: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._pump.teach_person(profile, target=target)
+
     async def _read_latest_frame(self) -> Any | None:
         reader = getattr(self._frame_source, "poll_latest", None)
         if reader is None:
@@ -316,6 +326,12 @@ class _FrameRequestLoggingServiceClient:
     async def request_frame(self, header: dict[str, Any], jpeg: bytes) -> Any:
         self._write_frame_request(header)
         return await self._service_client.request_frame(header, jpeg)
+
+    async def identify_current(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._service_client.identify_current(*args, **kwargs)
+
+    async def teach_person(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._service_client.teach_person(*args, **kwargs)
 
     def _write_frame_request(self, header: dict[str, Any]) -> None:
         payload = {

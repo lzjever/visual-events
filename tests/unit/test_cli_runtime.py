@@ -97,9 +97,19 @@ class FakeFrameSource:
 
 
 class FakeServiceClient:
-    def __init__(self, results: list[Any]):
+    def __init__(
+        self,
+        results: list[Any],
+        *,
+        identify_responses: list[dict[str, Any]] | None = None,
+        teach_responses: list[dict[str, Any]] | None = None,
+    ):
         self.requests: list[tuple[dict[str, Any], bytes]] = []
+        self.identify_requests: list[dict[str, Any]] = []
+        self.teach_requests: list[dict[str, Any]] = []
         self._results = list(results)
+        self._identify_responses = list(identify_responses or [])
+        self._teach_responses = list(teach_responses or [])
         self._request_event = asyncio.Event()
 
     async def request_frame(self, header: dict[str, Any], jpeg: bytes) -> Any:
@@ -109,6 +119,40 @@ class FakeServiceClient:
         if isinstance(result, asyncio.Future):
             return await result
         return result
+
+    async def identify_current(
+        self,
+        camera: str,
+        stream_ref: str,
+        timeout_ms: int = 500,
+        target: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.identify_requests.append(
+            {
+                "camera": camera,
+                "stream_ref": stream_ref,
+                "timeout_ms": timeout_ms,
+                "target": target,
+            }
+        )
+        return self._identify_responses.pop(0)
+
+    async def teach_person(
+        self,
+        camera: str,
+        stream_ref: str,
+        profile: dict[str, Any],
+        target: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.teach_requests.append(
+            {
+                "camera": camera,
+                "stream_ref": stream_ref,
+                "profile": profile,
+                "target": target,
+            }
+        )
+        return self._teach_responses.pop(0)
 
     async def wait_for_requests(self, count: int) -> None:
         while len(self.requests) < count:
@@ -229,6 +273,114 @@ async def run_tick(coordinator: Any) -> Any:
     )
     await asyncio.sleep(0)
     return result
+
+
+@pytest.mark.asyncio
+async def test_runtime_coordinator_active_memory_methods_pass_through_to_pump_service():
+    runtime = import_runtime()
+    clock = FakeClock(1710000000082)
+    frame_source = FakeFrameSource([make_frame(timestamp_ms=1710000000000)])
+    visual_state = load_visual_state_tracking(
+        frame_id=1,
+        frame_timestamp_ms=1710000000000,
+        stream_ref="private/state-stream",
+    )
+    identify_response = {"ok": True, "status": "identified", "people": []}
+    teach_response = {"ok": True, "person_id": "person_000001"}
+    service = FakeServiceClient(
+        [service_result(visual_state)],
+        identify_responses=[identify_response],
+        teach_responses=[teach_response],
+    )
+    gaze = FakeGazePublisher()
+    coordinator = make_coordinator(
+        runtime,
+        frame_source=frame_source,
+        service=service,
+        gaze=gaze,
+        clock=clock,
+    )
+
+    for _ in range(3):
+        await run_tick(coordinator)
+        if service.requests:
+            break
+
+    identify = await coordinator.identify_current(timeout_ms=650)
+    teach = await coordinator.teach_person({"display_name": "张三"})
+
+    assert identify == identify_response
+    assert teach == teach_response
+    assert service.identify_requests == [
+        {
+            "camera": "front",
+            "stream_ref": "private/state-stream",
+            "timeout_ms": 650,
+            "target": None,
+        }
+    ]
+    assert service.teach_requests == [
+        {
+            "camera": "front",
+            "stream_ref": "private/state-stream",
+            "profile": {"display_name": "张三"},
+            "target": {
+                "kind": "person",
+                "intent": "self_introduction",
+                "referent_text": "我",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_frame_request_logging_service_client_keeps_active_memory_methods(tmp_path):
+    runtime = import_runtime()
+    service = FakeServiceClient(
+        [],
+        identify_responses=[{"ok": True, "status": "identified"}],
+        teach_responses=[{"ok": True, "person_id": "person_000001"}],
+    )
+    wrapped = runtime._FrameRequestLoggingServiceClient(
+        service,
+        tmp_path / "frames.jsonl",
+    )
+    target = {
+        "kind": "person",
+        "intent": "third_person_introduction",
+        "referent_text": "左边的人",
+    }
+
+    identify = await wrapped.identify_current(
+        "front",
+        "private/state-stream",
+        timeout_ms=650,
+    )
+    teach = await wrapped.teach_person(
+        "front",
+        "private/state-stream",
+        {"display_name": "张三"},
+        target=target,
+    )
+
+    assert identify == {"ok": True, "status": "identified"}
+    assert teach == {"ok": True, "person_id": "person_000001"}
+    assert service.identify_requests == [
+        {
+            "camera": "front",
+            "stream_ref": "private/state-stream",
+            "timeout_ms": 650,
+            "target": None,
+        }
+    ]
+    assert service.teach_requests == [
+        {
+            "camera": "front",
+            "stream_ref": "private/state-stream",
+            "profile": {"display_name": "张三"},
+            "target": target,
+        }
+    ]
 
 
 @pytest.mark.asyncio

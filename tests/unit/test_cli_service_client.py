@@ -124,6 +124,19 @@ class SendFailingWebSocket(FakeWebSocket):
         raise OSError("send failed")
 
 
+class RecordingPostJson:
+    def __init__(self, *responses: Any):
+        self.responses = list(responses)
+        self.requests: list[tuple[str, dict[str, Any], float]] = []
+
+    def __call__(self, url: str, payload: dict[str, Any], timeout_s: float) -> Any:
+        self.requests.append((url, payload, timeout_s))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
 def test_pack_frame_message_uses_uint32_be_header_len_json_and_jpeg_roundtrip():
     module = import_service_client()
     header = frame_header()
@@ -135,6 +148,112 @@ def test_pack_frame_message_uses_uint32_be_header_len_json_and_jpeg_roundtrip():
     assert json.loads(header_json.decode("utf-8")) == header
     assert message[4 + header_len :] == JPEG_1280X720
     assert module.unpack_frame_message(message) == (header, JPEG_1280X720)
+
+
+@pytest.mark.asyncio
+async def test_identify_current_posts_to_http_origin_with_agent_payload_and_returns_dict():
+    module = import_service_client()
+    response = {"ok": True, "status": "identified", "people": []}
+    post_json = RecordingPostJson(response)
+    client = module.VisualEventsServiceClient(
+        "ws://service.local:8765/v1/stream",
+        post_json=post_json,
+    )
+
+    result = await client.identify_current(
+        camera="front",
+        stream_ref="ws_abc",
+        timeout_ms=750,
+    )
+
+    assert result == response
+    assert post_json.requests[0][:2] == (
+        "http://service.local:8765/v1/memory/identify-current",
+        {
+            "camera": "front",
+            "stream_ref": "ws_abc",
+            "target": {
+                "kind": "person",
+                "intent": "identify_current",
+                "referent_text": "当前这个人",
+            },
+            "scope": "active_target",
+            "timeout_ms": 750,
+        },
+    )
+    assert post_json.requests[0][2] > 0
+
+
+@pytest.mark.asyncio
+async def test_identify_current_caps_timeout_to_server_schema_max():
+    module = import_service_client()
+    post_json = RecordingPostJson({"ok": True, "status": "identified"})
+    client = module.VisualEventsServiceClient(
+        "ws://service.local:8765/v1/stream",
+        post_json=post_json,
+    )
+
+    await client.identify_current(
+        camera="front",
+        stream_ref="ws_abc",
+        timeout_ms=1500,
+    )
+
+    assert post_json.requests[0][1]["timeout_ms"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_teach_person_posts_to_https_origin_with_profile_and_target():
+    module = import_service_client()
+    response = {"ok": True, "person_id": "person_000001"}
+    post_json = RecordingPostJson(response)
+    client = module.VisualEventsServiceClient(
+        "wss://memory.example.test/ws",
+        post_json=post_json,
+    )
+    target = {
+        "kind": "person",
+        "intent": "third_person_introduction",
+        "referent_text": "左边的人",
+    }
+    profile = {"display_name": "张三"}
+
+    result = await client.teach_person(
+        camera="front",
+        stream_ref="ws_abc",
+        profile=profile,
+        target=target,
+    )
+
+    assert result == response
+    assert post_json.requests[0][:2] == (
+        "https://memory.example.test/v1/memory/teach/person",
+        {
+            "camera": "front",
+            "stream_ref": "ws_abc",
+            "target": target,
+            "profile": profile,
+        },
+    )
+    assert post_json.requests[0][2] > 0
+
+
+@pytest.mark.asyncio
+async def test_memory_post_timeout_and_non_dict_response_return_business_dicts():
+    module = import_service_client()
+    post_json = RecordingPostJson(TimeoutError("timed out"), ["not", "a", "dict"])
+    client = module.VisualEventsServiceClient(
+        "ws://service.local/v1/stream",
+        post_json=post_json,
+    )
+
+    timeout = await client.identify_current(camera="front", stream_ref="ws_abc")
+    non_dict = await client.identify_current(camera="front", stream_ref="ws_abc")
+
+    assert timeout["ok"] is False
+    assert timeout["status"] == "timeout"
+    assert non_dict["ok"] is False
+    assert non_dict["status"] == "invalid_response"
 
 
 @pytest.mark.asyncio

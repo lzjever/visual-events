@@ -101,6 +101,35 @@ class FramePump:
             now_ms=now_ms,
         )
 
+    async def identify_current(self, timeout_ms: int = 500) -> dict[str, Any]:
+        active_stream = _active_stream_from_visual_state(self._latest_visual_state)
+        if active_stream.get("ok") is not True:
+            return active_stream
+
+        response = await self._service_client.identify_current(
+            active_stream["camera"],
+            active_stream["stream_ref"],
+            timeout_ms=int(timeout_ms),
+        )
+        return _redact_active_memory_response(response)
+
+    async def teach_person(
+        self,
+        profile: dict[str, Any],
+        target: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        active_stream = _active_stream_from_visual_state(self._latest_visual_state)
+        if active_stream.get("ok") is not True:
+            return active_stream
+
+        response = await self._service_client.teach_person(
+            active_stream["camera"],
+            active_stream["stream_ref"],
+            dict(profile),
+            target=dict(target or _default_self_introduction_target()),
+        )
+        return _redact_active_memory_response(response)
+
     def publish_stale_now(self, publish_timestamp_ms: int) -> bool:
         metadata = self._last_metadata or self._last_sent_metadata
         if metadata is None:
@@ -201,6 +230,79 @@ def _metadata_from_visual_state(visual_state: dict[str, Any]) -> dict[str, Any]:
         "image_width": _as_int(image_size[0], 0),
         "image_height": _as_int(image_size[1], 0),
     }
+
+
+def _active_stream_from_visual_state(
+    visual_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(visual_state, dict):
+        return _active_memory_business_failure("no_active_frame")
+
+    camera = visual_state.get("camera")
+    stream_ref = visual_state.get("stream_ref")
+    if not isinstance(camera, str) or not camera:
+        return _active_memory_business_failure("no_active_frame")
+    if not isinstance(stream_ref, str) or not stream_ref:
+        return _active_memory_business_failure("no_latest_stream_ref")
+    return {"ok": True, "camera": camera, "stream_ref": stream_ref}
+
+
+def _active_memory_business_failure(status: str) -> dict[str, Any]:
+    return {"ok": False, "status": status, "reason": status}
+
+
+def _default_self_introduction_target() -> dict[str, str]:
+    return {
+        "kind": "person",
+        "intent": "self_introduction",
+        "referent_text": "我",
+    }
+
+
+_ACTIVE_MEMORY_FORBIDDEN_KEYS = frozenset(
+    {
+        "stream_ref",
+        "track_id",
+        "target_track_id",
+        "raw_track_id",
+        "keypoints",
+        "source_frame",
+        "source_frame_ref",
+        "request_snapshot_ref",
+        "evidence",
+        "store_delta",
+    }
+)
+_ACTIVE_MEMORY_FORBIDDEN_KEY_PARTS = ("bbox", "embedding", "crop")
+
+
+def _redact_active_memory_response(response: Any) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        return _active_memory_business_failure("invalid_memory_response")
+    redacted = _redact_active_memory_value(response)
+    if isinstance(redacted, dict):
+        return redacted
+    return _active_memory_business_failure("invalid_memory_response")
+
+
+def _redact_active_memory_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _redact_active_memory_value(item)
+            for key, item in value.items()
+            if not _is_active_memory_forbidden_key(str(key))
+        }
+    if isinstance(value, list):
+        return [_redact_active_memory_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_active_memory_value(item) for item in value]
+    return value
+
+
+def _is_active_memory_forbidden_key(key: str) -> bool:
+    if key in _ACTIVE_MEMORY_FORBIDDEN_KEYS:
+        return True
+    return any(part in key for part in _ACTIVE_MEMORY_FORBIDDEN_KEY_PARTS)
 
 
 def _metadata_from_input_frame(frame: InputFrame, frame_id: int) -> dict[str, Any]:

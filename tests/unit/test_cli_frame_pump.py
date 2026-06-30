@@ -109,9 +109,19 @@ def known_person_event(*, event_id: str = "front:mem_evt_000001") -> dict[str, A
 
 
 class FakeServiceClient:
-    def __init__(self, results: list[Any] | None = None):
+    def __init__(
+        self,
+        results: list[Any] | None = None,
+        *,
+        identify_responses: list[dict[str, Any]] | None = None,
+        teach_responses: list[dict[str, Any]] | None = None,
+    ):
         self.requests: list[tuple[dict[str, Any], bytes]] = []
+        self.identify_requests: list[dict[str, Any]] = []
+        self.teach_requests: list[dict[str, Any]] = []
         self._results = list(results or [])
+        self._identify_responses = list(identify_responses or [])
+        self._teach_responses = list(teach_responses or [])
         self._request_event = asyncio.Event()
 
     async def request_frame(self, header: dict[str, Any], jpeg: bytes) -> Any:
@@ -121,6 +131,40 @@ class FakeServiceClient:
         if isinstance(result, asyncio.Future):
             return await result
         return result
+
+    async def identify_current(
+        self,
+        camera: str,
+        stream_ref: str,
+        timeout_ms: int = 500,
+        target: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.identify_requests.append(
+            {
+                "camera": camera,
+                "stream_ref": stream_ref,
+                "timeout_ms": timeout_ms,
+                "target": target,
+            }
+        )
+        return self._identify_responses.pop(0)
+
+    async def teach_person(
+        self,
+        camera: str,
+        stream_ref: str,
+        profile: dict[str, Any],
+        target: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.teach_requests.append(
+            {
+                "camera": camera,
+                "stream_ref": stream_ref,
+                "profile": profile,
+                "target": target,
+            }
+        )
+        return self._teach_responses.pop(0)
 
     async def wait_for_requests(self, count: int) -> None:
         while len(self.requests) < count:
@@ -189,6 +233,23 @@ def make_frame(module: Any, *, timestamp_ms: int, width: int = 1280, height: int
     )
 
 
+def assert_no_active_memory_forbidden_fields(response: dict[str, Any]) -> None:
+    serialized = json.dumps(response, ensure_ascii=False, sort_keys=True)
+    for forbidden in (
+        "stream_ref",
+        "track_id",
+        "bbox",
+        "keypoints",
+        "embedding",
+        "crop",
+        "source_frame",
+        "request_snapshot_ref",
+        "evidence",
+        "store_delta",
+    ):
+        assert forbidden not in serialized
+
+
 def make_pump(
     module: Any,
     *,
@@ -214,6 +275,170 @@ def make_pump(
         stale_after_ms=stale_after_ms,
         clock_ms=clock_ms,
     )
+
+
+@pytest.mark.asyncio
+async def test_identify_current_without_latest_visual_state_returns_business_failure():
+    module = import_frame_pump()
+    slot = module.LatestFrameSlot()
+    service = FakeServiceClient([])
+    pump = make_pump(module, slot=slot, service=service)
+
+    response = await pump.identify_current()
+
+    assert response["ok"] is False
+    assert response["status"] == "no_active_frame"
+    assert service.identify_requests == []
+
+
+@pytest.mark.asyncio
+async def test_identify_current_without_latest_stream_ref_returns_business_failure():
+    module = import_frame_pump()
+    slot = module.LatestFrameSlot()
+    state = visual_state_lost(frame_id=1)
+    state.pop("stream_ref", None)
+    service = FakeServiceClient([service_result(state)])
+    pump = make_pump(module, slot=slot, service=service)
+
+    slot.push(make_frame(module, timestamp_ms=1710000000000))
+    await pump.process_one(now_ms=1710000000082)
+    response = await pump.identify_current()
+
+    assert response["ok"] is False
+    assert response["status"] == "no_latest_stream_ref"
+    assert service.identify_requests == []
+
+
+@pytest.mark.asyncio
+async def test_identify_current_uses_latest_camera_stream_ref_and_redacts_response():
+    module = import_frame_pump()
+    slot = module.LatestFrameSlot()
+    state = load_visual_state_tracking(
+        frame_id=1,
+        frame_timestamp_ms=1710000000000,
+        camera="front",
+        stream_ref="private/state-stream",
+    )
+    service_response = {
+        "ok": True,
+        "status": "identified",
+        "people": [
+            {
+                "target_ref": "current:front:active_target",
+                "track_id": 7,
+                "stream_ref": "private/track-stream",
+                "identity_context": {
+                    "status": "known_person",
+                    "display_name": "张三",
+                    "embedding": [0.1, 0.2],
+                },
+            }
+        ],
+        "evidence": {
+            "source_frame": {"request_snapshot_ref": "private/snapshot"},
+            "bbox_xyxy": [1, 2, 3, 4],
+        },
+        "store_delta": {"person": 1},
+    }
+    service = FakeServiceClient(
+        [service_result(state)],
+        identify_responses=[service_response],
+    )
+    pump = make_pump(module, slot=slot, service=service)
+
+    slot.push(make_frame(module, timestamp_ms=1710000000000))
+    await pump.process_one(now_ms=1710000000082)
+    response = await pump.identify_current(timeout_ms=650)
+
+    assert service.identify_requests == [
+        {
+            "camera": "front",
+            "stream_ref": "private/state-stream",
+            "timeout_ms": 650,
+            "target": None,
+        }
+    ]
+    assert response == {
+        "ok": True,
+        "status": "identified",
+        "people": [
+            {
+                "target_ref": "current:front:active_target",
+                "identity_context": {
+                    "status": "known_person",
+                    "display_name": "张三",
+                },
+            }
+        ],
+    }
+    assert_no_active_memory_forbidden_fields(response)
+
+
+@pytest.mark.asyncio
+async def test_teach_person_uses_self_introduction_default_or_explicit_target_and_redacts():
+    module = import_frame_pump()
+    slot = module.LatestFrameSlot()
+    state = load_visual_state_tracking(
+        frame_id=1,
+        frame_timestamp_ms=1710000000000,
+        camera="front",
+        stream_ref="private/state-stream",
+    )
+    leaky_response = {
+        "ok": True,
+        "person_id": "person_000001",
+        "person": {
+            "display_name": "张三",
+            "source_frame_ref": "private/frame",
+        },
+        "evidence": {"crop_ref": "private/crop.jpg"},
+        "store_delta": {"person": 1},
+    }
+    service = FakeServiceClient(
+        [service_result(state)],
+        teach_responses=[leaky_response, leaky_response],
+    )
+    pump = make_pump(module, slot=slot, service=service)
+    explicit_target = {
+        "kind": "person",
+        "intent": "third_person_introduction",
+        "referent_text": "左边的人",
+    }
+
+    slot.push(make_frame(module, timestamp_ms=1710000000000))
+    await pump.process_one(now_ms=1710000000082)
+    default_response = await pump.teach_person({"display_name": "张三"})
+    explicit_response = await pump.teach_person(
+        {"display_name": "李四"},
+        target=explicit_target,
+    )
+
+    assert service.teach_requests == [
+        {
+            "camera": "front",
+            "stream_ref": "private/state-stream",
+            "profile": {"display_name": "张三"},
+            "target": {
+                "kind": "person",
+                "intent": "self_introduction",
+                "referent_text": "我",
+            },
+        },
+        {
+            "camera": "front",
+            "stream_ref": "private/state-stream",
+            "profile": {"display_name": "李四"},
+            "target": explicit_target,
+        },
+    ]
+    assert default_response == {
+        "ok": True,
+        "person_id": "person_000001",
+        "person": {"display_name": "张三"},
+    }
+    assert explicit_response == default_response
+    assert_no_active_memory_forbidden_fields(default_response)
+    assert_no_active_memory_forbidden_fields(explicit_response)
 
 
 @pytest.mark.asyncio
