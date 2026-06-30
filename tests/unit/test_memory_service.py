@@ -1947,6 +1947,7 @@ async def test_self_introduction_requires_active_interaction_target_and_does_not
     assert preview["ask_user_hint"] is True
     assert preview["ambiguity_type"] == "no_active_interaction_target"
     assert preview["candidates"] == []
+    _assert_zero_store_delta(preview["store_delta"])
     _assert_allowed_ambiguity(preview)
 
     with pytest.raises(MemoryServiceError) as exc:
@@ -1966,6 +1967,7 @@ async def test_self_introduction_requires_active_interaction_target_and_does_not
     assert exc.value.code == "target_ambiguous"
     assert exc.value.status_code == 409
     assert exc.value.details["ambiguity_type"] == "no_active_interaction_target"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
     _assert_allowed_ambiguity(exc.value.details)
     assert backend.person_inputs == []
     assert subject.store.search_person_embeddings(
@@ -2297,6 +2299,7 @@ async def test_self_introduction_inactive_snapshot_uses_allowed_ambiguity_type(
 
     assert preview["status"] == "ambiguous"
     assert preview["ambiguity_type"] == expected_ambiguity_type
+    _assert_zero_store_delta(preview["store_delta"])
     _assert_allowed_ambiguity(preview)
 
     with pytest.raises(MemoryServiceError) as exc:
@@ -2309,6 +2312,7 @@ async def test_self_introduction_inactive_snapshot_uses_allowed_ambiguity_type(
 
     assert exc.value.code == "target_ambiguous"
     assert exc.value.details["ambiguity_type"] == expected_ambiguity_type
+    _assert_zero_store_delta(exc.value.details["store_delta"])
     _assert_allowed_ambiguity(exc.value.details)
     assert backend.person_inputs == []
     assert _count_rows(subject.store, "person_profiles") == 0
@@ -2373,6 +2377,7 @@ async def test_self_introduction_stale_snapshot_uses_allowed_ambiguity_type(tmp_
 
     assert preview["status"] == "ambiguous"
     assert preview["ambiguity_type"] == "stale_interaction"
+    _assert_zero_store_delta(preview["store_delta"])
     _assert_allowed_ambiguity(preview)
 
     with pytest.raises(MemoryServiceError) as exc:
@@ -2385,6 +2390,7 @@ async def test_self_introduction_stale_snapshot_uses_allowed_ambiguity_type(tmp_
 
     assert exc.value.code == "target_ambiguous"
     assert exc.value.details["ambiguity_type"] == "stale_interaction"
+    _assert_zero_store_delta(exc.value.details["store_delta"])
     _assert_allowed_ambiguity(exc.value.details)
     assert backend.person_inputs == []
     assert _count_rows(subject.store, "person_profiles") == 0
@@ -2966,6 +2972,7 @@ async def test_third_person_introduction_multiple_pointing_candidates_does_not_w
         pose_visual["pose_stability_window"]["failure_reason"]
         == "multiple_candidates"
     )
+    _assert_zero_store_delta(preview["store_delta"])
     _assert_allowed_ambiguity(preview)
 
     with pytest.raises(MemoryServiceError) as exc:
@@ -2979,6 +2986,7 @@ async def test_third_person_introduction_multiple_pointing_candidates_does_not_w
     assert exc.value.code == "target_ambiguous"
     assert exc.value.details["ambiguity_type"] == "multiple_candidates"
     assert exc.value.details["evidence"]["pose_pointing_scoring"] == preview_scoring
+    _assert_zero_store_delta(exc.value.details["store_delta"])
     _assert_allowed_ambiguity(exc.value.details)
     assert backend.person_inputs == []
     assert _count_rows(subject.store, "person_profiles") == 0
@@ -3034,6 +3042,7 @@ async def test_non_self_public_person_intents_do_not_invent_ambiguity_types(tmp_
 
     assert third_preview["status"] == "ambiguous"
     assert third_preview["ambiguity_type"] == "no_active_interaction_target"
+    _assert_zero_store_delta(third_preview["store_delta"])
     _assert_allowed_ambiguity(third_preview)
 
     with pytest.raises(MemoryServiceError) as third_error:
@@ -3045,6 +3054,7 @@ async def test_non_self_public_person_intents_do_not_invent_ambiguity_types(tmp_
         )
     assert third_error.value.code == "target_ambiguous"
     assert third_error.value.details["ambiguity_type"] == "no_active_interaction_target"
+    _assert_zero_store_delta(third_error.value.details["store_delta"])
     _assert_allowed_ambiguity(third_error.value.details)
 
     unsupported = {

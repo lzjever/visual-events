@@ -407,6 +407,7 @@ def assert_no_current_snapshot_forbidden_fields(snapshot: dict[str, Any]) -> Non
         "track_id",
         "bbox",
         "bbox_xyxy",
+        "center_uv",
         "keypoints",
         "embedding",
         "crop",

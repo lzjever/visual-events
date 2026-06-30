@@ -239,6 +239,7 @@ def assert_no_active_memory_forbidden_fields(response: dict[str, Any]) -> None:
         "stream_ref",
         "track_id",
         "bbox",
+        "center_uv",
         "keypoints",
         "embedding",
         "embedding_id",

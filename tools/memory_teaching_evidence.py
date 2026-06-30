@@ -13,6 +13,7 @@ SNAPSHOT_FORBIDDEN_FIELDS = (
     "track_id",
     "bbox",
     "bbox_xyxy",
+    "center_uv",
     "keypoints",
     "embedding",
     "crop",

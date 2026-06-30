@@ -337,10 +337,19 @@ CLI 行为：
 CLI stdout 默认只输出 Botified allowlist frame：
 
 ```text
-<botified>{"id":"visual:front:evt_000456","urgency":"normal","timeout_secs":8,"request":"event=person_waving camera=front track_id=7 confidence=0.86 duration_ms=900 text=有人在机器人前方挥手 visual_context={\"visual_context\":{\"event_target\":{\"track_id\":7,\"runtime_person_slot\":3,\"visible_now\":true,\"matches_attention_target\":true,\"event_age_ms\":82,\"position\":\"center\",\"size\":\"mid\",\"bbox_area_ratio\":0.1042},\"trigger_evidence\":{\"runtime_person_slot\":3,\"wave_duration_ms\":900},\"current_scene\":{\"camera\":\"front\",\"frame_age_ms\":82,\"person_count\":1,\"attention_target\":{\"track_id\":7,\"position\":\"center\",\"size\":\"mid\",\"center_uv\":[420.0,360.0],\"bbox_area_ratio\":0.1042},\"other_people_count\":0,\"engagement_state\":\"available\",\"no_engage_reasons\":[]}}}","expect":"ack"}</botified>
+<botified>{"id":"visual:front:evt_000456","urgency":"normal","timeout_secs":8,"request":"event=person_waving camera=front target_ref=current:front:person:0 confidence=0.86 duration_ms=900 text=有人在机器人前方挥手 visual_context={\"visual_context\":{\"event_target\":{\"target_ref\":\"current:front:person:0\",\"visible_now\":true,\"matches_attention_target\":true,\"event_age_ms\":82,\"position\":\"center\",\"size\":\"mid\"},\"trigger_evidence\":{\"wave_duration_ms\":900,\"keypoint_min_confidence\":0.72},\"current_scene\":{\"camera\":\"front\",\"frame_age_ms\":82,\"person_count\":1,\"attention_target\":{\"target_ref\":\"current:front:person:0\",\"position\":\"center\",\"size\":\"mid\"},\"other_people_count\":0,\"engagement_state\":\"available\",\"no_engage_reasons\":[]},\"identity_context\":{\"status\":\"known_person\",\"source\":\"cache\",\"fresh_ms\":120,\"confidence\":0.91,\"person\":{\"person_id\":\"person_000001\",\"display_name\":\"张三\",\"description\":\"店长，熟悉新品陈列和现场活动\",\"tags\":[\"staff\",\"manager\"]}}}}","expect":"ack"}</botified>
 ```
 
-顶层 payload 只包含 `id`、`urgency`、`timeout_secs`、`request`、`expect`。`request` 中包含 `event=... track_id=... visual_context=<minified-json>`。`visual_context` 是紧凑 JSON wrapper，包含 `event_target`、`trigger_evidence`、`current_scene`；不包含图片、crop、embedding、身份或全量 tracks。
+顶层 payload 只包含 `id`、`urgency`、`timeout_secs`、`request`、`expect`。`request` 中包含 `event=... camera=... target_ref=... visual_context=<minified-json>`；`target_ref` 是 agent-facing target handle，不是 server tracker id。
+
+`visual_context` 是 compact semantic context JSON wrapper，可包含：
+
+- `event_target`: `target_ref`、`visible_now`、`matches_attention_target`、`event_age_ms`、`position`、`size`。
+- `trigger_evidence`: 只包含 agent-facing 的短触发摘要。
+- `current_scene`: `camera`、`frame_age_ms`、`person_count`、`attention_target.position`、`attention_target.size`、`other_people_count`、`engagement_state`、`no_engage_reasons`。
+- `identity_context`: 已投影的人物/匿名人物摘要，可包含 `status`、`source`、`fresh_ms`、`confidence`、`person` 或 `anonymous_person` 的短字段。
+
+agent-facing Botified frame 不包含 raw `track_id`、`runtime_person_slot`、`bbox`/`bbox_area_ratio`/`center_uv`、`keypoints`、`stream_ref`、`crop`、`embedding` 或全量 `tracks`。`identity_context` 是已投影摘要，不暴露 embedding、crop 或 raw refs。上述 low-level 字段仍可存在于 WebSocket `visual_state`、server semantic event evidence、CLI 内部状态或调试 artifact；不得投影进 Botified request。
 
 日志、调试状态、性能指标走 stderr 或文件。`--debug-json-stdout` 只能用于手工调试，不能用于 Botified task。
 

@@ -640,6 +640,33 @@ def test_offline_renderer_summarizes_identity_sidecars(
     assert "identified" in html
 
 
+def test_offline_renderer_flags_current_snapshot_center_uv_as_forbidden(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    _write_artifact(artifact, include_identity_sidecars=True)
+    snapshot_path = artifact / "current_visual_snapshot.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["people"][0]["center_uv"] = [420.0, 360.0]
+    snapshot_path.write_text(
+        json.dumps(snapshot, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    out = tmp_path / "evidence"
+
+    exit_code = module.main(["--artifact", str(artifact), "--out", str(out)])
+
+    assert exit_code == 0
+    index = json.loads(
+        (out / "visual_evidence_index.json").read_text(encoding="utf-8")
+    )
+    by_assertion = {item["assertion_id"]: item for item in index}
+    assert (
+        by_assertion["cli_current_visual_snapshot"]["forbidden_fields_absent"]
+        is False
+    )
+
+
 def test_offline_renderer_prefers_richer_identity_overlay_state(
     tmp_path: Path,
 ) -> None:
