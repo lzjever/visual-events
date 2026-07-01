@@ -17,9 +17,11 @@ from tools import run_memory_demo as module
 
 PUBLIC_FORBIDDEN_TEXT = (
     "track_id",
+    "bbox",
     "bbox_xyxy",
     "request_snapshot_ref",
     "resolver_target_ref",
+    "embedding",
     "embedding_id",
     "memory_match_id",
     "Debug JSON",
@@ -30,6 +32,7 @@ PUBLIC_FORBIDDEN_TEXT = (
     "embedding_backend",
     "inference_backend",
     "local-smoke",
+    "keypoints",
 )
 
 
@@ -127,11 +130,12 @@ def _familiar_unknown_result() -> dict[str, Any]:
 def _patch_runtime_modules(
     monkeypatch: pytest.MonkeyPatch,
     fake_runner: Any,
+    fake_evidence: Any = memory_teaching_evidence,
 ) -> None:
     monkeypatch.setattr(
         module,
         "_load_runtime_modules",
-        lambda: (memory_teaching_evidence, fake_runner),
+        lambda: (fake_evidence, fake_runner),
     )
 
 
@@ -236,10 +240,13 @@ def test_main_uses_default_real_model_paths_and_renders_root(
     assert report["demo"] == "memory"
     assert set(report) == {
         "artifacts",
+        "camera",
+        "case_count",
+        "cases",
         "checks",
+        "data_dir",
         "demo",
-        "demo_items",
-        "familiar_unknown",
+        "error_count",
         "models",
         "real_model_evidence",
         "scene_count",
@@ -253,6 +260,9 @@ def test_main_uses_default_real_model_paths_and_renders_root(
         "face": str(paths["face"]),
         "scene": str(paths["scene"]),
     }
+    assert report["cases"] == []
+    assert report["case_count"] == 0
+    assert report["error_count"] == 0
     assert "fake" not in json.dumps(report["models"], ensure_ascii=False).lower()
     assert (out / "index.html").is_file()
     root_html = (out / "index.html").read_text(encoding="utf-8")
@@ -413,7 +423,57 @@ def test_runner_wrapper_normalizes_real_model_demo_report(
     assert payloads["backend"] == "local"
 
 
-def test_runner_wrapper_does_not_mark_failed_local_run_as_real_model_evidence(
+def test_runner_wrapper_keeps_real_model_evidence_when_case_failure_makes_run_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_local_smoke(**kwargs: Any) -> dict[str, Any]:
+        out = kwargs["out"]
+        out.mkdir(parents=True, exist_ok=True)
+        report = {
+            "ok": False,
+            "status": "failed",
+            "gate": "memory_teaching_ga_runner_local_smoke",
+            "mode": "local-smoke",
+            "backend": "local",
+            "real_model_evidence": True,
+            "third_person_probe": {
+                "status": "insufficient_sample",
+                "passed": False,
+            },
+            "checks": [
+                {"name": "local_smoke_explicit_real_backends", "passed": True},
+                {"name": "third_person_local_probe", "passed": False},
+            ],
+        }
+        (out / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        return report
+
+    with module._suppress_known_starlette_testclient_warning():
+        from tools import run_memory_teaching_ga_e2e as runner
+
+    monkeypatch.setattr(runner, "run_local_smoke", fake_run_local_smoke)
+    model_paths = _make_model_paths(tmp_path)
+
+    report = runner.run_real_model_memory_demo(
+        data_dir=tmp_path / "val-data",
+        out=tmp_path / "out",
+        camera="front",
+        person_model_path=model_paths["face"],
+        scene_model_path=model_paths["scene"],
+        pose_model_path=model_paths["pose"],
+    )
+
+    assert report["ok"] is False
+    assert report["status"] == "failed"
+    assert report["real_model_evidence"] is True
+    assert report["third_person_introduction"]["status"] == "insufficient_sample"
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["real_model_paths"]["passed"] is True
+    assert checks["third_person_pose_pointing_known_person"]["passed"] is False
+
+
+def test_runner_wrapper_does_not_mark_failed_preflight_as_real_model_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -702,6 +762,332 @@ def test_default_output_uses_public_demo_dir(
     assert (expected / "report.json").is_file()
 
 
+def test_public_report_cases_keep_failed_results_and_visual_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _make_model_paths(tmp_path)
+    _patch_default_models(monkeypatch, paths)
+    data_dir = tmp_path / "val-data"
+    out = tmp_path / "artifacts" / "demo" / "memory"
+    reference = data_dir / "pic_teach_me" / "img_000.jpg"
+    evidence = data_dir / "pic_teach_me" / "img_001.jpg"
+    failed_reference = data_dir / "pic_teach_person" / "img_000.jpg"
+    failed_evidence = data_dir / "pic_teach_person" / "img_002.jpg"
+    scene_reference = data_dir / "pic_teach_scene_galbot" / "img_000.jpg"
+    familiar_evidence = data_dir / "pic_familiar_face" / "img_000.jpg"
+    for path in (
+        reference,
+        evidence,
+        failed_reference,
+        failed_evidence,
+        scene_reference,
+        familiar_evidence,
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"jpeg")
+
+    def fake_runner(**kwargs: Any) -> dict[str, Any]:
+        return _write_minimal_runner_report(
+            kwargs["out"],
+            status="failed",
+            scene_count=4,
+            self_introduction={
+                "status": "passed",
+                "passed": True,
+                "user_message": "请记住我，我是小李",
+                "source_image_path": str(reference),
+                "anchor_frame": str(reference),
+                "candidate_frames": [str(reference), str(evidence)],
+                "frame_window_radius": 2,
+                "selected_window": {"frame": str(evidence)},
+                "overlay_source_frame": str(evidence),
+                "frame_relation": "nearby",
+                "frame_delta": 1,
+                "expected_target": "当前说话的人",
+                "actual_target": "小李",
+                "expected_outcome": "teach -> recall 小李",
+                "actual_outcome": "known_person_present",
+                "verdict": "通过：自我介绍后召回为小李",
+                "events": [{"event": "known_person_present", "track_id": 4}],
+                "person_visual_evidence": {
+                    "bbox_xyxy": [1, 2, 3, 4],
+                    "embedding_id": "raw-vector",
+                    "keypoints": [[1, 2]],
+                },
+            },
+            third_person_introduction={
+                "status": "failed",
+                "passed": False,
+                "user_message": "这位是王工",
+                "source_image_path": str(failed_reference),
+                "anchor_frame": str(failed_reference),
+                "candidate_frames": [str(failed_reference), str(failed_evidence)],
+                "frame_window_radius": 2,
+                "selected_window": {"frame": str(failed_evidence)},
+                "overlay_source_frame": str(failed_evidence),
+                "frame_relation": "nearby",
+                "frame_delta": 2,
+                "expected_target": "被指向的人",
+                "actual_target": "未能稳定选中",
+                "expected_outcome": "teach -> recall 王工",
+                "actual_outcome": "insufficient visual evidence",
+                "failure_reason": "insufficient visual evidence",
+                "resolve_target": {
+                    "status": "ambiguous",
+                    "candidates": [{"track_id": 9, "bbox_xyxy": [4, 5, 6, 7]}],
+                },
+            },
+            teach_scene={
+                "status": "passed",
+                "passed": True,
+                "user_message": "这是银河通用的办公室",
+                "source_image_path": str(scene_reference),
+                "anchor_frame": str(scene_reference),
+                "candidate_frames": [str(scene_reference)],
+                "frame_window_radius": 2,
+                "selected_window": {"frame": str(scene_reference)},
+                "frame_relation": "same",
+                "frame_delta": 0,
+                "expected_target": "当前场景",
+                "actual_target": "办公室",
+                "expected_outcome": "write -> activation 办公室",
+                "actual_outcome": "scene_activated",
+                "events": [{"event": "scene_activated"}],
+            },
+            familiar_unknown={
+                "status": "passed",
+                "passed": True,
+                "candidate_frames": [str(familiar_evidence)],
+                "selected_window": {"frame": str(familiar_evidence)},
+                "frame_relation": "no_user_input",
+                "expected_target": "见过但还不知道名字的人",
+                "actual_target": "熟悉的未命名人物",
+                "expected_outcome": "no_user_input -> familiar result",
+                "actual_outcome": "familiar_unknown_present",
+                "events": [{"event": "familiar_unknown_present"}],
+            },
+        )
+
+    visual_index = [
+        {
+            "id": "self_introduction",
+            "status": "passed",
+            "image": "visual-evidence/self.jpg",
+            "track_id": 4,
+            "bbox_xyxy": [1, 2, 3, 4],
+        },
+        {
+            "id": "pointing_teaching",
+            "status": "failed",
+            "image": "visual-evidence/third-person.jpg",
+            "keypoints": [[1, 2]],
+        },
+        {
+            "id": "scene_teaching",
+            "status": "passed",
+            "image": "visual-evidence/teach-scene-scene-activated.jpg",
+        },
+        {
+            "id": "familiar_unknown",
+            "status": "passed",
+        },
+    ]
+
+    def fake_renderer(**kwargs: Any) -> dict[str, Any]:
+        public_out = kwargs["out"]
+        (public_out / "visual-evidence").mkdir(parents=True, exist_ok=True)
+        for item in visual_index:
+            if item.get("image"):
+                (public_out / item["image"]).write_bytes(b"jpeg")
+        (public_out / "visual-evidence" / "index.html").write_text(
+            "visual evidence", encoding="utf-8"
+        )
+        (public_out / "index.html").write_text("old renderer root", encoding="utf-8")
+        return {
+            "ok": True,
+            "out": str(public_out),
+            "index_html": str(public_out / "index.html"),
+            "visual_evidence_index": visual_index,
+        }
+
+    _patch_runtime_modules(
+        monkeypatch,
+        SimpleNamespace(run_real_model_memory_demo=fake_runner),
+        SimpleNamespace(
+            render_memory_teaching_evidence=fake_renderer,
+            MemoryTeachingEvidenceError=memory_teaching_evidence.MemoryTeachingEvidenceError,
+        ),
+    )
+
+    assert module.main(["--data-dir", str(data_dir), "--out", str(out)]) == 1
+
+    report_text = (out / "report.json").read_text(encoding="utf-8")
+    root_html = (out / "index.html").read_text(encoding="utf-8")
+    public_text = report_text + "\n" + root_html
+    report = json.loads(report_text)
+
+    assert "demo_items" not in report
+    assert "familiar_unknown" not in report
+    assert [case["case_id"] for case in report["cases"]] == [
+        "self_introduction",
+        "third_person_pointing_teach",
+        "scene_teach",
+        "familiar_unknown",
+    ]
+    assert report["case_count"] == 4
+    assert report["error_count"] == 1
+
+    failed_case = report["cases"][1]
+    assert failed_case["result_status"] == "failed"
+    assert failed_case["failure_reason"] == "insufficient visual evidence"
+    assert failed_case["user_message"] == "这位是王工"
+    assert failed_case["reference_frame"].endswith(
+        "val-data/pic_teach_person/img_000.jpg"
+    )
+    assert failed_case["evidence_frame"].endswith(
+        "val-data/pic_teach_person/img_002.jpg"
+    )
+    assert failed_case["overlay_source_frame"].endswith(
+        "val-data/pic_teach_person/img_002.jpg"
+    )
+    assert failed_case["frame_relation"] == "nearby"
+    assert failed_case["frame_delta"] == 2
+    assert failed_case["expected_target"] == "被指向的人"
+    assert failed_case["actual_target"] == "未能稳定选中"
+    assert failed_case["expected_outcome"] == "teach -> recall 王工"
+    assert failed_case["actual_outcome"] == "insufficient visual evidence"
+    assert failed_case["verdict"] == "未通过：insufficient visual evidence"
+    assert failed_case["overlay_image"] == "visual-evidence/third-person.jpg"
+    assert failed_case["anchor_frame"].endswith(
+        "val-data/pic_teach_person/img_000.jpg"
+    )
+    assert failed_case["candidate_frame_count"] == 2
+    assert failed_case["candidate_frames"][0].endswith(
+        "val-data/pic_teach_person/img_000.jpg"
+    )
+    assert failed_case["candidate_frames"][1].endswith(
+        "val-data/pic_teach_person/img_002.jpg"
+    )
+    assert failed_case["frame_window_radius"] == 2
+
+    scene_case = report["cases"][2]
+    assert (
+        scene_case["overlay_image"]
+        == "visual-evidence/teach-scene-scene-activated.jpg"
+    )
+    assert scene_case["candidate_frame_count"] == 1
+
+    familiar_case = report["cases"][3]
+    assert familiar_case["user_message"] == "无用户输入，来自重复观察"
+    assert familiar_case["frame_relation"] == "no_user_input"
+    assert familiar_case["familiar_result"] == "familiar_unknown_present"
+    assert familiar_case["overlay_status"] == "fallback_evidence_frame"
+    assert familiar_case["overlay_image"].endswith(
+        "val-data/pic_familiar_face/img_000.jpg"
+    )
+
+    assert "<img" in root_html
+    assert "用户说了什么" in root_html
+    assert "系统看的帧" in root_html
+    assert "期望 vs 实际" in root_html
+    assert "一句话 verdict" in root_html
+    assert "打开 overlay" in root_html
+    assert "无用户输入，来自重复观察" in root_html
+    assert "visual-evidence/teach-scene-scene-activated.jpg" in root_html
+    assert "visual-evidence/third-person.jpg" in root_html
+    assert "val-data/pic_teach_person/img_000.jpg" in root_html
+    assert "val-data/pic_teach_person/img_002.jpg" in root_html
+    assert "val-data/pic_familiar_face/img_000.jpg" in root_html
+    assert "old renderer root" not in root_html
+    for image_ref in re.findall(r'<a href="([^"]+)">', root_html):
+        assert not Path(image_ref).is_absolute()
+    for forbidden_text in PUBLIC_FORBIDDEN_TEXT:
+        assert forbidden_text not in public_text
+
+
+def test_public_real_model_evidence_passes_through_internal_report_on_case_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _make_model_paths(tmp_path)
+    _patch_default_models(monkeypatch, paths)
+    data_dir = tmp_path / "val-data"
+    out = tmp_path / "artifacts" / "demo" / "memory"
+    reference = data_dir / "pic_teach_person" / "img_000.jpg"
+    evidence = data_dir / "pic_teach_person" / "img_001.jpg"
+    for path in (reference, evidence):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"jpeg")
+
+    def fake_runner(**kwargs: Any) -> dict[str, Any]:
+        return _write_minimal_runner_report(
+            kwargs["out"],
+            ok=False,
+            status="failed",
+            real_model_evidence=True,
+            checks=[{"name": "real_model_paths", "passed": True}],
+            third_person_introduction={
+                "status": "insufficient_sample",
+                "passed": False,
+                "reason": "insufficient visual evidence",
+                "user_message": "这位是王工",
+                "source_image_path": str(reference),
+                "selected_window": {"frame": str(evidence)},
+                "overlay_source_frame": str(evidence),
+                "frame_relation": "nearby",
+                "frame_delta": 1,
+                "expected_target": "被指向的人",
+                "actual_target": "未能稳定选中",
+                "expected_outcome": "teach -> recall 王工",
+                "actual_outcome": "insufficient_sample",
+            },
+        )
+
+    def fake_renderer(**kwargs: Any) -> dict[str, Any]:
+        public_out = kwargs["out"]
+        image = public_out / "visual-evidence" / "third-person.jpg"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"jpeg")
+        (public_out / "visual-evidence" / "index.html").write_text(
+            "visual evidence", encoding="utf-8"
+        )
+        return {
+            "ok": True,
+            "out": str(public_out),
+            "index_html": str(public_out / "index.html"),
+            "visual_evidence_index": [
+                {
+                    "id": "pointing_teaching",
+                    "status": "failed",
+                    "image": "visual-evidence/third-person.jpg",
+                }
+            ],
+        }
+
+    _patch_runtime_modules(
+        monkeypatch,
+        SimpleNamespace(run_real_model_memory_demo=fake_runner),
+        SimpleNamespace(
+            render_memory_teaching_evidence=fake_renderer,
+            MemoryTeachingEvidenceError=memory_teaching_evidence.MemoryTeachingEvidenceError,
+        ),
+    )
+
+    assert module.main(["--data-dir", str(data_dir), "--out", str(out)]) == 1
+
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["real_model_evidence"] is True
+    assert report["error_count"] == 1
+    assert len(report["cases"]) == 1
+    case = report["cases"][0]
+    assert case["case_id"] == "third_person_pointing_teach"
+    assert case["result_status"] == "insufficient_sample"
+    assert case["failure_reason"] == "insufficient visual evidence"
+    assert case["overlay_image"] == "visual-evidence/third-person.jpg"
+
+
 def test_output_cleanup_removes_managed_symlink_without_touching_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -777,7 +1163,7 @@ def test_public_demo_pages_cover_familiar_unknown_without_legacy_main_text(
     assert "Memory Demo" in root_html
     assert "Demo Summary" in root_html
     assert "Models" in root_html
-    assert "Demo Items" in root_html
+    assert "Cases" in root_html
     assert report["demo"] == "memory"
     assert report["real_model_evidence"] is True
     assert report["scene_count"] == 2
@@ -788,10 +1174,11 @@ def test_public_demo_pages_cover_familiar_unknown_without_legacy_main_text(
         "face": str(paths["face"]),
         "scene": str(paths["scene"]),
     }
-    assert report["familiar_unknown"]["status"] == "passed"
-    assert report["demo_items"][-1]["id"] == "familiar_unknown"
-    assert report["demo_items"][-1]["status"] == "passed"
-    assert "匿名熟客出现" in public_text
+    assert report["cases"][-1]["case_id"] == "familiar_unknown"
+    assert report["cases"][-1]["result_status"] == "passed"
+    assert report["cases"][-1]["frame_relation"] == "no_user_input"
+    assert "见过但还不知道名字的人" in public_text
+    assert "无用户输入，来自重复观察" in public_text
     assert report["checks"] == [
         {"name": "real_models_loaded", "passed": True},
         {"name": "scenes_loaded", "passed": True},
@@ -800,10 +1187,13 @@ def test_public_demo_pages_cover_familiar_unknown_without_legacy_main_text(
     ]
     assert set(report) == {
         "artifacts",
+        "camera",
+        "case_count",
+        "cases",
         "checks",
+        "data_dir",
         "demo",
-        "demo_items",
-        "familiar_unknown",
+        "error_count",
         "models",
         "real_model_evidence",
         "scene_count",

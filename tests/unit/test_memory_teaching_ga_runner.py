@@ -2055,6 +2055,40 @@ def test_local_runner_frame_bound_posts_include_latest_stream_ref(
     assert payload["stream_ref"] != memory_e2e.PAYLOAD_FIXTURE_STREAM_REF
 
 
+def test_public_demo_candidate_frame_window_uses_same_stem_anchor_radius(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    scene_dir = _make_scene(
+        data_dir,
+        "pic_teach_me",
+        frames=5,
+        jpeg_bytes=_valid_jpeg_bytes(),
+    )
+    (scene_dir / "img_001.transcript").write_text(
+        "请你记住我，我是小李飞刀",
+        encoding="utf-8",
+    )
+    scenes = module.discover_scene_dirs(data_dir)
+    scene = next(scene for scene in scenes if scene.name == "pic_teach_me")
+    records = module._build_teach_payload_records_from_scenes(
+        scenes,
+        camera="front",
+    )
+    record = records[0]
+
+    window = module._public_demo_candidate_frame_window(scene, record)
+
+    assert module.PUBLIC_DEMO_FRAME_WINDOW_RADIUS == 2
+    assert window["anchor_frame"] == str(scene_dir / "img_001.jpeg")
+    assert window["anchor_frame_index"] == 1
+    assert window["candidate_frames"] == [
+        str(scene_dir / f"img_{index:03d}.jpeg") for index in range(4)
+    ]
+    assert window["candidate_frame_indices"] == [0, 1, 2, 3]
+    assert str(scene_dir / "img_004.jpeg") not in window["candidate_frames"]
+
+
 def test_local_familiar_unknown_demo_observes_until_default_familiar_duration(
     tmp_path: Path,
     monkeypatch,
@@ -2131,9 +2165,133 @@ def test_local_familiar_unknown_demo_observes_until_default_familiar_duration(
     assert result["anonymous_id"] == "anon_123"
     assert result["seen_count"] == 3
     assert result["observed_duration_ms"] == 10_000
+    assert result["frame_relation"] == "no_user_input"
+    assert result["anchor_frame"] is None
+    assert result["candidate_frames"] == [str(frame_path)]
+    assert result["selected_frame"] == str(frame_path)
+    assert result["frame_delta"] is None
     assert [call["base_timestamp_ms"] for call in calls] == [
         1_000 + index * module.FAMILIAR_UNKNOWN_OBSERVATION_INTERVAL_MS
         for index in range(11)
+    ]
+
+
+def test_public_demo_path_does_not_scan_beyond_transcript_window(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    data_dir = tmp_path / "val-data"
+    jpeg_bytes = _valid_jpeg_bytes()
+    _make_scene(
+        data_dir,
+        "pic_teach_me",
+        transcript_text="请你记住我，我是小李飞刀",
+        jpeg_bytes=jpeg_bytes,
+    )
+    person_scene_dir = _make_scene(
+        data_dir,
+        "pic_teach_person",
+        frames=5,
+        jpeg_bytes=jpeg_bytes,
+    )
+    (person_scene_dir / "img_001.transcript").write_text(
+        "这是彭刚，请你记住",
+        encoding="utf-8",
+    )
+    _make_scene(
+        data_dir,
+        "pic_teach_scene_galbot",
+        transcript_text="这是银河通用的办公室，请你记住",
+        jpeg_bytes=jpeg_bytes,
+    )
+    scenes = module.discover_scene_dirs(data_dir)
+    records = module._build_teach_payload_records_from_scenes(
+        scenes,
+        camera="front",
+    )
+    sent_paths: list[Path] = []
+    self_windows: list[dict[str, Any] | None] = []
+    scene_windows: list[dict[str, Any] | None] = []
+
+    class FakeRunner:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.session_factory = SimpleNamespace(last_snapshot=None)
+            self.client = object()
+
+        def open_stream(self):
+            return self
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def send(self, _websocket: Any, source_frame: Any, **_kwargs: Any):
+            sent_paths.append(source_frame.path)
+            return {
+                "frame_id": len(sent_paths),
+                "tracks": [{"track_id": 7, "class": "person", "lost_ms": 0}],
+                "attention": {"target_track_id": 7},
+                "scene_context": {"engagement_state": "available"},
+            }
+
+    def fake_self_smoke(**kwargs: Any) -> dict[str, Any]:
+        self_windows.append(kwargs.get("candidate_frame_window"))
+        return {"status": "passed", "passed": True}
+
+    def fake_scene_smoke(**kwargs: Any) -> dict[str, Any]:
+        scene_windows.append(kwargs.get("candidate_frame_window"))
+        return {"status": "passed", "passed": True}
+
+    def fake_post_and_record_api_response(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["operation"] == "local_resolve_third_person_target"
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": False,
+                "status": "target_unclear",
+                "reason": "target_unclear",
+            },
+        }
+
+    monkeypatch.setattr(module, "LocalMemorySmokeRunner", FakeRunner)
+    monkeypatch.setattr(module, "_run_local_self_smoke", fake_self_smoke)
+    monkeypatch.setattr(module, "_run_local_scene_smoke", fake_scene_smoke)
+    monkeypatch.setattr(
+        module,
+        "_post_and_record_api_response",
+        fake_post_and_record_api_response,
+    )
+
+    states_path = tmp_path / "visual_states.jsonl"
+    with states_path.open("w", encoding="utf-8") as states_file:
+        result = module._execute_local_smoke(
+            scenes=scenes,
+            payloads_by_scene={record["scene"]: record for record in records},
+            out=tmp_path,
+            camera="front",
+            config=SimpleNamespace(),
+            states_file=states_file,
+            case_names=module.REAL_MODEL_MEMORY_DEMO_CASES,
+            public_demo_frame_window=True,
+        )
+
+    expected_candidate_paths = [
+        person_scene_dir / f"img_{index:03d}.jpeg" for index in range(4)
+    ]
+    assert sent_paths == expected_candidate_paths
+    assert person_scene_dir / "img_004.jpeg" not in sent_paths
+    assert self_windows and self_windows[0]["anchor_frame"].endswith("img_000.jpeg")
+    assert scene_windows and scene_windows[0]["anchor_frame"].endswith("img_000.jpeg")
+    third_person = result["third_person_probe"]
+    assert third_person["status"] == "insufficient_sample"
+    assert third_person["reason"] == "target_unclear"
+    assert third_person["frame_relation"] == "failed"
+    assert third_person["selected_frame"] is None
+    assert third_person["frame_delta"] is None
+    assert third_person["candidate_frames"] == [
+        str(path) for path in expected_candidate_paths
     ]
 
 
@@ -2153,6 +2311,73 @@ def test_identify_current_payload_injects_latest_stream_ref() -> None:
     )
 
     assert payload["stream_ref"] == "ws_latest"
+
+
+def test_real_model_memory_demo_report_keeps_real_evidence_when_case_failed(
+    tmp_path: Path,
+) -> None:
+    report = module._real_model_memory_demo_report(
+        {
+            "ok": False,
+            "status": "failed",
+            "real_model_evidence": True,
+            "third_person_probe": {
+                "status": "insufficient_sample",
+                "passed": False,
+                "reason": "target_unclear",
+            },
+            "checks": [
+                {"name": "local_smoke_explicit_real_backends", "passed": True},
+                {"name": "third_person_local_probe", "passed": False},
+            ],
+        },
+        person_model_path=tmp_path / "runtime" / "models" / "face-buffalo-s",
+        scene_model_path=tmp_path / "runtime" / "models" / "scene-mobileclip2-s0",
+        pose_model_path=tmp_path / "runtime" / "models" / "yolov8n-pose.pt",
+    )
+
+    assert report["ok"] is False
+    assert report["status"] == "failed"
+    assert report["real_model_evidence"] is True
+    assert report["third_person_introduction"]["status"] == "insufficient_sample"
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["real_model_paths"]["passed"] is True
+    assert checks["third_person_pose_pointing_known_person"]["passed"] is False
+
+
+def test_real_model_memory_demo_report_rejects_failed_or_fake_real_evidence(
+    tmp_path: Path,
+) -> None:
+    model_paths = {
+        "person_model_path": tmp_path / "runtime" / "models" / "face-buffalo-s",
+        "scene_model_path": tmp_path / "runtime" / "models" / "scene-mobileclip2-s0",
+        "pose_model_path": tmp_path / "runtime" / "models" / "yolov8n-pose.pt",
+    }
+    failed_preflight = module._real_model_memory_demo_report(
+        {
+            "ok": False,
+            "status": "failed",
+            "real_model_evidence": True,
+            "checks": [
+                {"name": "local_smoke_explicit_real_backends", "passed": False}
+            ],
+        },
+        **model_paths,
+    )
+    fake_source = module._real_model_memory_demo_report(
+        {
+            "ok": False,
+            "status": "failed",
+            "real_model_evidence": False,
+            "checks": [
+                {"name": "local_smoke_explicit_real_backends", "passed": True}
+            ],
+        },
+        **model_paths,
+    )
+
+    assert failed_preflight["real_model_evidence"] is False
+    assert fake_source["real_model_evidence"] is False
 
 
 def test_local_smoke_report_fails_insufficient_third_person_without_models(

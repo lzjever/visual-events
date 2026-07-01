@@ -48,6 +48,13 @@ class EvidenceScene:
         return len(self.jpeg_paths)
 
 
+@dataclass(frozen=True)
+class OverlaySourceFrameSelection:
+    path: Path | None
+    status: str | None = None
+    reason: str | None = None
+
+
 def render_memory_teaching_evidence(
     *,
     artifact: Path,
@@ -83,7 +90,7 @@ def render_memory_teaching_evidence(
     render_failures = [
         item
         for item in visual_evidence_index
-        if item.get("status") in {"missing_source_frame", "image_not_generated"}
+        if item.get("status") in {"image_not_generated"}
     ]
     if render_failures:
         failures = ", ".join(
@@ -296,7 +303,13 @@ def build_artifact_visual_evidence_index(
             public_demo=public_demo,
         )
     )
-    items.append(_build_familiar_unknown_summary_item(report))
+    items.append(
+        _build_familiar_unknown_summary_item(
+            report,
+            artifact=artifact,
+            out=out,
+        )
+    )
     if public_demo:
         return items
     items.append(
@@ -398,13 +411,29 @@ def _build_self_visual_item(
     if not_present is not None:
         return not_present if include_not_present else None
 
-    source_path = _overlay_source_frame_path(scene, result, artifact=artifact)
-    if source_path is None or not source_path.is_file():
-        return _status_item(
+    source_selection = _select_overlay_source_frame(
+        scene,
+        result,
+        artifact=artifact,
+    )
+    source_path = source_selection.path
+    if source_selection.status is not None:
+        return _overlay_source_status_item(
             base,
-            "missing_source_frame",
-            "source frame not present",
-            source=result,
+            result=result,
+            artifact=artifact,
+            selection=source_selection,
+        ) if include_not_present else None
+    if source_path is None or not source_path.is_file():
+        return _overlay_source_status_item(
+            base,
+            result=result,
+            artifact=artifact,
+            selection=OverlaySourceFrameSelection(
+                path=None,
+                status="missing_source_frame",
+                reason="source frame not present",
+            ),
         ) if include_not_present else None
 
     event = _first_compact_event(result, "known_person_present")
@@ -454,8 +483,11 @@ def _build_self_visual_item(
         "face_bbox_xyxy": face_bbox_xyxy,
         "person_visual_evidence": "present" if person_visual_evidence else "fallback",
         "target_bbox_xyxy": source_bbox,
-        "selected_frame": _selected_frame_path(result),
-        "source_frame": str(source_path),
+        **_result_frame_fields(
+            result,
+            artifact=artifact,
+            overlay_source_path=source_path,
+        ),
     }
     boxes = (
         [
@@ -527,13 +559,29 @@ def _build_third_person_visual_item(
     if not_present is not None:
         return not_present if include_not_present else None
 
-    source_path = _overlay_source_frame_path(scene, result, artifact=artifact)
-    if source_path is None or not source_path.is_file():
-        return _status_item(
+    source_selection = _select_overlay_source_frame(
+        scene,
+        result,
+        artifact=artifact,
+    )
+    source_path = source_selection.path
+    if source_selection.status is not None:
+        return _overlay_source_status_item(
             base,
-            "missing_source_frame",
-            "source frame not present",
-            source=result,
+            result=result,
+            artifact=artifact,
+            selection=source_selection,
+        ) if include_not_present else None
+    if source_path is None or not source_path.is_file():
+        return _overlay_source_status_item(
+            base,
+            result=result,
+            artifact=artifact,
+            selection=OverlaySourceFrameSelection(
+                path=None,
+                status="missing_source_frame",
+                reason="source frame not present",
+            ),
         ) if include_not_present else None
 
     resolve_target = result.get("resolve_target") if isinstance(result.get("resolve_target"), dict) else {}
@@ -620,8 +668,11 @@ def _build_third_person_visual_item(
         "crop_preview_path": crop_preview,
         "face_detection": face_detection_status,
         "face_bbox_xyxy": face_bbox_xyxy,
-        "selected_frame": _selected_frame_path(result),
-        "source_frame": str(source_path),
+        **_result_frame_fields(
+            result,
+            artifact=artifact,
+            overlay_source_path=source_path,
+        ),
     }
 
     boxes = []
@@ -718,13 +769,29 @@ def _build_scene_visual_item(
     if not_present is not None:
         return not_present if include_not_present else None
 
-    source_path = _overlay_source_frame_path(scene, result, artifact=artifact)
-    if source_path is None or not source_path.is_file():
-        return _status_item(
+    source_selection = _select_overlay_source_frame(
+        scene,
+        result,
+        artifact=artifact,
+    )
+    source_path = source_selection.path
+    if source_selection.status is not None:
+        return _overlay_source_status_item(
             base,
-            "missing_source_frame",
-            "source frame not present",
-            source=result,
+            result=result,
+            artifact=artifact,
+            selection=source_selection,
+        ) if include_not_present else None
+    if source_path is None or not source_path.is_file():
+        return _overlay_source_status_item(
+            base,
+            result=result,
+            artifact=artifact,
+            selection=OverlaySourceFrameSelection(
+                path=None,
+                status="missing_source_frame",
+                reason="source frame not present",
+            ),
         ) if include_not_present else None
 
     event = _first_compact_event(result, "scene_activated")
@@ -740,8 +807,11 @@ def _build_scene_visual_item(
         "memory_match_id": evidence.get("memory_match_id"),
         "crop_hash": result.get("teach_crop_hash"),
         "crop_path_or_artifact_ref": result.get("teach_crop_path_or_artifact_ref"),
-        "selected_frame": _selected_frame_path(result),
-        "source_frame": str(source_path),
+        **_result_frame_fields(
+            result,
+            artifact=artifact,
+            overlay_source_path=source_path,
+        ),
     }
     ok = write_image_overlay(
         source_path=source_path,
@@ -787,13 +857,29 @@ def _build_object_visual_item(
     if not_present is not None:
         return not_present if include_not_present else None
 
-    source_path = _overlay_source_frame_path(scene, result, artifact=artifact)
-    if source_path is None or not source_path.is_file():
-        return _status_item(
+    source_selection = _select_overlay_source_frame(
+        scene,
+        result,
+        artifact=artifact,
+    )
+    source_path = source_selection.path
+    if source_selection.status is not None:
+        return _overlay_source_status_item(
             base,
-            "missing_source_frame",
-            "source frame not present",
-            source=result,
+            result=result,
+            artifact=artifact,
+            selection=source_selection,
+        ) if include_not_present else None
+    if source_path is None or not source_path.is_file():
+        return _overlay_source_status_item(
+            base,
+            result=result,
+            artifact=artifact,
+            selection=OverlaySourceFrameSelection(
+                path=None,
+                status="missing_source_frame",
+                reason="source frame not present",
+            ),
         ) if include_not_present else None
 
     resolve_target = result.get("resolve_target") if isinstance(result.get("resolve_target"), dict) else {}
@@ -807,7 +893,11 @@ def _build_object_visual_item(
         "status": resolve_target.get("status"),
         "error_code": resolve_target.get("error_code"),
         "store_delta_summary": store_delta_summary,
-        "source_frame": str(source_path),
+        **_result_frame_fields(
+            result,
+            artifact=artifact,
+            overlay_source_path=source_path,
+        ),
     }
     ok = write_image_overlay(
         source_path=source_path,
@@ -852,7 +942,12 @@ def _build_full_replay_summary_item(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_familiar_unknown_summary_item(report: dict[str, Any]) -> dict[str, Any]:
+def _build_familiar_unknown_summary_item(
+    report: dict[str, Any],
+    *,
+    artifact: Path,
+    out: Path,
+) -> dict[str, Any]:
     result = report.get("familiar_unknown")
     base = {
         "assertion_id": "familiar_unknown_present",
@@ -879,9 +974,50 @@ def _build_familiar_unknown_summary_item(report: dict[str, Any]) -> dict[str, An
     )
     if not isinstance(anonymous, dict):
         anonymous = {}
+    selected_frame = _selected_evidence_frame_path(result)
+    if selected_frame is None:
+        return _overlay_source_status_item(
+            base,
+            result=result,
+            artifact=artifact,
+            selection=OverlaySourceFrameSelection(
+                path=None,
+                status="missing_source_frame",
+                reason="selected evidence frame not recorded",
+            ),
+        )
+    selected_path = _resolve_report_path(artifact, selected_frame)
+    if not selected_path.is_file():
+        return _overlay_source_status_item(
+            base,
+            result=result,
+            artifact=artifact,
+            selection=OverlaySourceFrameSelection(
+                path=None,
+                status="missing_source_frame",
+                reason="selected evidence frame not present",
+            ),
+        )
+    representative_path = _copy_representative_frame(
+        out=out,
+        source_path=selected_path,
+        relative_path="visual-evidence/familiar-unknown-present.jpg",
+    )
+    if representative_path is None:
+        return _overlay_source_status_item(
+            base,
+            result=result,
+            artifact=artifact,
+            selection=OverlaySourceFrameSelection(
+                path=None,
+                status="image_not_generated",
+                reason="representative frame could not be copied",
+            ),
+        )
     return {
         **base,
         "status": "present",
+        "path": representative_path,
         "event_id": event.get("event_id"),
         "memory_match_id": evidence.get("memory_match_id"),
         "anonymous_id": result.get("anonymous_id") or anonymous.get("anonymous_id"),
@@ -890,7 +1026,11 @@ def _build_familiar_unknown_summary_item(report: dict[str, Any]) -> dict[str, An
         or anonymous.get("observed_duration_ms"),
         "familiar_score": result.get("familiar_score")
         or anonymous.get("familiar_score"),
-        "selected_frame": _selected_frame_path(result),
+        **_result_frame_fields(
+            result,
+            artifact=artifact,
+            overlay_source_path=selected_path,
+        ),
     }
 
 
@@ -1504,7 +1644,14 @@ def visual_evidence_items_html(
                 "familiar_score",
                 "source_text_path",
                 "source_image_path",
+                "reference_source_image",
+                "transcript_source_image",
                 "transcript_source",
+                "selected_evidence_frame",
+                "requested_overlay_source_frame",
+                "overlay_source_frame",
+                "frame_relation",
+                "frame_delta",
             )
             if item.get(key) is not None
         }
@@ -1665,7 +1812,21 @@ def _public_demo_visual_evidence_index(
         }
         path = item.get("path")
         if isinstance(path, str) and path:
+            row["path"] = path
             row["image"] = path
+        for key in (
+            "source_image_path",
+            "reference_source_image",
+            "transcript_source_image",
+            "selected_frame",
+            "selected_evidence_frame",
+            "requested_overlay_source_frame",
+            "overlay_source_frame",
+            "frame_relation",
+            "frame_delta",
+        ):
+            if item.get(key) is not None:
+                row[key] = item.get(key)
         metrics = {
             key: item.get(key)
             for key in (
@@ -1968,26 +2129,119 @@ def _status_item(
     }
 
 
-def _overlay_source_frame_path(
+def _select_overlay_source_frame(
     scene: Any,
     result: dict[str, Any],
     *,
     artifact: Path,
-) -> Path | None:
-    source_image_path = result.get("source_image_path")
-    if isinstance(source_image_path, str) and source_image_path:
-        source_path = _resolve_report_path(artifact, source_image_path)
-        if source_path.is_file():
-            return source_path
-    selected = _selected_frame_path(result)
+) -> OverlaySourceFrameSelection:
+    explicit_overlay = _first_path_value(result.get("overlay_source_frame"))
+    selected = _selected_evidence_frame_path(result)
     if selected:
         selected_path = _resolve_report_path(artifact, selected)
-        if selected_path.is_file():
-            return selected_path
+        if explicit_overlay and not _report_paths_same(
+            artifact,
+            explicit_overlay,
+            selected,
+        ):
+            return OverlaySourceFrameSelection(
+                path=None,
+                status="mismatched_overlay_source_frame",
+                reason=(
+                    "overlay_source_frame does not match selected evidence frame"
+                ),
+            )
+        if not selected_path.is_file():
+            return OverlaySourceFrameSelection(
+                path=None,
+                status="missing_source_frame",
+                reason="selected evidence frame not present",
+            )
+        return OverlaySourceFrameSelection(path=selected_path)
+
+    if _result_passed(result):
+        return OverlaySourceFrameSelection(
+            path=None,
+            status="missing_source_frame",
+            reason="selected evidence frame not recorded",
+        )
+
+    reference = _reference_source_image_path(result)
+    if reference:
+        reference_path = _resolve_report_path(artifact, reference)
+        if reference_path.is_file():
+            return OverlaySourceFrameSelection(path=reference_path)
     jpeg_paths = getattr(scene, "jpeg_paths", ())
     if jpeg_paths:
-        return Path(jpeg_paths[0])
-    return None
+        return OverlaySourceFrameSelection(path=Path(jpeg_paths[0]))
+    return OverlaySourceFrameSelection(
+        path=None,
+        status="missing_source_frame",
+        reason="source frame not present",
+    )
+
+
+def _overlay_source_status_item(
+    base: dict[str, Any],
+    *,
+    result: dict[str, Any],
+    artifact: Path,
+    selection: OverlaySourceFrameSelection,
+) -> dict[str, Any]:
+    return {
+        **_status_item(
+            base,
+            selection.status or "missing_source_frame",
+            selection.reason or "source frame not present",
+            source=result,
+        ),
+        **_result_frame_fields(
+            result,
+            artifact=artifact,
+            overlay_source_path=selection.path,
+        ),
+    }
+
+
+def _result_frame_fields(
+    result: dict[str, Any],
+    *,
+    artifact: Path,
+    overlay_source_path: Path | None,
+) -> dict[str, Any]:
+    selected_frame = _selected_frame_path(result)
+    selected_evidence_frame = _selected_evidence_frame_path(result)
+    reference_source_image = _reference_source_image_path(result)
+    requested_overlay_source_frame = _first_path_value(result.get("overlay_source_frame"))
+    overlay_source_frame = (
+        str(overlay_source_path)
+        if overlay_source_path is not None
+        else None
+    )
+    fields: dict[str, Any] = {
+        "selected_frame": selected_frame,
+        "selected_evidence_frame": selected_evidence_frame,
+        "overlay_source_frame": overlay_source_frame,
+        "source_frame": overlay_source_frame,
+    }
+    if requested_overlay_source_frame:
+        fields["requested_overlay_source_frame"] = requested_overlay_source_frame
+    if reference_source_image:
+        fields["reference_source_image"] = reference_source_image
+        fields["transcript_source_image"] = reference_source_image
+
+    frame_relation = _frame_relation(
+        result,
+        artifact=artifact,
+        reference_source_image=reference_source_image,
+        selected_evidence_frame=selected_evidence_frame,
+    )
+    if frame_relation is not None:
+        fields["frame_relation"] = frame_relation
+    frame_delta = result.get("frame_delta")
+    if frame_delta is not None:
+        fields["frame_delta"] = frame_delta
+    return fields
 
 
 def _payload_records_by_scene(
@@ -2015,13 +2269,35 @@ def _with_payload_source_fields(
 
 def _result_source_fields(record: dict[str, Any]) -> dict[str, Any]:
     fields: dict[str, Any] = {}
-    for key in ("source_text_path", "source_image_path", "transcript_text"):
+    for key in (
+        "source_text_path",
+        "source_image_path",
+        "transcript_source_image",
+        "transcript_text",
+    ):
         value = record.get(key)
         if isinstance(value, str) and value:
             fields[key] = value
+    if "transcript_source_image" in fields and "source_image_path" not in fields:
+        fields["source_image_path"] = fields["transcript_source_image"]
     if "source_text_path" in fields:
         fields["transcript_source"] = fields["source_text_path"]
     return fields
+
+
+def _reference_source_image_path(result: dict[str, Any]) -> str | None:
+    return _first_path_value(
+        result.get("reference_source_image"),
+        result.get("transcript_source_image"),
+        result.get("source_image_path"),
+    )
+
+
+def _selected_evidence_frame_path(result: dict[str, Any]) -> str | None:
+    return _first_path_value(
+        result.get("selected_evidence_frame"),
+        _selected_frame_path(result),
+    )
 
 
 def _selected_frame_path(result: dict[str, Any]) -> str | None:
@@ -2030,6 +2306,43 @@ def _selected_frame_path(result: dict[str, Any]) -> str | None:
         return None
     frame = selected_window.get("frame")
     return frame if isinstance(frame, str) and frame else None
+
+
+def _result_passed(result: dict[str, Any]) -> bool:
+    return result.get("passed") is True or result.get("status") == "passed"
+
+
+def _frame_relation(
+    result: dict[str, Any],
+    *,
+    artifact: Path,
+    reference_source_image: str | None,
+    selected_evidence_frame: str | None,
+) -> str | None:
+    recorded = result.get("frame_relation")
+    if isinstance(recorded, str) and recorded:
+        return recorded
+    if reference_source_image and selected_evidence_frame:
+        return (
+            "same"
+            if _report_paths_same(
+                artifact,
+                reference_source_image,
+                selected_evidence_frame,
+            )
+            else "different"
+        )
+    if reference_source_image and not selected_evidence_frame:
+        return "failed" if not _result_passed(result) else "reference_only"
+    if selected_evidence_frame and not reference_source_image:
+        return "no_reference"
+    return None
+
+
+def _report_paths_same(artifact: Path, left: str, right: str) -> bool:
+    return _resolve_report_path(artifact, left).resolve(strict=False) == (
+        _resolve_report_path(artifact, right).resolve(strict=False)
+    )
 
 
 def _first_compact_event(result: dict[str, Any], event_name: str) -> dict[str, Any]:
@@ -2245,6 +2558,21 @@ def _copy_crop_preview(
     suffix = source_path.suffix.lower()
     name = source_path.name if suffix in JPEG_SUFFIXES else fallback_name
     dest = Path(out) / "visual-evidence" / "crops" / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copyfile(source_path, dest)
+    except OSError:
+        return None
+    return str(dest.relative_to(out))
+
+
+def _copy_representative_frame(
+    *,
+    out: Path,
+    source_path: Path,
+    relative_path: str,
+) -> str | None:
+    dest = Path(out) / relative_path
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         shutil.copyfile(source_path, dest)

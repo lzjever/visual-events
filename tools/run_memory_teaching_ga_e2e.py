@@ -56,6 +56,7 @@ REAL_MODEL_MEMORY_DEMO_CASES = {
 FAMILIAR_UNKNOWN_SCENE = "pic_familiar_face"
 FAMILIAR_UNKNOWN_MAX_OBSERVATIONS = 13
 FAMILIAR_UNKNOWN_OBSERVATION_INTERVAL_MS = 1_500
+PUBLIC_DEMO_FRAME_WINDOW_RADIUS = 2
 PAYLOAD_FIXTURE_STREAM_REF = memory_e2e.PAYLOAD_FIXTURE_STREAM_REF
 
 JPEG_SUFFIXES = {".jpeg", ".jpg"}
@@ -677,6 +678,7 @@ def run_local_smoke(
     case_names: dict[str, str] | None = None,
     include_familiar_unknown: bool = False,
     familiar_unknown_scene: str = FAMILIAR_UNKNOWN_SCENE,
+    public_demo_frame_window: bool = False,
 ) -> dict[str, Any]:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -750,6 +752,7 @@ def run_local_smoke(
             case_names=case_names,
             include_familiar_unknown=include_familiar_unknown,
             familiar_unknown_scene=familiar_unknown_scene,
+            public_demo_frame_window=public_demo_frame_window,
         )
 
     api_response_records = list(execution.get("api_response_records") or [])
@@ -906,6 +909,7 @@ def run_real_model_memory_demo(
         case_names=REAL_MODEL_MEMORY_DEMO_CASES,
         include_familiar_unknown=True,
         familiar_unknown_scene=FAMILIAR_UNKNOWN_SCENE,
+        public_demo_frame_window=True,
     )
     report = _real_model_memory_demo_report(
         report,
@@ -930,8 +934,7 @@ def _real_model_memory_demo_report(
     pose_model_path: Path,
 ) -> dict[str, Any]:
     clean = dict(report)
-    source_ok = bool(clean.get("ok"))
-    source_real_model = clean.get("real_model_evidence") is True
+    source_real_model = _source_real_model_evidence_confirmed(clean)
     if "self_smoke" in clean:
         clean["self_introduction"] = clean.pop("self_smoke")
     if "scene_smoke" in clean:
@@ -945,7 +948,7 @@ def _real_model_memory_demo_report(
             "backend": "local",
             "embedding_backend": "local",
             "inference_backend": "ultralytics",
-            "real_model_evidence": source_ok and source_real_model,
+            "real_model_evidence": source_real_model,
             "models": {
                 "pose": str(pose_model_path),
                 "face": str(person_model_path),
@@ -966,6 +969,20 @@ def _real_model_memory_demo_report(
         }
     )
     return clean
+
+
+def _source_real_model_evidence_confirmed(report: dict[str, Any]) -> bool:
+    if report.get("real_model_evidence") is not True:
+        return False
+    checks = report.get("checks")
+    if not isinstance(checks, list):
+        return True
+    for item in checks:
+        if not isinstance(item, dict):
+            continue
+        if item.get("name") == "local_smoke_explicit_real_backends":
+            return item.get("passed") is True
+    return True
 
 
 def _real_model_memory_demo_checks(value: Any) -> list[dict[str, Any]]:
@@ -1179,6 +1196,7 @@ def _execute_local_smoke(
     case_names: dict[str, str] | None = None,
     include_familiar_unknown: bool = False,
     familiar_unknown_scene: str = FAMILIAR_UNKNOWN_SCENE,
+    public_demo_frame_window: bool = False,
 ) -> dict[str, Any]:
     api_response_records: list[dict[str, Any]] = []
     botified_frame_records: list[dict[str, Any]] = []
@@ -1190,6 +1208,11 @@ def _execute_local_smoke(
         self_result = _missing_teaching_scene_result("pic_teach_me")
         self_result["status"] = "failed"
     else:
+        self_window = (
+            _public_demo_candidate_frame_window(self_scene, self_record)
+            if public_demo_frame_window
+            else None
+        )
         self_result = _run_local_self_smoke(
             out=out,
             scene=self_scene,
@@ -1200,6 +1223,7 @@ def _execute_local_smoke(
             api_response_records=api_response_records,
             botified_frame_records=botified_frame_records,
             case=cases.get("self", "local-self-smoke"),
+            candidate_frame_window=self_window,
         )
 
     scene_scene = _find_scene(scenes, "pic_teach_scene_galbot")
@@ -1208,6 +1232,11 @@ def _execute_local_smoke(
         scene_result = _missing_teaching_scene_result("pic_teach_scene_galbot")
         scene_result["status"] = "failed"
     else:
+        scene_window = (
+            _public_demo_candidate_frame_window(scene_scene, scene_record)
+            if public_demo_frame_window
+            else None
+        )
         scene_result = _run_local_scene_smoke(
             out=out,
             scene=scene_scene,
@@ -1218,6 +1247,7 @@ def _execute_local_smoke(
             api_response_records=api_response_records,
             botified_frame_records=botified_frame_records,
             case=cases.get("scene", "local-scene-smoke"),
+            candidate_frame_window=scene_window,
         )
 
     third_scene = _find_scene(scenes, "pic_teach_person")
@@ -1230,6 +1260,11 @@ def _execute_local_smoke(
             )
         )
     else:
+        third_window = (
+            _public_demo_candidate_frame_window(third_scene, third_record)
+            if public_demo_frame_window
+            else None
+        )
         third_result = _run_local_third_person_probe(
             out=out,
             scene=third_scene,
@@ -1240,6 +1275,7 @@ def _execute_local_smoke(
             api_response_records=api_response_records,
             botified_frame_records=botified_frame_records,
             case=cases.get("third_person", "local-third-person-probe"),
+            candidate_frame_window=third_window,
         )
 
     result = {
@@ -1357,6 +1393,7 @@ def _run_local_familiar_unknown_demo(
         "required_seen_count": required_seen_count,
         "required_observed_duration_ms": required_observed_duration_ms,
         "selected_window": _selected_window(scene, source_frame),
+        **_no_user_input_frame_report_fields(source_frame),
         "events": memory_e2e.compact_events(all_events),
     }
 
@@ -1384,6 +1421,7 @@ def _run_local_self_smoke(
     api_response_records: list[dict[str, Any]],
     botified_frame_records: list[dict[str, Any]],
     case: str = "local-self-smoke",
+    candidate_frame_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     runner = LocalMemorySmokeRunner(
         case=case,
@@ -1391,13 +1429,22 @@ def _run_local_self_smoke(
         camera=camera,
         config=config,
     )
-    last_reason = "no_active_interaction_target"
+    source_frames = (
+        _public_demo_source_frames_from_window(candidate_frame_window)
+        if candidate_frame_window is not None
+        else _local_smoke_source_frames(scene)
+    )
+    last_reason = (
+        "no_public_demo_candidate_frames"
+        if candidate_frame_window is not None and not source_frames
+        else "no_active_interaction_target"
+    )
     last_probe: dict[str, Any] | None = None
     selected_frame: memory_e2e.SourceFrame | None = None
     selected_timestamp_ms: int | None = None
     teach: dict[str, Any] | None = None
     with runner.open_stream() as websocket:
-        for index, source_frame in enumerate(_local_smoke_source_frames(scene)):
+        for index, source_frame in enumerate(source_frames):
             timestamp_ms = 1_000 + (index * 400)
             state = runner.send(
                 websocket,
@@ -1445,6 +1492,7 @@ def _run_local_self_smoke(
                 "status": "failed",
                 "passed": False,
                 "reason": last_reason,
+                **_public_demo_frame_report_fields(candidate_frame_window, None),
                 "last_probe": last_probe,
             }
 
@@ -1487,6 +1535,7 @@ def _run_local_self_smoke(
             teach["body"],
         ),
         "selected_window": _selected_window(scene, selected_frame),
+        **_public_demo_frame_report_fields(candidate_frame_window, selected_frame),
         "last_probe": last_probe,
         "events": memory_e2e.compact_events(events),
     }
@@ -1503,6 +1552,7 @@ def _run_local_scene_smoke(
     api_response_records: list[dict[str, Any]],
     botified_frame_records: list[dict[str, Any]],
     case: str = "local-scene-smoke",
+    candidate_frame_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     runner = LocalMemorySmokeRunner(
         case=case,
@@ -1510,7 +1560,10 @@ def _run_local_scene_smoke(
         camera=camera,
         config=config,
     )
-    source_frame = _load_source_frame_from_scene(scene)
+    source_frame = _public_demo_anchor_source_frame(
+        scene,
+        candidate_frame_window=candidate_frame_window,
+    )
     with runner.open_stream() as websocket:
         state = runner.send(
             websocket,
@@ -1533,6 +1586,10 @@ def _run_local_scene_smoke(
                 "status": "failed",
                 "passed": False,
                 "reason": _response_reason(teach["body"]),
+                **_public_demo_frame_report_fields(
+                    candidate_frame_window,
+                    source_frame,
+                ),
                 "last_probe": _probe_from_state_and_snapshot(
                     state,
                     runner.session_factory.last_snapshot,
@@ -1576,6 +1633,7 @@ def _run_local_scene_smoke(
             teach["body"],
         ),
         "selected_window": _selected_window(scene, source_frame),
+        **_public_demo_frame_report_fields(candidate_frame_window, source_frame),
         "events": memory_e2e.compact_events(events),
     }
 
@@ -1591,6 +1649,7 @@ def _run_local_third_person_probe(
     api_response_records: list[dict[str, Any]],
     botified_frame_records: list[dict[str, Any]] | None = None,
     case: str = "local-third-person-probe",
+    candidate_frame_window: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     runner = LocalMemorySmokeRunner(
         case=case,
@@ -1599,10 +1658,19 @@ def _run_local_third_person_probe(
         config=config,
     )
     observations: list[dict[str, Any]] = []
-    last_reason = "no_active_interaction_target"
+    source_frames = (
+        _public_demo_source_frames_from_window(candidate_frame_window)
+        if candidate_frame_window is not None
+        else list(_local_third_person_source_frames(scene))
+    )
+    last_reason = (
+        "no_public_demo_candidate_frames"
+        if candidate_frame_window is not None and not source_frames
+        else "no_active_interaction_target"
+    )
     invalid_resolve: dict[str, Any] | None = None
     with runner.open_stream() as websocket:
-        for index, source_frame in enumerate(_local_third_person_source_frames(scene)):
+        for index, source_frame in enumerate(source_frames):
             timestamp_ms = 1_000 + (index * 400)
             state = runner.send(
                 websocket,
@@ -1664,6 +1732,10 @@ def _run_local_third_person_probe(
                         **_teach_person_report_fields(teach),
                         "pose_pointing_scoring": pose_pointing_scoring,
                         "selected_window": _selected_window(scene, source_frame),
+                        **_public_demo_frame_report_fields(
+                            candidate_frame_window,
+                            source_frame,
+                        ),
                         "events": [],
                         "observations": observations,
                     }
@@ -1762,6 +1834,10 @@ def _run_local_third_person_probe(
                         bounded_multi_person_recognition
                     ),
                     "selected_window": _selected_window(scene, source_frame),
+                    **_public_demo_frame_report_fields(
+                        candidate_frame_window,
+                        source_frame,
+                    ),
                     "events": memory_e2e.compact_events(events),
                     "observations": observations,
                 }
@@ -1780,6 +1856,7 @@ def _run_local_third_person_probe(
                 else {}
             ),
             "selected_window": None,
+            **_public_demo_frame_report_fields(candidate_frame_window, None),
             "events": [],
             "observations": observations,
         }
@@ -1895,6 +1972,150 @@ def _local_third_person_source_frames(
 ) -> Iterator[memory_e2e.SourceFrame]:
     for path in scene.jpeg_paths:
         yield _load_source_frame(path)
+
+
+def _public_demo_candidate_frame_window(
+    scene: SceneDir,
+    record: dict[str, Any],
+    *,
+    radius: int = PUBLIC_DEMO_FRAME_WINDOW_RADIUS,
+) -> dict[str, Any]:
+    source_image_path = record.get("source_image_path")
+    anchor_path = Path(source_image_path) if isinstance(source_image_path, str) else None
+    jpeg_paths = list(scene.jpeg_paths)
+    try:
+        anchor_index = jpeg_paths.index(anchor_path) if anchor_path is not None else None
+    except ValueError:
+        anchor_index = None
+    if anchor_index is None:
+        return {
+            "anchor_frame": str(anchor_path) if anchor_path is not None else None,
+            "anchor_frame_index": None,
+            "candidate_frames": [],
+            "candidate_frame_indices": [],
+            "frame_window_radius": radius,
+            "frame_window_error": "anchor_frame_not_in_scene",
+        }
+    start = max(0, anchor_index - radius)
+    end = min(len(jpeg_paths), anchor_index + radius + 1)
+    candidate_indices = list(range(start, end))
+    return {
+        "anchor_frame": str(jpeg_paths[anchor_index]),
+        "anchor_frame_index": anchor_index,
+        "candidate_frames": [str(jpeg_paths[index]) for index in candidate_indices],
+        "candidate_frame_indices": candidate_indices,
+        "frame_window_radius": radius,
+    }
+
+
+def _public_demo_source_frames_from_window(
+    candidate_frame_window: dict[str, Any],
+) -> list[memory_e2e.SourceFrame]:
+    candidate_frames = candidate_frame_window.get("candidate_frames")
+    if not isinstance(candidate_frames, list):
+        return []
+    source_frames: list[memory_e2e.SourceFrame] = []
+    for value in candidate_frames:
+        if isinstance(value, str) and value:
+            source_frames.append(_load_source_frame(Path(value)))
+    return source_frames
+
+
+def _public_demo_anchor_source_frame(
+    scene: SceneDir,
+    *,
+    candidate_frame_window: dict[str, Any] | None,
+) -> memory_e2e.SourceFrame:
+    if candidate_frame_window is not None:
+        anchor_frame = candidate_frame_window.get("anchor_frame")
+        if isinstance(anchor_frame, str) and anchor_frame:
+            return _load_source_frame(Path(anchor_frame))
+    return _load_source_frame_from_scene(scene)
+
+
+def _public_demo_frame_report_fields(
+    candidate_frame_window: dict[str, Any] | None,
+    selected_frame: memory_e2e.SourceFrame | None,
+) -> dict[str, Any]:
+    if candidate_frame_window is None:
+        return {}
+    candidate_frames = _string_list(candidate_frame_window.get("candidate_frames"))
+    candidate_indices = _int_list(candidate_frame_window.get("candidate_frame_indices"))
+    selected_frame_path = str(selected_frame.path) if selected_frame is not None else None
+    selected_frame_index = _selected_frame_index(
+        selected_frame_path,
+        candidate_frames=candidate_frames,
+        candidate_indices=candidate_indices,
+    )
+    anchor_frame_index = candidate_frame_window.get("anchor_frame_index")
+    frame_delta = (
+        selected_frame_index - anchor_frame_index
+        if isinstance(selected_frame_index, int)
+        and isinstance(anchor_frame_index, int)
+        else None
+    )
+    if selected_frame_path is None:
+        frame_relation = "failed"
+    elif frame_delta == 0:
+        frame_relation = "same"
+    else:
+        frame_relation = "nearby"
+    fields = {
+        "anchor_frame": candidate_frame_window.get("anchor_frame"),
+        "anchor_frame_index": anchor_frame_index,
+        "candidate_frames": candidate_frames,
+        "candidate_frame_indices": candidate_indices,
+        "selected_frame": selected_frame_path,
+        "frame_delta": frame_delta,
+        "frame_relation": frame_relation,
+        "frame_window_radius": candidate_frame_window.get("frame_window_radius"),
+    }
+    if candidate_frame_window.get("frame_window_error"):
+        fields["frame_window_error"] = candidate_frame_window["frame_window_error"]
+    return fields
+
+
+def _no_user_input_frame_report_fields(
+    source_frame: memory_e2e.SourceFrame,
+) -> dict[str, Any]:
+    return {
+        "anchor_frame": None,
+        "anchor_frame_index": None,
+        "candidate_frames": [str(source_frame.path)],
+        "candidate_frame_indices": [],
+        "selected_frame": str(source_frame.path),
+        "frame_delta": None,
+        "frame_relation": "no_user_input",
+    }
+
+
+def _selected_frame_index(
+    selected_frame_path: str | None,
+    *,
+    candidate_frames: list[str],
+    candidate_indices: list[int],
+) -> int | None:
+    if selected_frame_path is None:
+        return None
+    try:
+        offset = candidate_frames.index(selected_frame_path)
+    except ValueError:
+        return None
+    if offset >= len(candidate_indices):
+        return None
+    return candidate_indices[offset]
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, int)]
 
 
 def _load_source_frame(path: Path) -> memory_e2e.SourceFrame:
@@ -2842,10 +3063,11 @@ def _run_actual_self_introduction(
     api_response_records: list[dict[str, Any]],
     botified_frame_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    source_frame = _load_source_frame_from_record(record, scene=scene)
     runner = _actual_runner(
         case="ga-self-introduction",
         out=out,
-        source_frame=_load_source_frame_from_record(record, scene=scene),
+        source_frame=source_frame,
         camera=camera,
     )
     _attach_cli_botified_projection_recorder(runner, botified_frame_records)
@@ -2890,6 +3112,7 @@ def _run_actual_self_introduction(
         "teach_crop_path_or_artifact_ref": _teach_crop_path_or_artifact_ref(
             teach["body"],
         ),
+        "selected_window": _selected_window(scene, source_frame),
         "events": memory_e2e.compact_events(events),
     }
 
@@ -2904,10 +3127,11 @@ def _run_actual_third_person_introduction(
     api_response_records: list[dict[str, Any]],
     botified_frame_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    source_frame = _load_source_frame_from_record(record, scene=scene)
     runner = _actual_runner(
         case="ga-third-person-introduction",
         out=out,
-        source_frame=_load_source_frame_from_record(record, scene=scene),
+        source_frame=source_frame,
         camera=camera,
     )
     _attach_cli_botified_projection_recorder(runner, botified_frame_records)
@@ -3047,6 +3271,7 @@ def _run_actual_third_person_introduction(
         "stored_crop_hash": stored_crop_hash,
         "stored_crop_path_or_artifact_ref": stored_crop_path_or_artifact_ref,
         "bounded_multi_person_recognition": bounded_multi_person_recognition,
+        "selected_window": _selected_window(scene, source_frame),
         "b_positive_replay": b_positive_replay,
         "a_only_negative_replay": a_only_negative_replay,
         "events": b_positive_replay["events"],
@@ -3116,10 +3341,11 @@ def _run_actual_teach_scene(
     api_response_records: list[dict[str, Any]],
     botified_frame_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    source_frame = _load_source_frame_from_record(record, scene=scene)
     runner = _actual_runner(
         case="ga-teach-scene",
         out=out,
-        source_frame=_load_source_frame_from_record(record, scene=scene),
+        source_frame=source_frame,
         camera=camera,
     )
     _attach_cli_botified_projection_recorder(runner, botified_frame_records)
@@ -3163,6 +3389,7 @@ def _run_actual_teach_scene(
         "teach_crop_path_or_artifact_ref": _teach_crop_path_or_artifact_ref(
             teach["body"],
         ),
+        "selected_window": _selected_window(scene, source_frame),
         "events": memory_e2e.compact_events(events),
     }
 
@@ -3176,10 +3403,11 @@ def _run_actual_object_negative(
     states_file: Any,
     api_response_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    source_frame = _load_source_frame_from_record(record, scene=scene)
     runner = _actual_runner(
         case="ga-object-negative",
         out=out,
-        source_frame=_load_source_frame_from_record(record, scene=scene),
+        source_frame=source_frame,
         camera=camera,
     )
     store = runner.client.app.state.memory_service.store
@@ -3217,6 +3445,7 @@ def _run_actual_object_negative(
         "resolve_target": body,
         "store_delta": store_delta,
         "store_delta_source": memory_e2e._memory_store_delta_source(),
+        "selected_window": _selected_window(scene, source_frame),
     }
 
 

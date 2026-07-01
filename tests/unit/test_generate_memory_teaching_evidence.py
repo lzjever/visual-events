@@ -485,6 +485,106 @@ def test_public_renderer_uses_demo_rows_without_internal_debug(
         assert forbidden_text not in public_text
 
 
+def test_public_renderer_shows_familiar_unknown_representative_frame(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    frame_paths = _write_artifact(artifact)
+    report_path = artifact / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["familiar_unknown"] = {
+        "status": "passed",
+        "passed": True,
+        "selected_window": {
+            "scene": memory_teaching_evidence.FAMILIAR_UNKNOWN_SCENE,
+            "frame": str(frame_paths["pic_teach_person"]),
+        },
+        "seen_count": 3,
+        "observed_duration_ms": 4200,
+        "familiar_score": 0.87,
+        "events": [
+            {
+                "event": "familiar_unknown_present",
+                "event_id": "evt_familiar",
+                "evidence": {"memory_match_id": "match_familiar"},
+                "memory_context": {
+                    "anonymous_person": {
+                        "anonymous_id": "anon_familiar",
+                        "seen_count": 3,
+                    }
+                },
+            }
+        ],
+    }
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    out = tmp_path / "public"
+
+    summary = memory_teaching_evidence.render_memory_teaching_evidence(
+        artifact=artifact,
+        out=out,
+        public_demo=True,
+    )
+
+    public_index = summary["visual_evidence_index"]
+    familiar_item = {
+        item["id"]: item for item in public_index
+    }["familiar_unknown"]
+    assert familiar_item["path"] == "visual-evidence/familiar-unknown-present.jpg"
+    assert familiar_item["image"] == "visual-evidence/familiar-unknown-present.jpg"
+    assert familiar_item["selected_evidence_frame"] == str(
+        frame_paths["pic_teach_person"]
+    )
+    _assert_image_verifies(out / familiar_item["image"])
+    visual_html = (out / "visual-evidence" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "匿名熟客出现" in visual_html
+    assert "familiar-unknown-present.jpg" in visual_html
+    assert '<img class="thumb"' in visual_html
+
+
+def test_offline_renderer_marks_familiar_unknown_missing_frame_without_image(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    _write_artifact(artifact)
+    missing_frame = tmp_path / "missing-familiar.jpeg"
+    report_path = artifact / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["familiar_unknown"] = {
+        "status": "passed",
+        "passed": True,
+        "selected_window": {
+            "scene": memory_teaching_evidence.FAMILIAR_UNKNOWN_SCENE,
+            "frame": str(missing_frame),
+        },
+        "seen_count": 3,
+        "events": [{"event": "familiar_unknown_present"}],
+    }
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    out = tmp_path / "evidence"
+
+    exit_code = module.main(["--artifact", str(artifact), "--out", str(out)])
+
+    assert exit_code == 0
+    index = json.loads(
+        (out / "visual_evidence_index.json").read_text(encoding="utf-8")
+    )
+    familiar_item = {
+        item["assertion_id"]: item for item in index
+    }["familiar_unknown_present"]
+    assert familiar_item["status"] == "missing_source_frame"
+    assert familiar_item["path"] is None
+    assert familiar_item["selected_evidence_frame"] == str(missing_frame)
+    assert not (out / "visual-evidence" / "familiar-unknown-present.jpg").exists()
+
+
 def test_public_renderer_uses_product_friendly_overlay_labels(
     tmp_path: Path,
     monkeypatch,
@@ -656,8 +756,9 @@ def test_offline_renderer_separates_transcript_templates_from_actual_posts(
     assert "not_found" in visual_html
 
 
-def test_offline_renderer_prefers_payload_source_image_over_scene_first_frame(
+def test_offline_renderer_uses_selected_evidence_frame_for_overlay_and_keeps_reference_image(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     artifact = tmp_path / "artifact"
     frame_paths = _write_artifact(artifact)
@@ -683,6 +784,20 @@ def test_offline_renderer_prefers_payload_source_image_over_scene_first_frame(
         json.dumps({"schema_version": 1, "payloads": [payload_record]}),
         encoding="utf-8",
     )
+    overlay_calls: list[dict[str, Any]] = []
+
+    def fake_write_image_overlay(**kwargs: Any) -> bool:
+        overlay_calls.append(kwargs)
+        output_path = kwargs["output_path"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(_valid_jpeg_bytes())
+        return True
+
+    monkeypatch.setattr(
+        memory_teaching_evidence,
+        "write_image_overlay",
+        fake_write_image_overlay,
+    )
 
     out = tmp_path / "evidence"
     exit_code = module.main(["--artifact", str(artifact), "--out", str(out)])
@@ -694,25 +809,213 @@ def test_offline_renderer_prefers_payload_source_image_over_scene_first_frame(
     scene_item = {
         item["assertion_id"]: item for item in index
     }["teach_scene_scene_activated"]
-    assert scene_item["source_frame"] == str(source_image)
+    assert scene_item["source_frame"] == str(frame_paths["pic_teach_scene_galbot"])
+    assert scene_item["overlay_source_frame"] == str(
+        frame_paths["pic_teach_scene_galbot"]
+    )
     assert scene_item["selected_frame"] == str(
         frame_paths["pic_teach_scene_galbot"]
     )
+    assert scene_item["selected_evidence_frame"] == str(
+        frame_paths["pic_teach_scene_galbot"]
+    )
     assert scene_item["source_image_path"] == str(source_image)
+    assert scene_item["reference_source_image"] == str(source_image)
+    assert scene_item["transcript_source_image"] == str(source_image)
     assert scene_item["source_text_path"] == str(source_text)
     assert scene_item["transcript_source"] == str(source_text)
-    bottom_pixel = _pixel_rgb(
-        out / "visual-evidence" / "teach-scene-scene-activated.jpg",
-        (20, 170),
+    assert scene_item["frame_relation"] == "different"
+    scene_call = next(
+        call
+        for call in overlay_calls
+        if call["output_path"].name == "teach-scene-scene-activated.jpg"
     )
-    assert bottom_pixel[2] > 150
-    assert bottom_pixel[0] < 80
+    assert scene_call["source_path"] == frame_paths["pic_teach_scene_galbot"]
 
     visual_html = (out / "visual-evidence" / "index.html").read_text(
         encoding="utf-8"
     )
     assert str(source_text) in visual_html
     assert "source_text_path" in visual_html
+
+
+def test_offline_renderer_does_not_fallback_for_success_without_evidence_frame(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact = tmp_path / "artifact"
+    frame_paths = _write_artifact(artifact)
+    reference_image = frame_paths["pic_teach_me"].parent / "teach.jpeg"
+    reference_image.write_bytes(_valid_jpeg_bytes((12, 34, 210)))
+
+    report_path = artifact / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["self_smoke"]["selected_window"] = {"scene": "pic_teach_me"}
+    report["self_smoke"]["source_image_path"] = str(reference_image)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    overlay_calls: list[dict[str, Any]] = []
+
+    def fake_write_image_overlay(**kwargs: Any) -> bool:
+        overlay_calls.append(kwargs)
+        output_path = kwargs["output_path"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(_valid_jpeg_bytes())
+        return True
+
+    monkeypatch.setattr(
+        memory_teaching_evidence,
+        "write_image_overlay",
+        fake_write_image_overlay,
+    )
+
+    exit_code = module.main(
+        ["--artifact", str(artifact), "--out", str(tmp_path / "out")]
+    )
+
+    assert exit_code == 0
+    assert all(
+        call["output_path"].name != "self-introduction-known-person.jpg"
+        for call in overlay_calls
+    )
+    index = json.loads(
+        (tmp_path / "out" / "visual_evidence_index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    item = {
+        item["assertion_id"]: item for item in index
+    }["self_introduction_known_person"]
+    assert item["status"] == "missing_source_frame"
+    assert item["selected_evidence_frame"] is None
+    assert item["source_frame"] is None
+    assert item["overlay_source_frame"] is None
+    assert item["reference_source_image"] == str(reference_image)
+    assert item["path"] is None
+
+
+def test_offline_renderer_rejects_mismatched_explicit_overlay_source_frame(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact = tmp_path / "artifact"
+    frame_paths = _write_artifact(artifact)
+    scene_dir = frame_paths["pic_teach_person"].parent
+    reference_image = scene_dir / "teach.jpeg"
+    explicit_overlay = scene_dir / "overlay.jpeg"
+    reference_image.write_bytes(_valid_jpeg_bytes((12, 34, 210)))
+    explicit_overlay.write_bytes(_valid_jpeg_bytes((210, 180, 40)))
+
+    report_path = artifact / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["third_person_probe"]["overlay_source_frame"] = str(explicit_overlay)
+    report["third_person_probe"]["source_image_path"] = str(reference_image)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    overlay_calls: list[dict[str, Any]] = []
+
+    def fake_write_image_overlay(**kwargs: Any) -> bool:
+        overlay_calls.append(kwargs)
+        output_path = kwargs["output_path"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(_valid_jpeg_bytes())
+        return True
+
+    monkeypatch.setattr(
+        memory_teaching_evidence,
+        "write_image_overlay",
+        fake_write_image_overlay,
+    )
+
+    exit_code = module.main(
+        ["--artifact", str(artifact), "--out", str(tmp_path / "out")]
+    )
+
+    assert exit_code == 0
+    assert all(
+        call["output_path"].name != "third-person-pose-pointing.jpg"
+        for call in overlay_calls
+    )
+    index = json.loads(
+        (tmp_path / "out" / "visual_evidence_index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    item = {
+        item["assertion_id"]: item for item in index
+    }["third_person_pose_pointing"]
+    assert item["status"] == "mismatched_overlay_source_frame"
+    assert item["source_frame"] is None
+    assert item["overlay_source_frame"] is None
+    assert item["requested_overlay_source_frame"] == str(explicit_overlay)
+    assert item["selected_evidence_frame"] == str(frame_paths["pic_teach_person"])
+    assert item["reference_source_image"] == str(reference_image)
+    assert item["path"] is None
+    assert "does not match selected evidence frame" in item["reason"]
+
+
+def test_offline_renderer_accepts_matching_explicit_overlay_source_frame(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact = tmp_path / "artifact"
+    frame_paths = _write_artifact(artifact)
+    reference_image = frame_paths["pic_teach_person"].parent / "teach.jpeg"
+    reference_image.write_bytes(_valid_jpeg_bytes((12, 34, 210)))
+
+    report_path = artifact / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["third_person_probe"]["overlay_source_frame"] = str(
+        frame_paths["pic_teach_person"]
+    )
+    report["third_person_probe"]["source_image_path"] = str(reference_image)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    overlay_calls: list[dict[str, Any]] = []
+
+    def fake_write_image_overlay(**kwargs: Any) -> bool:
+        overlay_calls.append(kwargs)
+        output_path = kwargs["output_path"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(_valid_jpeg_bytes())
+        return True
+
+    monkeypatch.setattr(
+        memory_teaching_evidence,
+        "write_image_overlay",
+        fake_write_image_overlay,
+    )
+
+    exit_code = module.main(
+        ["--artifact", str(artifact), "--out", str(tmp_path / "out")]
+    )
+
+    assert exit_code == 0
+    third_call = next(
+        call
+        for call in overlay_calls
+        if call["output_path"].name == "third-person-pose-pointing.jpg"
+    )
+    assert third_call["source_path"] == frame_paths["pic_teach_person"]
+    index = json.loads(
+        (tmp_path / "out" / "visual_evidence_index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    item = {
+        item["assertion_id"]: item for item in index
+    }["third_person_pose_pointing"]
+    assert item["status"] == "present"
+    assert item["source_frame"] == str(frame_paths["pic_teach_person"])
+    assert item["overlay_source_frame"] == str(frame_paths["pic_teach_person"])
+    assert item["selected_evidence_frame"] == str(frame_paths["pic_teach_person"])
+    assert item["reference_source_image"] == str(reference_image)
 
 
 def test_offline_renderer_summarizes_identity_sidecars(
