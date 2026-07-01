@@ -31,6 +31,18 @@ IDENTITY_STATUS_PRIORITY = {
     "unknown": 2,
     "pending": 1,
 }
+OVERLAY_CJK_FONT_PATHS = (
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/arphic/ukai.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+)
+OVERLAY_ASCII_FONT_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+)
 
 
 class MemoryTeachingEvidenceError(RuntimeError):
@@ -308,6 +320,7 @@ def build_artifact_visual_evidence_index(
             report,
             artifact=artifact,
             out=out,
+            public_demo=public_demo,
         )
     )
     if public_demo:
@@ -555,9 +568,14 @@ def _build_third_person_visual_item(
         "scene": "pic_teach_person",
         "report_section": report_section,
     }
-    not_present = _not_present_item(base, result=result, scene=scene)
-    if not_present is not None:
-        return not_present if include_not_present else None
+    if not result:
+        missing_source = _missing_scene_or_result_item(
+            base,
+            result=result,
+            scene=scene,
+        )
+        return missing_source if include_not_present else None
+    result_passed = _result_passed(result)
 
     source_selection = _select_overlay_source_frame(
         scene,
@@ -584,14 +602,25 @@ def _build_third_person_visual_item(
             ),
         ) if include_not_present else None
 
-    resolve_target = result.get("resolve_target") if isinstance(result.get("resolve_target"), dict) else {}
+    resolve_target = _resolve_target_body_for_result(
+        result,
+        artifact=artifact,
+        scene_name="pic_teach_person",
+    )
     resolve_evidence = response_evidence(resolve_target)
     pose_visual_evidence = _find_nested_dict(result, "pose_visual_evidence")
+    if pose_visual_evidence is None:
+        pose_visual_evidence = _find_nested_dict(resolve_target, "pose_visual_evidence")
     person_visual_evidence = _find_nested_dict(result, "person_visual_evidence")
-    target_bbox_xyxy = _bbox_from_visual_evidence(
-        pose_visual_evidence,
-        "target_bbox_xyxy",
-    ) or _first_resolve_candidate_bbox(resolve_target)
+    target_bbox_xyxy = (
+        _bbox_from_visual_evidence(
+            pose_visual_evidence,
+            "target_bbox_xyxy",
+        )
+        or _first_resolve_candidate_bbox(resolve_target)
+        if result_passed
+        else None
+    )
     introducer_bbox_xyxy = _bbox_from_visual_evidence(
         pose_visual_evidence,
         "introducer_bbox_xyxy",
@@ -604,13 +633,20 @@ def _build_third_person_visual_item(
     )
     if not isinstance(pose_stability_window, dict):
         pose_stability_window = {}
-    scoring = result.get("pose_pointing_scoring") if isinstance(result.get("pose_pointing_scoring"), dict) else {}
+    scoring = (
+        result.get("pose_pointing_scoring")
+        if isinstance(result.get("pose_pointing_scoring"), dict)
+        else {}
+    )
+    scoring_source = (
+        pose_visual_evidence if isinstance(pose_visual_evidence, dict) else scoring
+    )
     candidate_score = _candidate_score_for_target(
-        pose_visual_evidence if isinstance(pose_visual_evidence, dict) else scoring,
+        scoring_source,
         _track_id_from_ref(result.get("resolver_target_ref")),
     )
     candidate_metrics = _candidate_metrics_for_target(
-        pose_visual_evidence if isinstance(pose_visual_evidence, dict) else scoring,
+        scoring_source,
         _track_id_from_ref(result.get("resolver_target_ref")),
     )
     crop_source = _first_path_value(
@@ -637,12 +673,33 @@ def _build_third_person_visual_item(
     )
     face_detection_status = "recorded" if face_detection else "not_recorded"
     face_bbox_xyxy = _face_bbox_source_frame(person_visual_evidence)
+    candidate_boxes = _resolve_candidate_boxes(
+        resolve_target,
+        scoring=scoring_source,
+        public_demo=public_demo,
+    )
+    arrows = _pose_arrows(pose_visual_evidence)
+    points = _pose_points(pose_visual_evidence)
     item = {
         **base,
         **_result_source_fields(result),
         "kind": "image_overlay",
-        "status": "present",
-        "path": "visual-evidence/third-person-pose-pointing.jpg",
+        "status": "present" if result_passed else "failed",
+        "path": (
+            "visual-evidence/third-person-pose-pointing.jpg"
+            if result_passed
+            else "visual-evidence/third-person-pose-pointing-failure.jpg"
+        ),
+        "public_summary": (
+            "根据第三人称指向选择被介绍的人并完成记忆。"
+            if result_passed
+            else "目标不明确，未绑定第三人称人物记忆。"
+        ),
+        "failure_reason": (
+            None
+            if result_passed
+            else _third_person_failure_reason(result, resolve_target=resolve_target)
+        ),
         "resolver_target_ref": result.get("resolver_target_ref")
         or (pose_visual_evidence or {}).get("target_ref"),
         "introducer_ref": result.get("introducer_ref")
@@ -660,9 +717,16 @@ def _build_third_person_visual_item(
         "candidate_score": candidate_score,
         "ray_intersects_bbox": candidate_metrics.get("ray_intersects_bbox"),
         "perpendicular_distance": candidate_metrics.get("perpendicular_distance"),
+        "candidate_count": _resolve_candidate_count(resolve_target, scoring_source),
+        "candidate_box_available": bool(candidate_boxes),
+        "ray_evidence_available": bool(arrows),
         "target_bbox_xyxy": target_bbox_xyxy,
         "introducer_bbox_xyxy": introducer_bbox_xyxy,
-        "arm_side": (pose_visual_evidence or {}).get("arm_side") if isinstance(pose_visual_evidence, dict) else None,
+        "arm_side": (
+            (pose_visual_evidence or {}).get("arm_side")
+            if isinstance(pose_visual_evidence, dict)
+            else None
+        ),
         "crop_hash": result.get("stored_crop_hash"),
         "crop_path_or_artifact_ref": result.get("stored_crop_path_or_artifact_ref"),
         "crop_preview_path": crop_preview,
@@ -700,6 +764,8 @@ def _build_third_person_visual_item(
                 "color": (90, 220, 120),
             }
         )
+    if not result_passed:
+        boxes.extend(candidate_boxes)
     if face_bbox_xyxy is not None:
         boxes.append(
             {
@@ -708,30 +774,70 @@ def _build_third_person_visual_item(
                 "color": (255, 120, 220),
             }
         )
-    arrows = _pose_arrows(pose_visual_evidence)
-    points = _pose_points(pose_visual_evidence)
     ok = write_image_overlay(
         source_path=source_path,
         output_path=Path(out) / item["path"],
         title=(
-            "Third-person pointing evidence"
+            (
+                "第三人称指向未绑定"
+                if not result_passed
+                else "Third-person pointing evidence"
+            )
             if public_demo
-            else "Third-person pose pointing"
+            else (
+                "Third-person pose pointing failure"
+                if not result_passed
+                else "Third-person pose pointing"
+            )
         ),
         lines=(
             [
-                "pointing evidence: present",
-                "target: selected",
-                "introducer: present",
-                f"score: {_short_text(candidate_score)}",
-                f"arm: {_short_text(item.get('arm_side'))}",
-                f"face: {face_detection_status}",
+                (
+                    "未绑定：画面中候选目标不唯一"
+                    if not result_passed
+                    else "pointing evidence: present"
+                ),
+                (
+                    f"候选窗口：{_candidate_frame_count(result)} 帧"
+                    if not result_passed
+                    else "target: selected"
+                ),
+                (
+                    "原因："
+                    + _third_person_failure_reason(
+                        result,
+                        resolve_target=resolve_target,
+                    )
+                    if not result_passed
+                    else "introducer: present"
+                ),
+                (
+                    "没有写入第三人称人物记忆"
+                    if not result_passed
+                    else f"score: {_short_text(candidate_score)}"
+                ),
+                "" if not result_passed else f"arm: {_short_text(item.get('arm_side'))}",
+                "" if not result_passed else f"face: {face_detection_status}",
             ]
             if public_demo
             else [
-                f"target: {_short_text(item.get('resolver_target_ref'))}",
+                (
+                    f"target: {_short_text(item.get('resolver_target_ref'))}"
+                    if result_passed
+                    else "target: not bound"
+                ),
                 f"introducer: {_short_text(item.get('introducer_ref'))}",
-                f"candidate_score: {_short_text(candidate_score)}",
+                (
+                    f"candidate_score: {_short_text(candidate_score)}"
+                    if result_passed
+                    else (
+                        "reason: "
+                        + _third_person_failure_reason(
+                            result,
+                            resolve_target=resolve_target,
+                        )
+                    )
+                ),
                 f"arm_side: {_short_text(item.get('arm_side'))}",
                 f"crop_hash: {_short_text(item.get('crop_hash'))}",
                 f"face_detection: {face_detection_status}",
@@ -947,6 +1053,7 @@ def _build_familiar_unknown_summary_item(
     *,
     artifact: Path,
     out: Path,
+    public_demo: bool = False,
 ) -> dict[str, Any]:
     result = report.get("familiar_unknown")
     base = {
@@ -998,12 +1105,79 @@ def _build_familiar_unknown_summary_item(
                 reason="selected evidence frame not present",
             ),
         )
-    representative_path = _copy_representative_frame(
-        out=out,
-        source_path=selected_path,
-        relative_path="visual-evidence/familiar-unknown-present.jpg",
+    representative_path = "visual-evidence/familiar-unknown-present.jpg"
+    seen_count = result.get("seen_count") or anonymous.get("seen_count")
+    observed_duration_ms = (
+        result.get("observed_duration_ms")
+        or anonymous.get("observed_duration_ms")
     )
-    if representative_path is None:
+    familiar_score = result.get("familiar_score") or anonymous.get("familiar_score")
+    person_visual_evidence, person_visual_evidence_source = (
+        _familiar_unknown_person_visual_evidence(
+            result,
+            event=event,
+            artifact=artifact,
+        )
+    )
+    person_bbox_xyxy = _bbox_from_visual_evidence(
+        person_visual_evidence,
+        "source_bbox_xyxy",
+        "bbox_xyxy",
+        "track_bbox_xyxy",
+    )
+    face_detection = (
+        person_visual_evidence.get("face_detection")
+        if isinstance(person_visual_evidence, dict)
+        and isinstance(person_visual_evidence.get("face_detection"), dict)
+        else None
+    )
+    face_detection_status = "recorded" if face_detection else "not_recorded"
+    face_bbox_xyxy = _face_bbox_source_frame(person_visual_evidence)
+    boxes = []
+    if person_bbox_xyxy is not None:
+        boxes.append(
+            {
+                "label": "familiar person" if public_demo else "familiar unknown person",
+                "bbox_xyxy": person_bbox_xyxy,
+                "color": (0, 190, 255),
+            }
+        )
+    if face_bbox_xyxy is not None:
+        boxes.append(
+            {
+                "label": "face",
+                "bbox_xyxy": face_bbox_xyxy,
+                "color": (255, 120, 220),
+            }
+        )
+    ok = write_image_overlay(
+        source_path=selected_path,
+        output_path=Path(out) / representative_path,
+        title="熟悉的未命名人物",
+        lines=[
+            f"见过 {_short_text(seen_count)} 次" if seen_count is not None else "",
+            (
+                f"累计 {_format_observed_duration_ms(observed_duration_ms)}"
+                if observed_duration_ms is not None
+                else ""
+            ),
+            f"score {_short_text(familiar_score)}"
+            if familiar_score is not None
+            else "",
+            (
+                "person box available"
+                if person_bbox_xyxy is not None
+                else "person box not available"
+            ),
+            (
+                f"face: {face_detection_status}"
+                if face_bbox_xyxy is not None
+                else ""
+            ),
+        ],
+        boxes=boxes,
+    )
+    if not ok:
         return _overlay_source_status_item(
             base,
             result=result,
@@ -1021,11 +1195,15 @@ def _build_familiar_unknown_summary_item(
         "event_id": event.get("event_id"),
         "memory_match_id": evidence.get("memory_match_id"),
         "anonymous_id": result.get("anonymous_id") or anonymous.get("anonymous_id"),
-        "seen_count": result.get("seen_count") or anonymous.get("seen_count"),
-        "observed_duration_ms": result.get("observed_duration_ms")
-        or anonymous.get("observed_duration_ms"),
-        "familiar_score": result.get("familiar_score")
-        or anonymous.get("familiar_score"),
+        "seen_count": seen_count,
+        "observed_duration_ms": observed_duration_ms,
+        "familiar_score": familiar_score,
+        "person_visual_evidence": person_visual_evidence_source,
+        "person_bbox_xyxy": person_bbox_xyxy,
+        "person_box_available": person_bbox_xyxy is not None,
+        "face_detection": face_detection_status,
+        "face_bbox_xyxy": face_bbox_xyxy,
+        "face_box_available": face_bbox_xyxy is not None,
         **_result_frame_fields(
             result,
             artifact=artifact,
@@ -1332,6 +1510,55 @@ def _first_api_response_for_endpoint(path: Path, endpoint: str) -> dict[str, Any
         if record.get("endpoint") == endpoint:
             return record
     return None
+
+
+def _latest_api_response_body_for_endpoint(
+    path: Path,
+    endpoint: str,
+    *,
+    scene: str | None = None,
+    operation_contains: str | None = None,
+) -> dict[str, Any]:
+    best: dict[str, Any] = {}
+    fallback: dict[str, Any] = {}
+    for record in _read_jsonl_objects(path):
+        if record.get("endpoint") != endpoint:
+            continue
+        if scene is not None and record.get("scene") != scene:
+            continue
+        body = _api_response_body(record)
+        if not body:
+            continue
+        fallback = body
+        operation = str(record.get("operation") or "")
+        if operation_contains is None or operation_contains in operation:
+            best = body
+    return best or fallback
+
+
+def _api_response_body(record: dict[str, Any]) -> dict[str, Any]:
+    for key in ("response", "body"):
+        value = record.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _resolve_target_body_for_result(
+    result: dict[str, Any],
+    *,
+    artifact: Path,
+    scene_name: str,
+) -> dict[str, Any]:
+    resolve_target = result.get("resolve_target")
+    if isinstance(resolve_target, dict) and resolve_target:
+        return resolve_target
+    return _latest_api_response_body_for_endpoint(
+        Path(artifact) / "api_responses.jsonl",
+        "/v1/memory/resolve-target",
+        scene=scene_name,
+        operation_contains="third",
+    )
 
 
 def _first_teach_auto_merge_response(path: Path) -> dict[str, Any] | None:
@@ -1801,19 +2028,23 @@ def _public_demo_visual_evidence_index(
         assertion_id = str(item.get("assertion_id") or "")
         if assertion_id not in DEMO_ITEM_PUBLIC_IDS:
             continue
-        if item.get("status") != "present":
+        path = item.get("path")
+        if not isinstance(path, str) or not path:
             continue
+        source_status = str(item.get("status") or "")
+        if source_status not in {"present", "failed"}:
+            continue
+        public_status = "passed" if source_status == "present" else "failed"
         row: dict[str, Any] = {
             "id": DEMO_ITEM_PUBLIC_IDS[assertion_id],
             "title": DEMO_ITEM_LABELS[assertion_id],
-            "status": "passed",
+            "status": public_status,
             "scene": item.get("scene"),
-            "summary": DEMO_ITEM_SUMMARIES[assertion_id],
+            "summary": item.get("public_summary")
+            or DEMO_ITEM_SUMMARIES[assertion_id],
         }
-        path = item.get("path")
-        if isinstance(path, str) and path:
-            row["path"] = path
-            row["image"] = path
+        row["path"] = path
+        row["image"] = path
         for key in (
             "source_image_path",
             "reference_source_image",
@@ -1834,6 +2065,11 @@ def _public_demo_visual_evidence_index(
                 "observed_duration_ms",
                 "familiar_score",
                 "face_detection",
+                "person_box_available",
+                "face_box_available",
+                "candidate_count",
+                "candidate_box_available",
+                "ray_evidence_available",
             )
             if item.get(key) is not None
         }
@@ -1913,19 +2149,20 @@ def write_image_overlay(
         return False
 
     draw = ImageDraw.Draw(canvas)
-    try:
-        font = ImageFont.load_default()
-    except OSError:
-        font = None
+    font, cjk_supported = _load_overlay_font(ImageFont)
     width, _height = canvas.size
-    text_lines = [title, *[line for line in lines if line]]
-    panel_height = 18 + 16 * len(text_lines)
+    text_lines = [
+        _overlay_text_line(line, cjk_supported=cjk_supported)
+        for line in (title, *[line for line in lines if line])
+    ]
+    line_height = _overlay_line_height(draw, font)
+    panel_height = 12 + line_height * len(text_lines)
     draw.rectangle((0, 0, width, panel_height), fill=(0, 0, 0))
-    y = 8
+    y = 6
     for index, line in enumerate(text_lines):
         fill = (255, 255, 255) if index else (255, 230, 120)
         draw.text((10, y), line[:140], fill=fill, font=font)
-        y += 16
+        y += line_height
 
     for box in boxes or []:
         bbox = _float_bbox(box.get("bbox_xyxy"))
@@ -1933,16 +2170,23 @@ def write_image_overlay(
             continue
         color = box.get("color") or (255, 255, 0)
         draw.rectangle(tuple(bbox), outline=color, width=4)
-        label = str(box.get("label") or "")
+        label = _overlay_text_line(
+            str(box.get("label") or ""),
+            cjk_supported=cjk_supported,
+        )
         if label:
-            label_y = max(panel_height + 2, bbox[1] - 18)
+            label_text = label[:48]
+            label_box = draw.textbbox((0, 0), label_text, font=font)
+            label_width = max(70, label_box[2] - label_box[0] + 8)
+            label_height = max(18, label_box[3] - label_box[1] + 6)
+            label_y = max(panel_height + 2, bbox[1] - label_height)
             draw.rectangle(
-                (bbox[0], label_y, bbox[0] + 180, label_y + 18),
+                (bbox[0], label_y, bbox[0] + label_width, label_y + label_height),
                 fill=(0, 0, 0),
             )
             draw.text(
                 (bbox[0] + 4, label_y + 2),
-                label[:42],
+                label_text,
                 fill=color,
                 font=font,
             )
@@ -1987,6 +2231,67 @@ def write_image_overlay(
     except OSError:
         return False
     return True
+
+
+def _load_overlay_font(ImageFont: Any, *, size: int = 18) -> tuple[Any, bool]:
+    for path in OVERLAY_CJK_FONT_PATHS:
+        if not Path(path).is_file():
+            continue
+        try:
+            return ImageFont.truetype(path, size=size), True
+        except OSError:
+            continue
+    for path in OVERLAY_ASCII_FONT_PATHS:
+        if not Path(path).is_file():
+            continue
+        try:
+            return ImageFont.truetype(path, size=size), False
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(), False
+    except OSError:
+        return None, False
+
+
+def _overlay_line_height(draw: Any, font: Any) -> int:
+    try:
+        bbox = draw.textbbox((0, 0), "Ag", font=font)
+    except Exception:
+        return 18
+    return max(18, bbox[3] - bbox[1] + 6)
+
+
+def _overlay_text_line(text: str, *, cjk_supported: bool) -> str:
+    if cjk_supported or text.isascii():
+        return text
+    return _ascii_overlay_text(text)
+
+
+def _ascii_overlay_text(text: str) -> str:
+    replacements = (
+        ("第三人称指向未绑定", "Third-person target not bound"),
+        ("熟悉的未命名人物", "Familiar unknown person"),
+        ("未绑定", "not bound"),
+        ("画面中候选目标不唯一", "ambiguous candidates"),
+        ("候选窗口", "candidate window"),
+        ("原因", "reason"),
+        ("视觉证据不足", "insufficient visual evidence"),
+        ("目标不明确", "target unclear"),
+        ("没有写入第三人称人物记忆", "no third-person memory write"),
+        ("见过", "seen"),
+        ("累计", "duration"),
+        ("次", "times"),
+        ("帧", "frames"),
+        ("：", ": "),
+        ("，", ", "),
+        ("。", "."),
+    )
+    result = text
+    for source, replacement in replacements:
+        result = result.replace(source, replacement)
+    result = result.encode("ascii", "ignore").decode("ascii").strip()
+    return result or "visual evidence"
 
 
 def source_report_summary(report: dict[str, Any], *, artifact: Path) -> dict[str, Any]:
@@ -2110,6 +2415,29 @@ def _not_present_item(
     status = str(result.get("status") or "not_present")
     reason = result.get("reason") or result.get("error") or "source evidence not passed"
     return _status_item(base, status, reason, source=result)
+
+
+def _missing_scene_or_result_item(
+    base: dict[str, Any],
+    *,
+    result: dict[str, Any],
+    scene: Any | None,
+) -> dict[str, Any] | None:
+    if scene is None:
+        return _status_item(
+            base,
+            "not_present",
+            "source scene not present",
+            source=result,
+        )
+    if not result:
+        return _status_item(
+            base,
+            "not_present",
+            "source report section not present",
+            source=result,
+        )
+    return None
 
 
 def _status_item(
@@ -2403,6 +2731,143 @@ def _first_resolve_candidate_bbox(resolve_target: dict[str, Any]) -> list[float]
     return _float_bbox(candidate.get("bbox_xyxy"))
 
 
+def _resolve_candidate_boxes(
+    resolve_target: dict[str, Any],
+    *,
+    scoring: dict[str, Any],
+    public_demo: bool,
+) -> list[dict[str, Any]]:
+    candidates = _merged_candidate_sources(resolve_target, scoring)
+    boxes: list[dict[str, Any]] = []
+    colors = ((255, 180, 60), (120, 210, 255), (220, 130, 255), (120, 230, 150))
+    for index, candidate in enumerate(candidates[:4], start=1):
+        bbox = _float_bbox(candidate.get("bbox_xyxy"))
+        if bbox is None:
+            continue
+        score = _short_score(candidate.get("score"))
+        label_parts = [f"candidate {index}"]
+        if score:
+            label_parts.append(f"score {score}")
+        if not public_demo:
+            track_id = _short_text(candidate.get("track_id"))
+            if track_id:
+                label_parts.append(track_id)
+        boxes.append(
+            {
+                "label": " ".join(label_parts),
+                "bbox_xyxy": bbox,
+                "color": colors[(index - 1) % len(colors)],
+            }
+        )
+    return boxes
+
+
+def _resolve_candidate_count(
+    resolve_target: dict[str, Any],
+    scoring: dict[str, Any],
+) -> int:
+    return len(_merged_candidate_sources(resolve_target, scoring))
+
+
+def _merged_candidate_sources(
+    resolve_target: dict[str, Any],
+    scoring: dict[str, Any],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen_track_ids: set[Any] = set()
+    score_by_track = _candidate_scores_by_track(scoring)
+    raw_candidates = resolve_target.get("candidates")
+    if isinstance(raw_candidates, list):
+        for candidate in raw_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            merged = dict(candidate)
+            track_id = merged.get("track_id")
+            score_candidate = score_by_track.get(track_id)
+            if isinstance(score_candidate, dict):
+                for key in ("score", "ray_intersects_bbox", "perpendicular_distance"):
+                    if key not in merged and key in score_candidate:
+                        merged[key] = score_candidate[key]
+                if _float_bbox(merged.get("bbox_xyxy")) is None:
+                    score_bbox = _float_bbox(score_candidate.get("bbox_xyxy"))
+                    if score_bbox is not None:
+                        merged["bbox_xyxy"] = score_bbox
+            candidates.append(merged)
+            if track_id is not None:
+                seen_track_ids.add(track_id)
+
+    raw_scores = scoring.get("candidate_scores") if isinstance(scoring, dict) else None
+    if isinstance(raw_scores, list):
+        for candidate in raw_scores:
+            if not isinstance(candidate, dict):
+                continue
+            track_id = candidate.get("track_id")
+            if track_id is not None and track_id in seen_track_ids:
+                continue
+            if _float_bbox(candidate.get("bbox_xyxy")) is None:
+                continue
+            candidates.append(dict(candidate))
+            if track_id is not None:
+                seen_track_ids.add(track_id)
+    return candidates
+
+
+def _candidate_scores_by_track(scoring: dict[str, Any]) -> dict[Any, dict[str, Any]]:
+    raw_scores = scoring.get("candidate_scores") if isinstance(scoring, dict) else None
+    if not isinstance(raw_scores, list):
+        return {}
+    result: dict[Any, dict[str, Any]] = {}
+    for candidate in raw_scores:
+        if not isinstance(candidate, dict):
+            continue
+        track_id = candidate.get("track_id")
+        if track_id is not None:
+            result[track_id] = candidate
+    return result
+
+
+def _short_score(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.2f}"
+    return _short_text(value, max_len=8)
+
+
+def _third_person_failure_reason(
+    result: dict[str, Any],
+    *,
+    resolve_target: dict[str, Any] | None = None,
+) -> str:
+    if resolve_target is None:
+        resolve_target = (
+            result.get("resolve_target")
+            if isinstance(result.get("resolve_target"), dict)
+            else {}
+        )
+    text = _short_text(
+        result.get("failure_reason")
+        or result.get("reason")
+        or resolve_target.get("error_code")
+        or resolve_target.get("status")
+    ).lower()
+    if any(marker in text for marker in ("multiple", "ambiguous", "candidate")):
+        return "画面中候选目标不唯一"
+    if "insufficient" in text:
+        return "视觉证据不足"
+    if text:
+        return "目标不明确"
+    return "目标不明确"
+
+
+def _candidate_frame_count(result: dict[str, Any]) -> int:
+    candidates = result.get("candidate_frames")
+    if isinstance(candidates, list):
+        return len(candidates)
+    window = result.get("candidate_frame_window")
+    if isinstance(window, dict) and isinstance(window.get("candidate_frames"), list):
+        return len(window["candidate_frames"])
+    return 0
+
+
 def _pose_stability_window_summary(window: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "size",
@@ -2514,6 +2979,157 @@ def _face_bbox_source_frame(
     ]
 
 
+def _familiar_unknown_person_visual_evidence(
+    result: dict[str, Any],
+    *,
+    event: dict[str, Any],
+    artifact: Path,
+) -> tuple[dict[str, Any] | None, str]:
+    direct = _find_nested_dict(result, "person_visual_evidence")
+    if direct is not None:
+        return direct, "present"
+
+    track_bbox = _familiar_unknown_track_bbox(result, event=event, artifact=artifact)
+    if track_bbox is not None:
+        return {
+            "source_bbox_xyxy": track_bbox,
+            "source_bbox_coordinate_space": "source_frame",
+        }, "visual_state_track"
+    return None, "missing"
+
+
+def _familiar_unknown_track_bbox(
+    result: dict[str, Any],
+    *,
+    event: dict[str, Any],
+    artifact: Path,
+) -> list[float] | None:
+    visual_state = _visual_state_for_result_frame(
+        artifact,
+        result=result,
+        event=event,
+    )
+    if visual_state is None:
+        return None
+    track_id = _first_int_value(
+        event.get("track_id"),
+        result.get("track_id"),
+        result.get("selected_track_id"),
+    )
+    return _track_bbox_from_visual_state(visual_state, track_id)
+
+
+def _visual_state_for_result_frame(
+    artifact: Path,
+    *,
+    result: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, Any] | None:
+    selected_frame = _selected_evidence_frame_path(result)
+    if not selected_frame:
+        return None
+    for record in _read_jsonl_objects(Path(artifact) / "visual_states.jsonl"):
+        visual_state = record.get("visual_state")
+        if not isinstance(visual_state, dict):
+            continue
+        source_frame = _first_path_value(record.get("source_frame"))
+        if not source_frame or not _report_paths_same(
+            artifact,
+            selected_frame,
+            source_frame,
+        ):
+            continue
+        if _visual_state_has_matching_event(visual_state, event):
+            return visual_state
+    return None
+
+
+def _visual_state_has_matching_event(
+    visual_state: dict[str, Any],
+    expected: dict[str, Any],
+) -> bool:
+    events = visual_state.get("semantic_events")
+    if not isinstance(events, list):
+        return False
+    expected_id = expected.get("event_id")
+    expected_name = expected.get("event")
+    expected_track_id = _first_int_value(expected.get("track_id"))
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if expected_id is not None:
+            if event.get("event_id") == expected_id:
+                return True
+            continue
+        if event.get("event") != expected_name:
+            continue
+        if expected_track_id is None:
+            return True
+        if _first_int_value(event.get("track_id")) == expected_track_id:
+            return True
+    return False
+
+
+def _track_bbox_from_visual_state(
+    visual_state: dict[str, Any],
+    track_id: int | None,
+) -> list[float] | None:
+    tracks = visual_state.get("tracks")
+    if not isinstance(tracks, list):
+        return None
+    candidate_track_ids = []
+    if track_id is not None:
+        candidate_track_ids.append(track_id)
+    candidate_track_ids.extend(_familiar_unknown_identity_track_ids(visual_state))
+    active_track_id = _active_track_id(visual_state)
+    if active_track_id is not None:
+        candidate_track_ids.append(active_track_id)
+
+    for candidate_track_id in candidate_track_ids:
+        for track in tracks:
+            if not isinstance(track, dict) or track.get("track_id") != candidate_track_id:
+                continue
+            bbox = _float_bbox(track.get("bbox_xyxy"))
+            if bbox is not None:
+                return bbox
+    if not candidate_track_ids and len(tracks) == 1 and isinstance(tracks[0], dict):
+        return _float_bbox(tracks[0].get("bbox_xyxy"))
+    return None
+
+
+def _familiar_unknown_identity_track_ids(visual_state: dict[str, Any]) -> list[int]:
+    identity_context = visual_state.get("identity_context")
+    if not isinstance(identity_context, dict):
+        return []
+    tracks = identity_context.get("tracks")
+    if not isinstance(tracks, list):
+        return []
+    track_ids: list[int] = []
+    for item in tracks:
+        if not isinstance(item, dict):
+            continue
+        identity = item.get("identity")
+        if isinstance(identity, dict) and identity.get("status") == "familiar_unknown":
+            track_id = _first_int_value(item.get("track_id"))
+            if track_id is not None:
+                track_ids.append(track_id)
+    return track_ids
+
+
+def _active_track_id(visual_state: dict[str, Any]) -> int | None:
+    identity_context = visual_state.get("identity_context")
+    if isinstance(identity_context, dict):
+        active_target = identity_context.get("active_target")
+        if isinstance(active_target, dict):
+            track_id = _first_int_value(active_target.get("track_id"))
+            if track_id is not None:
+                return track_id
+    attention = visual_state.get("attention")
+    if isinstance(attention, dict):
+        return _first_int_value(attention.get("target_track_id"))
+    return None
+
+
 def _pose_arrows(evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(evidence, dict):
         return []
@@ -2581,6 +3197,16 @@ def _copy_representative_frame(
     return str(dest.relative_to(out))
 
 
+def _format_observed_duration_ms(value: Any) -> str:
+    try:
+        seconds = float(value) / 1000.0
+    except (TypeError, ValueError):
+        return str(value)
+    if seconds.is_integer():
+        return f"{int(seconds)}s"
+    return f"{seconds:.1f}s"
+
+
 def _first_path_value(*values: Any) -> str | None:
     for value in values:
         if isinstance(value, str) and value:
@@ -2621,6 +3247,20 @@ def _xy_pair(value: Any) -> tuple[float, float] | None:
         return (float(value[0]), float(value[1]))
     except (TypeError, ValueError):
         return None
+
+
+def _first_int_value(*values: Any) -> int | None:
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                continue
+    return None
 
 
 def _short_text(value: Any, *, max_len: int = 32) -> str:

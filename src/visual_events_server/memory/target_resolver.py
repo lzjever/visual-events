@@ -248,55 +248,12 @@ class TargetResolver:
         candidate_tracks = [
             track for track in visible_tracks if track.track_id != introducer_track_id
         ]
-        for arm in arms:
-            ray_hits = [
-                track
-                for track in candidate_tracks
-                if _ray_intersects_bbox(arm.origin, arm.direction, track.bbox_xyxy)
-            ]
-            if len(ray_hits) > 1:
-                score_entries = _pose_candidate_scores(
-                    candidate_tracks,
-                    arms=[arm],
-                    image_width=image_width,
-                    image_height=image_height,
-                )
-                scoring = _pose_pointing_scoring_evidence(
-                    arm=arm,
-                    score_entries=score_entries,
-                    score_margin=_pose_score_margin(score_entries),
-                    ambiguous_score_margin=self.ambiguous_score_margin,
-                    margin_ok=False,
-                    checks={"multiple_ray_hits": True},
-                )
-                evidence = _pose_pointing_evidence(
-                    scoring=scoring,
-                    introducer=introducer,
-                    selected_track=None,
-                    arm=arm,
-                    score_entries=score_entries,
-                    image_width=image_width,
-                    image_height=image_height,
-                    ambiguity_type="multiple_candidates",
-                )
-                candidates = [
-                    self._candidate_from_track(
-                        track,
-                        confidence=0.9,
-                        reason="pose_pointing_to_person",
-                        image_width=image_width,
-                        image_height=image_height,
-                        evidence=evidence,
-                    )
-                    for track in ray_hits
-                ]
-                return TargetPreview(
-                    status="ambiguous",
-                    candidates=candidates[:3],
-                    ambiguity_type="multiple_candidates",
-                    evidence=evidence,
-                )
-
+        multiple_ray_hits = any(
+            _arm_has_multiple_ray_hits(arm, candidate_tracks) for arm in arms
+        )
+        multiple_ray_hit_checks = (
+            {"multiple_ray_hits": True} if multiple_ray_hits else None
+        )
         score_entries = _pose_candidate_scores(
             candidate_tracks,
             arms=arms,
@@ -306,13 +263,16 @@ class TargetResolver:
         positive_entries = [entry for entry in score_entries if entry.score > 0.0]
         if not positive_entries:
             arm = arms[0]
+            checks = {"candidate_found": False}
+            if multiple_ray_hit_checks is not None:
+                checks.update(multiple_ray_hit_checks)
             scoring = _pose_pointing_scoring_evidence(
                 arm=arm,
                 score_entries=score_entries,
                 score_margin=None,
                 ambiguous_score_margin=self.ambiguous_score_margin,
                 margin_ok=False,
-                checks={"candidate_found": False},
+                checks=checks,
             )
             return TargetPreview(
                 status="not_found",
@@ -345,6 +305,7 @@ class TargetResolver:
                     score_margin=score_margin,
                     ambiguous_score_margin=self.ambiguous_score_margin,
                     margin_ok=margin_ok,
+                    checks=multiple_ray_hit_checks,
                 )
                 evidence = _pose_pointing_evidence(
                     scoring=scoring,
@@ -380,6 +341,7 @@ class TargetResolver:
             score_margin=score_margin,
             ambiguous_score_margin=self.ambiguous_score_margin,
             margin_ok=margin_ok,
+            checks=multiple_ray_hit_checks,
         )
         selected = positive_entries[0]
         evidence = _pose_pointing_evidence(
@@ -879,6 +841,19 @@ def _pose_score_margin(score_entries: list[_PoseCandidateScore]) -> float | None
     return float(score_entries[0].score) - float(score_entries[1].score)
 
 
+def _arm_has_multiple_ray_hits(
+    arm: _PointingArm,
+    candidate_tracks: list[TrackSnapshot],
+) -> bool:
+    hit_count = 0
+    for track in candidate_tracks:
+        if _ray_intersects_bbox(arm.origin, arm.direction, track.bbox_xyxy):
+            hit_count += 1
+            if hit_count > 1:
+                return True
+    return False
+
+
 def _pose_pointing_evidence(
     *,
     scoring: dict[str, Any],
@@ -997,29 +972,37 @@ def _pose_pointing_score(
     dir_len = hypot(direction[0], direction[1])
     if dir_len <= 0.0:
         return 0.0, 0.0
+    ray_hit_t = _ray_bbox_intersection_t(origin, direction, candidate_bbox)
+    ray_intersects_bbox = ray_hit_t is not None
     target = _person_pointing_target(candidate_bbox)
     to_target = (target[0] - origin[0], target[1] - origin[1])
     forward = (to_target[0] * direction[0] + to_target[1] * direction[1]) / dir_len
-    if forward <= 0.0:
+    if forward <= 0.0 and not ray_intersects_bbox:
         return 0.0, 0.0
     perp = abs(direction[0] * to_target[1] - direction[1] * to_target[0]) / dir_len
     candidate_size = min(_bbox_width(candidate_bbox), _bbox_height(candidate_bbox))
     tolerance = max(60.0, candidate_size * 0.45)
+    if ray_intersects_bbox:
+        hit_distance = max(0.0, float(ray_hit_t) * dir_len)
+        ray_scale = max(float(max(image_width, image_height)) * 0.45, 1.0)
+        center_alignment = max(0.0, 1.0 - min(perp / tolerance, 1.0))
+        proximity = max(0.0, 1.0 - min(hit_distance / ray_scale, 1.0))
+        return _clamp_confidence(
+            0.52 + (0.08 * center_alignment) + (0.40 * proximity)
+        ), perp
     if perp > tolerance:
         return 0.0, perp
     forward_scale = max(float(max(image_width, image_height)) * 0.45, 1.0)
     alignment = 1.0 - (perp / tolerance)
-    if _ray_intersects_bbox(origin, direction, candidate_bbox):
-        alignment = max(alignment, 0.92)
     forward_bonus = min(1.0, forward / forward_scale)
     return _clamp_confidence(0.35 + (0.55 * alignment) + (0.10 * forward_bonus)), perp
 
 
-def _ray_intersects_bbox(
+def _ray_bbox_intersection_t(
     origin: tuple[float, float],
     direction: tuple[float, float],
     bbox: BBoxXYXY,
-) -> bool:
+) -> float | None:
     x1, y1, x2, y2 = bbox
     ox, oy = origin
     dx, dy = direction
@@ -1031,7 +1014,7 @@ def _ray_intersects_bbox(
     ):
         if abs(delta) < 1e-9:
             if start < lower or start > upper:
-                return False
+                return None
             continue
         t1 = (lower - start) / delta
         t2 = (upper - start) / delta
@@ -1040,8 +1023,18 @@ def _ray_intersects_bbox(
         t_min = max(t_min, t_near)
         t_max = min(t_max, t_far)
         if t_min > t_max:
-            return False
-    return t_max >= 0.0
+            return None
+    if t_max < 0.0:
+        return None
+    return max(t_min, 0.0)
+
+
+def _ray_intersects_bbox(
+    origin: tuple[float, float],
+    direction: tuple[float, float],
+    bbox: BBoxXYXY,
+) -> bool:
+    return _ray_bbox_intersection_t(origin, direction, bbox) is not None
 
 
 def _ray_end_xy(

@@ -609,6 +609,7 @@ def _public_case(
         "expected_outcome": expected_outcome,
         "actual_outcome": actual_outcome,
         "verdict": _public_verdict(
+            case_id=str(config["case_id"]),
             explicit=_first_text(section.get("verdict")),
             result_status=result_status,
             failure_reason=failure_reason,
@@ -626,6 +627,8 @@ def _public_case(
         "overlay_status": overlay_status,
         **frame_window,
     }
+    if str(config.get("case_id") or "") == "familiar_unknown":
+        case.update(_public_familiar_metrics(section))
     return {key: value for key, value in case.items() if value is not None}
 
 
@@ -812,6 +815,7 @@ def _public_frame_relation(
 
 def _public_verdict(
     *,
+    case_id: str,
     explicit: str,
     result_status: str,
     failure_reason: str | None,
@@ -820,8 +824,59 @@ def _public_verdict(
     if explicit and result_status == "passed":
         return explicit
     if result_status == "passed":
-        return f"通过：{actual_outcome}"
-    return f"未通过：{failure_reason or actual_outcome or 'insufficient visual evidence'}"
+        return f"通过：{_human_public_text(actual_outcome, case_id=case_id)}"
+    return (
+        "未通过："
+        + _human_failure_reason(
+            failure_reason or actual_outcome or "insufficient visual evidence",
+            case_id=case_id,
+        )
+    )
+
+
+def _public_familiar_metrics(section: dict[str, Any]) -> dict[str, Any]:
+    event = _first_event(section, "familiar_unknown_present")
+    anonymous = (
+        event.get("memory_context", {}).get("anonymous_person")
+        if isinstance(event.get("memory_context"), dict)
+        else None
+    )
+    if not isinstance(anonymous, dict):
+        anonymous = {}
+    seen_count = _first_present(section.get("seen_count"), anonymous.get("seen_count"))
+    duration_ms = _first_present(
+        section.get("observed_duration_ms"),
+        anonymous.get("observed_duration_ms"),
+    )
+    score = _first_present(section.get("familiar_score"), anonymous.get("familiar_score"))
+    fields: dict[str, Any] = {}
+    if seen_count is not None:
+        fields["familiar_seen_count"] = seen_count
+    if duration_ms is not None:
+        fields["familiar_duration"] = _format_duration_ms(duration_ms)
+    if score is not None:
+        fields["familiar_score"] = score
+    return fields
+
+
+def _first_event(section: dict[str, Any], event_name: str) -> dict[str, Any]:
+    events = section.get("events")
+    if not isinstance(events, list):
+        return {}
+    for event in events:
+        if isinstance(event, dict) and event.get("event") == event_name:
+            return event
+    return {}
+
+
+def _format_duration_ms(value: Any) -> str:
+    try:
+        seconds = float(value) / 1000.0
+    except (TypeError, ValueError):
+        return str(value)
+    if seconds.is_integer():
+        return f"{int(seconds)}s"
+    return f"{seconds:.1f}s"
 
 
 def _status_sentence(section: dict[str, Any]) -> str:
@@ -1002,6 +1057,7 @@ def _render_public_demo_index_html(report: dict[str, Any]) -> str:
     real_model = html.escape(str(report.get("real_model_evidence")))
     case_count = html.escape(str(report.get("case_count") or 0))
     error_count = html.escape(str(report.get("error_count") or 0))
+    summary_sentence = html.escape(_public_demo_summary_sentence(report))
     cases = report.get("cases") if isinstance(report.get("cases"), list) else []
     cards = "\n".join(
         _public_case_card_html(case)
@@ -1024,7 +1080,9 @@ def _render_public_demo_index_html(report: dict[str, Any]) -> str:
     .case h3 {{ margin: 0 0 8px; }}
     .status {{ font-weight: 700; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 12px 0; }}
+    .window-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }}
     .panel {{ background: #f8fafc; border-radius: 6px; padding: 10px; }}
+    .wide {{ grid-column: 1 / -1; }}
     .label {{ color: #52606d; font-size: 0.9rem; margin-bottom: 4px; }}
     .image-link {{ display: block; text-decoration: none; }}
     .image-link span {{ display: block; margin-top: 4px; }}
@@ -1038,7 +1096,7 @@ def _render_public_demo_index_html(report: dict[str, Any]) -> str:
 <body>
   <h1>Memory Demo</h1>
   <h2>Demo Summary</h2>
-  <p class="summary">status: <span class="status">{status}</span>; real_model_evidence: {real_model}; cases: {case_count}; failures: {error_count}</p>
+  <p class="summary"><strong>演示结果：{summary_sentence}</strong><br>机器状态（machine-readable）: <span class="status">{status}</span>; real_model_evidence: {real_model}; cases: {case_count}; failures: {error_count}</p>
   {_public_models_html(report.get("models"))}
   <ul>
     <li><a href="visual-evidence/index.html">Visual evidence page</a></li>
@@ -1052,34 +1110,49 @@ def _render_public_demo_index_html(report: dict[str, Any]) -> str:
 
 
 def _public_case_card_html(case: dict[str, Any]) -> str:
+    case_id = str(case.get("case_id") or "")
     title = html.escape(str(case.get("title") or case.get("case_id") or "case"))
-    status = html.escape(str(case.get("result_status") or "unknown"))
-    verdict = html.escape(str(case.get("verdict") or ""))
-    user_message = html.escape(str(case.get("user_message") or "not present"))
-    reference = _image_link_html(case.get("reference_frame"), "reference frame")
-    evidence = _image_link_html(case.get("evidence_frame"), "evidence frame")
-    overlay = _image_link_html(case.get("overlay_image"), "overlay image")
-    expected = html.escape(str(case.get("expected_outcome") or "not present"))
-    actual = html.escape(str(case.get("actual_outcome") or "not present"))
-    expected_target = html.escape(str(case.get("expected_target") or "not present"))
-    actual_target = html.escape(str(case.get("actual_target") or "not present"))
-    details = {
-        "frame_relation": case.get("frame_relation"),
-        "frame_delta": case.get("frame_delta"),
-        "result_reason": case.get("result_reason"),
-        "selected_target": case.get("selected_target"),
-        "identity_result": case.get("identity_result"),
-        "familiar_result": case.get("familiar_result"),
-        "scene_result": case.get("scene_result"),
-        "event_result": case.get("event_result"),
-        "overlay_status": case.get("overlay_status"),
-    }
+    status = html.escape(_human_status(case.get("result_status")))
+    verdict = html.escape(
+        _human_public_text(case.get("verdict"), case_id=case_id, field="verdict")
+    )
+    user_message = html.escape(
+        _human_public_text(case.get("user_message"), case_id=case_id)
+    )
+    reference = _image_link_html(case.get("reference_frame"), "参考帧")
+    evidence = _image_link_html(case.get("evidence_frame"), "证据帧")
+    overlay = _image_link_html(case.get("overlay_image"), "证据图")
+    window = _candidate_window_html(case)
+    expected = html.escape(
+        _human_public_text(case.get("expected_outcome"), case_id=case_id)
+    )
+    actual = html.escape(
+        _human_public_text(case.get("actual_outcome"), case_id=case_id)
+    )
+    expected_target = html.escape(
+        _human_public_text(case.get("expected_target"), case_id=case_id)
+    )
+    actual_target = html.escape(
+        _human_public_text(case.get("actual_target"), case_id=case_id)
+    )
+    details = [
+        ("帧关系", case.get("frame_relation")),
+        ("帧间隔", case.get("frame_delta")),
+        ("原因", _case_display_reason(case)),
+        ("选中目标", case.get("selected_target")),
+        ("人物识别", case.get("identity_result")),
+        ("熟悉度结果", case.get("familiar_result")),
+        ("场景结果", case.get("scene_result")),
+        ("触发结果", case.get("event_result")),
+        ("证据图状态", case.get("overlay_status")),
+        ("熟悉度", _familiar_metric_text(case)),
+    ]
     detail_rows = "\n".join(
         "<tr>"
-        f"<th>{html.escape(str(key))}</th>"
-        f"<td>{html.escape(str(value))}</td>"
+        f"<th>{html.escape(str(label))}</th>"
+        f"<td>{html.escape(_human_public_text(value, case_id=case_id))}</td>"
         "</tr>"
-        for key, value in details.items()
+        for label, value in details
         if value is not None
     )
     return f"""<section class="case">
@@ -1088,11 +1161,12 @@ def _public_case_card_html(case: dict[str, Any]) -> str:
       <div class="panel"><div class="label">用户说了什么</div><div>{user_message}</div></div>
       <div class="panel"><div class="label">系统看的帧</div><div>{evidence}</div></div>
       <div class="panel"><div class="label">一句话 verdict</div><div>{verdict}</div></div>
-      <div class="panel"><div class="label">打开 overlay</div><div>{overlay}</div></div>
+      <div class="panel"><div class="label">打开证据图</div><div>{overlay}</div></div>
     </div>
     <div class="grid">
-      <div class="panel"><div class="label">Reference frame</div><div>{reference}</div></div>
+      <div class="panel"><div class="label">参考帧</div><div>{reference}</div></div>
       <div class="panel"><div class="label">期望 vs 实际</div><div>期望：{expected_target}; {expected}<br>实际：{actual_target}; {actual}</div></div>
+      {window}
     </div>
     <table><tbody>{detail_rows}</tbody></table>
   </section>"""
@@ -1101,7 +1175,7 @@ def _public_case_card_html(case: dict[str, Any]) -> str:
 def _image_link_html(value: Any, label: str) -> str:
     text = _first_text(value)
     if not text:
-        return "not present"
+        return "未提供"
     escaped = html.escape(text, quote=True)
     escaped_label = html.escape(label)
     return (
@@ -1112,9 +1186,185 @@ def _image_link_html(value: Any, label: str) -> str:
     )
 
 
+def _candidate_window_html(case: dict[str, Any]) -> str:
+    links: list[str] = []
+    anchor = _image_link_html(case.get("anchor_frame"), "锚点帧")
+    if anchor != "未提供":
+        links.append(anchor)
+    candidate_frames = case.get("candidate_frames")
+    if isinstance(candidate_frames, list):
+        for index, frame in enumerate(candidate_frames, start=1):
+            link = _image_link_html(frame, f"候选帧 {index}")
+            if link != "未提供":
+                links.append(link)
+    if not links:
+        return ""
+    return (
+        '<div class="panel wide"><div class="label">候选窗口</div>'
+        '<div class="window-grid">'
+        + "\n".join(links)
+        + "</div></div>"
+    )
+
+
+def _public_demo_summary_sentence(report: dict[str, Any]) -> str:
+    cases = report.get("cases") if isinstance(report.get("cases"), list) else []
+    public_cases = [case for case in cases if isinstance(case, dict)]
+    passed_count = sum(
+        1 for case in public_cases if case.get("result_status") == "passed"
+    )
+    failed_cases = [
+        case for case in public_cases if case.get("result_status") != "passed"
+    ]
+    if not failed_cases:
+        return f"{passed_count} 个用例通过"
+    unbound_count = sum(1 for case in failed_cases if _case_is_target_unbound(case))
+    if unbound_count == len(failed_cases):
+        return f"{passed_count} 个通过，{unbound_count} 个因目标不明确未绑定"
+    if unbound_count:
+        other_count = len(failed_cases) - unbound_count
+        return (
+            f"{passed_count} 个通过，{unbound_count} 个因目标不明确未绑定，"
+            f"{other_count} 个未通过"
+        )
+    return f"{passed_count} 个通过，{len(failed_cases)} 个未通过"
+
+
+def _case_is_target_unbound(case: dict[str, Any]) -> bool:
+    if str(case.get("case_id") or "") == "third_person_pointing_teach":
+        return case.get("result_status") != "passed"
+    text = " ".join(
+        str(case.get(key) or "")
+        for key in ("failure_reason", "result_reason", "actual_target", "actual_outcome")
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "multiple_candidates",
+            "ambiguous",
+            "insufficient visual evidence",
+            "未能稳定选中",
+            "目标不明确",
+        )
+    )
+
+
+def _case_display_reason(case: dict[str, Any]) -> str | None:
+    reason = case.get("result_reason")
+    if reason is None:
+        return None
+    if case.get("result_status") != "passed" and _case_is_target_unbound(case):
+        return "目标不明确，未绑定到任何人"
+    return str(reason)
+
+
+def _familiar_metric_text(case: dict[str, Any]) -> str | None:
+    seen_count = case.get("familiar_seen_count")
+    duration = case.get("familiar_duration")
+    score = case.get("familiar_score")
+    parts: list[str] = []
+    if seen_count is not None:
+        parts.append(f"见过 {seen_count} 次")
+    if duration is not None:
+        parts.append(f"累计 {duration}")
+    if score is not None:
+        parts.append(f"score {score}")
+    return " / ".join(parts) if parts else None
+
+
+def _human_status(value: Any) -> str:
+    text = _first_text(value)
+    return {
+        "passed": "通过",
+        "failed": "未通过",
+        "present": "已生成",
+        "missing": "缺失",
+        "unknown": "未知",
+        "insufficient_sample": "样本不足",
+    }.get(text, _human_public_text(text))
+
+
+def _human_failure_reason(value: Any, *, case_id: str = "") -> str:
+    text = _first_text(value)
+    lowered = text.lower()
+    if case_id == "third_person_pointing_teach" and any(
+        marker in lowered
+        for marker in (
+            "multiple_candidates",
+            "ambiguous",
+            "insufficient visual evidence",
+            "insufficient_sample",
+            "not_found",
+        )
+    ):
+        return "目标不明确，未绑定到任何人"
+    if "multiple_candidates" in lowered or "ambiguous" in lowered:
+        return "候选目标不唯一"
+    if "insufficient visual evidence" in lowered:
+        return "视觉证据不足"
+    return _human_public_text(text, case_id=case_id)
+
+
+def _human_public_text(value: Any, *, case_id: str = "", field: str = "") -> str:
+    text = _first_text(value)
+    if not text:
+        return "未提供"
+    exact = {
+        "known_person_present": "已识别为记住的人",
+        "familiar_unknown_present": "识别为见过但还不知道名字的人",
+        "scene_activated": "已识别为记住的场景",
+        "not present": "未提供",
+        "not_present": "未提供",
+        "missing": "缺失",
+        "present": "已生成",
+        "passed": "通过",
+        "failed": "未通过",
+        "ok": "正常",
+        "fallback_evidence_frame": "使用原始证据帧",
+        "no_user_input": "无用户输入",
+        "nearby": "相邻帧",
+        "same": "同一帧",
+        "different": "不同帧",
+        "insufficient_sample": "样本不足",
+        "not available": "不可用",
+        "multiple_candidates": "候选目标不唯一",
+        "ambiguous": "候选目标不唯一",
+        "representative familiar person": "熟悉的未命名人物",
+        "scene": "场景",
+    }
+    if text in exact:
+        return exact[text]
+    if (
+        case_id == "third_person_pointing_teach"
+        and field == "verdict"
+        and "insufficient visual evidence" in text.lower()
+    ):
+        return "未通过：目标不明确，未绑定到任何人"
+    replacements = (
+        ("no_user_input -> familiar result", "无需用户输入，识别为熟悉的未命名人物"),
+        ("teach -> recall known person", "教学后再次看到能认出这个人"),
+        ("write -> activation scene_activated", "写入场景后再次看到能激活该场景"),
+        ("known_person_present", "已识别为记住的人"),
+        ("familiar_unknown_present", "识别为见过但还不知道名字的人"),
+        ("scene_activated", "已识别为记住的场景"),
+        ("multiple_candidates", "候选目标不唯一"),
+        ("ambiguous", "候选目标不唯一"),
+        ("insufficient visual evidence", "视觉证据不足"),
+        ("not available", "不可用"),
+        ("not present", "未提供"),
+        ("not_present", "未提供"),
+        ("fallback_evidence_frame", "使用原始证据帧"),
+        ("no_user_input", "无用户输入"),
+    )
+    result = text
+    for source, replacement in replacements:
+        result = result.replace(source, replacement)
+    return result
+
+
 def _public_models_html(models: Any) -> str:
     if not isinstance(models, dict) or not models:
-        return "<h2>Models</h2><p>not present</p>"
+        return "<h2>Models</h2><p>未提供</p>"
     rows = "\n".join(
         "<tr>"
         f"<th>{html.escape(str(key))}</th>"

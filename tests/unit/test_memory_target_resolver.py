@@ -61,6 +61,17 @@ def pointing_right_keypoints(*, confidence: float = 0.9) -> tuple[PoseKeypoint, 
     )
 
 
+def right_arm_pointing_right_keypoints(
+    *,
+    confidence: float = 0.9,
+) -> tuple[PoseKeypoint, ...]:
+    return (
+        kp("right_shoulder", 180.0, 220.0, confidence),
+        kp("right_elbow", 300.0, 250.0, confidence),
+        kp("right_wrist", 380.0, 260.0, confidence),
+    )
+
+
 def test_resolves_attention_target_to_matching_track_bbox() -> None:
     resolved = TargetResolver().resolve(
         TargetRequest(mode="attention_target"),
@@ -214,7 +225,39 @@ def test_pose_pointing_close_candidates_are_ambiguous() -> None:
     assert all("bbox_xyxy" in item for item in visual["candidate_scores"][:2])
 
 
-def test_pose_pointing_same_ray_near_and_far_hits_are_ambiguous() -> None:
+def test_pose_pointing_multiple_ray_hits_resolves_when_top_score_leads() -> None:
+    preview = TargetResolver().preview_pose_pointing_person(
+        introducer_track_id=1,
+        image_width=900,
+        image_height=600,
+        tracks=[
+            track(
+                1,
+                bbox_xyxy=(100.0, 100.0, 300.0, 500.0),
+                keypoints=pointing_right_keypoints(),
+            ),
+            track(2, bbox_xyxy=(500.0, 170.0, 650.0, 420.0)),
+            track(3, bbox_xyxy=(820.0, 280.0, 900.0, 480.0)),
+        ],
+    )
+
+    assert preview.status == "resolved"
+    assert preview.ambiguity_type == ""
+    assert [candidate.track_id for candidate in preview.candidates] == [2]
+    scoring = preview.evidence["pose_pointing_scoring"]
+    assert scoring["checks"]["multiple_ray_hits"] is True
+    candidate_scores = scoring["candidate_scores"]
+    assert [item["track_id"] for item in candidate_scores[:2]] == [2, 3]
+    assert all(item["ray_intersects_bbox"] for item in candidate_scores[:2])
+    assert (
+        candidate_scores[0]["score"] - candidate_scores[1]["score"]
+        > scoring["ambiguous_score_margin"]
+    )
+    visual = preview.evidence["pose_visual_evidence"]
+    assert visual["target_track_id"] == 2
+
+
+def test_pose_pointing_same_ray_near_hit_beats_far_hit() -> None:
     preview = TargetResolver().preview_pose_pointing_person(
         introducer_track_id=1,
         image_width=1400,
@@ -230,9 +273,43 @@ def test_pose_pointing_same_ray_near_and_far_hits_are_ambiguous() -> None:
         ],
     )
 
-    assert preview.status == "ambiguous"
-    assert preview.ambiguity_type == "multiple_candidates"
-    assert {candidate.track_id for candidate in preview.candidates[:2]} == {2, 3}
+    assert preview.status == "resolved"
+    assert preview.ambiguity_type == ""
+    assert [candidate.track_id for candidate in preview.candidates] == [2]
+    scoring = preview.evidence["pose_pointing_scoring"]
+    assert scoring["checks"]["multiple_ray_hits"] is True
+    assert scoring["score_margin"] > scoring["ambiguous_score_margin"]
+
+
+def test_pose_pointing_near_off_ray_center_beats_far_ray_hit() -> None:
+    preview = TargetResolver().preview_pose_pointing_person(
+        introducer_track_id=1,
+        image_width=1400,
+        image_height=700,
+        tracks=[
+            track(
+                1,
+                bbox_xyxy=(100.0, 100.0, 300.0, 500.0),
+                keypoints=pointing_right_keypoints(),
+            ),
+            track(2, bbox_xyxy=(500.0, 100.0, 650.0, 300.0)),
+            track(3, bbox_xyxy=(820.0, 280.0, 900.0, 480.0)),
+        ],
+    )
+
+    assert preview.status == "resolved"
+    assert preview.ambiguity_type == ""
+    assert [candidate.track_id for candidate in preview.candidates] == [2]
+    scoring = preview.evidence["pose_pointing_scoring"]
+    assert scoring["checks"]["multiple_ray_hits"] is True
+    candidate_scores = scoring["candidate_scores"]
+    assert [item["track_id"] for item in candidate_scores[:2]] == [2, 3]
+    assert all(item["ray_intersects_bbox"] for item in candidate_scores[:2])
+    assert candidate_scores[0]["perpendicular_distance"] > 60.0
+    assert (
+        candidate_scores[0]["score"] - candidate_scores[1]["score"]
+        > scoring["ambiguous_score_margin"]
+    )
 
 
 def test_pose_pointing_without_forward_hit_is_target_unclear() -> None:
@@ -252,6 +329,32 @@ def test_pose_pointing_without_forward_hit_is_target_unclear() -> None:
 
     assert preview.status == "not_found"
     assert preview.ambiguity_type == "target_unclear"
+
+
+def test_pose_pointing_ray_hit_with_off_ray_target_center_resolves() -> None:
+    preview = TargetResolver().preview_pose_pointing_person(
+        introducer_track_id=1,
+        image_width=900,
+        image_height=600,
+        tracks=[
+            track(
+                1,
+                bbox_xyxy=(100.0, 100.0, 300.0, 500.0),
+                keypoints=right_arm_pointing_right_keypoints(),
+            ),
+            track(2, bbox_xyxy=(500.0, 100.0, 650.0, 300.0)),
+        ],
+    )
+
+    assert preview.status == "resolved"
+    assert preview.ambiguity_type == ""
+    assert [candidate.track_id for candidate in preview.candidates] == [2]
+    scoring = preview.evidence["pose_pointing_scoring"]
+    assert scoring["arm_side"] == "right"
+    assert "multiple_ray_hits" not in scoring["checks"]
+    assert scoring["candidate_scores"][0]["score"] > 0.0
+    assert scoring["candidate_scores"][0]["ray_intersects_bbox"] is True
+    assert scoring["candidate_scores"][0]["perpendicular_distance"] > 60.0
 
 
 def test_resolves_point_to_visible_track_containing_point() -> None:

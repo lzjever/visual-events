@@ -865,6 +865,9 @@ def test_public_report_cases_keep_failed_results_and_visual_evidence(
                 "actual_target": "熟悉的未命名人物",
                 "expected_outcome": "no_user_input -> familiar result",
                 "actual_outcome": "familiar_unknown_present",
+                "seen_count": 11,
+                "observed_duration_ms": 10_000,
+                "familiar_score": 1.0,
                 "events": [{"event": "familiar_unknown_present"}],
             },
         )
@@ -891,6 +894,7 @@ def test_public_report_cases_keep_failed_results_and_visual_evidence(
         {
             "id": "familiar_unknown",
             "status": "passed",
+            "image": "visual-evidence/familiar-unknown-present.jpg",
         },
     ]
 
@@ -957,7 +961,7 @@ def test_public_report_cases_keep_failed_results_and_visual_evidence(
     assert failed_case["actual_target"] == "未能稳定选中"
     assert failed_case["expected_outcome"] == "teach -> recall 王工"
     assert failed_case["actual_outcome"] == "insufficient visual evidence"
-    assert failed_case["verdict"] == "未通过：insufficient visual evidence"
+    assert failed_case["verdict"] == "未通过：目标不明确，未绑定到任何人"
     assert failed_case["overlay_image"] == "visual-evidence/third-person.jpg"
     assert failed_case["anchor_frame"].endswith(
         "val-data/pic_teach_person/img_000.jpg"
@@ -982,23 +986,36 @@ def test_public_report_cases_keep_failed_results_and_visual_evidence(
     assert familiar_case["user_message"] == "无用户输入，来自重复观察"
     assert familiar_case["frame_relation"] == "no_user_input"
     assert familiar_case["familiar_result"] == "familiar_unknown_present"
-    assert familiar_case["overlay_status"] == "fallback_evidence_frame"
-    assert familiar_case["overlay_image"].endswith(
-        "val-data/pic_familiar_face/img_000.jpg"
-    )
+    assert familiar_case["overlay_status"] == "present"
+    assert familiar_case["overlay_image"] == "visual-evidence/familiar-unknown-present.jpg"
+    assert familiar_case["familiar_seen_count"] == 11
+    assert familiar_case["familiar_duration"] == "10s"
+    assert familiar_case["familiar_score"] == 1.0
 
     assert "<img" in root_html
+    assert "3 个通过，1 个因目标不明确未绑定" in root_html
     assert "用户说了什么" in root_html
     assert "系统看的帧" in root_html
     assert "期望 vs 实际" in root_html
     assert "一句话 verdict" in root_html
-    assert "打开 overlay" in root_html
+    assert "打开证据图" in root_html
+    assert "目标不明确，未绑定到任何人" in root_html
+    assert "见过 11 次" in root_html
+    assert "累计 10s" in root_html
     assert "无用户输入，来自重复观察" in root_html
     assert "visual-evidence/teach-scene-scene-activated.jpg" in root_html
     assert "visual-evidence/third-person.jpg" in root_html
+    assert "visual-evidence/familiar-unknown-present.jpg" in root_html
     assert "val-data/pic_teach_person/img_000.jpg" in root_html
     assert "val-data/pic_teach_person/img_002.jpg" in root_html
-    assert "val-data/pic_familiar_face/img_000.jpg" in root_html
+    for internal_text in (
+        "known_person_present",
+        "multiple_candidates",
+        "familiar_unknown_present",
+        "not present",
+        "insufficient visual evidence",
+    ):
+        assert internal_text not in root_html
     assert "old renderer root" not in root_html
     for image_ref in re.findall(r'<a href="([^"]+)">', root_html):
         assert not Path(image_ref).is_absolute()

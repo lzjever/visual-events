@@ -2120,21 +2120,44 @@ def test_local_familiar_unknown_demo_observes_until_default_familiar_duration(
         calls.append(kwargs)
         if len(calls) < 11:
             return []
-        return [
-            {
-                "event": "familiar_unknown_present",
-                "event_id": "evt_familiar",
-                "evidence": {"memory_match_id": "anon_123"},
-                "memory_context": {
-                    "anonymous_person": {
-                        "anonymous_id": "anon_123",
-                        "seen_count": 3,
-                        "observed_duration_ms": 10_000,
-                        "familiar_score": 1.0,
-                    }
-                },
-            }
-        ]
+        event = {
+            "event": "familiar_unknown_present",
+            "event_id": "evt_familiar",
+            "track_id": 9,
+            "evidence": {"memory_match_id": "anon_123"},
+            "memory_context": {
+                "anonymous_person": {
+                    "anonymous_id": "anon_123",
+                    "seen_count": 3,
+                    "observed_duration_ms": 10_000,
+                    "familiar_score": 1.0,
+                }
+            },
+        }
+        records = kwargs.get("event_state_records")
+        if isinstance(records, list):
+            records.append(
+                {
+                    "event": event,
+                    "source_frame": str(frame_path),
+                    "visual_state": {
+                        "camera": "front",
+                        "frame_id": 42,
+                        "frame_timestamp_ms": 17_200,
+                        "tracks": [
+                            {
+                                "track_id": 1,
+                                "bbox_xyxy": [100, 100, 500, 680],
+                            },
+                            {
+                                "track_id": 9,
+                                "bbox_xyxy": [796, 112, 939, 590],
+                            },
+                        ],
+                    },
+                }
+            )
+        return [event]
 
     monkeypatch.setattr(module, "LocalMemorySmokeRunner", FakeRunner)
     monkeypatch.setattr(module, "_send_stable_query_and_drain_local", fake_replay)
@@ -2165,6 +2188,14 @@ def test_local_familiar_unknown_demo_observes_until_default_familiar_duration(
     assert result["anonymous_id"] == "anon_123"
     assert result["seen_count"] == 3
     assert result["observed_duration_ms"] == 10_000
+    assert result["person_visual_evidence"] == {
+        "source_bbox_xyxy": [796.0, 112.0, 939.0, 590.0],
+        "source_bbox_coordinate_space": "source_frame",
+        "source_frame_ref": "front:42:17200",
+        "source_frame_path": str(frame_path),
+        "frame_id": 42,
+        "frame_timestamp_ms": 17_200,
+    }
     assert result["frame_relation"] == "no_user_input"
     assert result["anchor_frame"] is None
     assert result["candidate_frames"] == [str(frame_path)]

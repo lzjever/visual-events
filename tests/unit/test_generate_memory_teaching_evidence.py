@@ -502,6 +502,14 @@ def test_public_renderer_shows_familiar_unknown_representative_frame(
         "seen_count": 3,
         "observed_duration_ms": 4200,
         "familiar_score": 0.87,
+        "person_visual_evidence": {
+            "source_bbox_xyxy": [40, 28, 150, 170],
+            "source_bbox_coordinate_space": "source_frame",
+            "face_detection": {
+                "coordinate_space": "source_frame",
+                "face_bbox_xyxy": [70, 42, 118, 96],
+            },
+        },
         "events": [
             {
                 "event": "familiar_unknown_present",
@@ -532,18 +540,331 @@ def test_public_renderer_shows_familiar_unknown_representative_frame(
     familiar_item = {
         item["id"]: item for item in public_index
     }["familiar_unknown"]
+    assert familiar_item["status"] == "passed"
     assert familiar_item["path"] == "visual-evidence/familiar-unknown-present.jpg"
     assert familiar_item["image"] == "visual-evidence/familiar-unknown-present.jpg"
     assert familiar_item["selected_evidence_frame"] == str(
         frame_paths["pic_teach_person"]
     )
+    assert familiar_item["metrics"] == {
+        "seen_count": 3,
+        "observed_duration_ms": 4200,
+        "familiar_score": 0.87,
+        "face_detection": "recorded",
+        "person_box_available": True,
+        "face_box_available": True,
+    }
     _assert_image_verifies(out / familiar_item["image"])
     visual_html = (out / "visual-evidence" / "index.html").read_text(
         encoding="utf-8"
     )
     assert "匿名熟客出现" in visual_html
     assert "familiar-unknown-present.jpg" in visual_html
+    assert "seen_count" in visual_html
     assert '<img class="thumb"' in visual_html
+
+
+def test_public_renderer_prefers_familiar_direct_evidence_over_sidecar(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact = tmp_path / "artifact"
+    frame_paths = _write_artifact(artifact)
+    report_path = artifact / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["familiar_unknown"] = {
+        "status": "passed",
+        "passed": True,
+        "selected_window": {
+            "scene": memory_teaching_evidence.FAMILIAR_UNKNOWN_SCENE,
+            "frame": str(frame_paths["pic_teach_person"]),
+        },
+        "seen_count": 11,
+        "observed_duration_ms": 10_000,
+        "familiar_score": 1.0,
+        "person_visual_evidence": {
+            "source_bbox_xyxy": [796, 112, 939, 590],
+            "source_bbox_coordinate_space": "source_frame",
+        },
+        "events": [
+            {
+                "event": "familiar_unknown_present",
+                "event_id": "evt_familiar",
+                "track_id": 9,
+            }
+        ],
+    }
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        artifact / "visual_states.jsonl",
+        [
+            {
+                "source_frame": str(frame_paths["pic_teach_person"]),
+                "visual_state": {
+                    "semantic_events": [
+                        {
+                            "event": "familiar_unknown_present",
+                            "event_id": "evt_familiar",
+                            "track_id": 9,
+                        }
+                    ],
+                    "tracks": [
+                        {"track_id": 9, "bbox_xyxy": [20, 20, 300, 170]},
+                    ],
+                },
+            }
+        ],
+    )
+    overlay_calls: list[dict[str, Any]] = []
+
+    def fake_write_image_overlay(**kwargs: Any) -> bool:
+        overlay_calls.append(kwargs)
+        kwargs["output_path"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_path"].write_bytes(_valid_jpeg_bytes())
+        return True
+
+    monkeypatch.setattr(
+        memory_teaching_evidence,
+        "write_image_overlay",
+        fake_write_image_overlay,
+    )
+
+    summary = memory_teaching_evidence.render_memory_teaching_evidence(
+        artifact=artifact,
+        out=tmp_path / "public",
+        public_demo=True,
+    )
+
+    familiar_item = {
+        item["id"]: item for item in summary["visual_evidence_index"]
+    }["familiar_unknown"]
+    assert familiar_item["metrics"]["person_box_available"] is True
+    familiar_call = next(
+        call
+        for call in overlay_calls
+        if call["output_path"].name == "familiar-unknown-present.jpg"
+    )
+    assert familiar_call["boxes"][0]["bbox_xyxy"] == [796.0, 112.0, 939.0, 590.0]
+
+
+def test_public_renderer_does_not_cross_scene_fallback_for_familiar_bbox(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact = tmp_path / "artifact"
+    frame_paths = _write_artifact(artifact)
+    report_path = artifact / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["familiar_unknown"] = {
+        "status": "passed",
+        "passed": True,
+        "selected_window": {
+            "scene": memory_teaching_evidence.FAMILIAR_UNKNOWN_SCENE,
+            "frame": str(frame_paths["pic_teach_person"]),
+        },
+        "seen_count": 11,
+        "observed_duration_ms": 10_000,
+        "familiar_score": 1.0,
+        "events": [
+            {
+                "event": "familiar_unknown_present",
+                "event_id": "evt_familiar",
+                "track_id": 9,
+            }
+        ],
+    }
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        artifact / "visual_states.jsonl",
+        [
+            {
+                "source_frame": str(frame_paths["pic_teach_me"]),
+                "visual_state": {
+                    "semantic_events": [
+                        {
+                            "event": "familiar_unknown_present",
+                            "event_id": "evt_familiar",
+                            "track_id": 9,
+                        }
+                    ],
+                    "tracks": [
+                        {"track_id": 9, "bbox_xyxy": [20, 20, 300, 170]},
+                    ],
+                },
+            }
+        ],
+    )
+    overlay_calls: list[dict[str, Any]] = []
+
+    def fake_write_image_overlay(**kwargs: Any) -> bool:
+        overlay_calls.append(kwargs)
+        kwargs["output_path"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_path"].write_bytes(_valid_jpeg_bytes())
+        return True
+
+    monkeypatch.setattr(
+        memory_teaching_evidence,
+        "write_image_overlay",
+        fake_write_image_overlay,
+    )
+
+    summary = memory_teaching_evidence.render_memory_teaching_evidence(
+        artifact=artifact,
+        out=tmp_path / "public",
+        public_demo=True,
+    )
+
+    familiar_item = {
+        item["id"]: item for item in summary["visual_evidence_index"]
+    }["familiar_unknown"]
+    assert familiar_item["metrics"]["person_box_available"] is False
+    familiar_call = next(
+        call
+        for call in overlay_calls
+        if call["output_path"].name == "familiar-unknown-present.jpg"
+    )
+    assert familiar_call["boxes"] == []
+    assert "person box not available" in familiar_call["lines"]
+
+
+def test_public_renderer_generates_third_person_failure_evidence_image(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact = tmp_path / "artifact"
+    frame_paths = _write_artifact(artifact)
+    alternate = frame_paths["pic_teach_person"].parent / "img_001.jpeg"
+    alternate.write_bytes(_valid_jpeg_bytes((90, 160, 210)))
+    report_path = artifact / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["status"] = "failed"
+    report["third_person_probe"] = {
+        "status": "failed",
+        "passed": False,
+        "reason": "multiple_candidates",
+        "user_message": "这位是王工",
+        "source_image_path": str(frame_paths["pic_teach_person"]),
+        "anchor_frame": str(frame_paths["pic_teach_person"]),
+        "candidate_frames": [str(frame_paths["pic_teach_person"]), str(alternate)],
+        "selected_window": {
+            "scene": "pic_teach_person",
+            "frame": str(alternate),
+        },
+    }
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (artifact / "api_responses.jsonl").write_text(
+        json.dumps(
+            {
+                "scene": "pic_teach_person",
+                "endpoint": "/v1/memory/resolve-target",
+                "operation": "local_resolve_third_person_target",
+                "response": {
+                    "status": "ambiguous",
+                    "evidence": {
+                        "request_snapshot_ref": "memory_frame:front:9:1800",
+                        "source_frame_ref": "front:9:1800",
+                        "pose_visual_evidence": {
+                            "introducer_ref": "front:track:7",
+                            "introducer_bbox_xyxy": [20, 20, 80, 120],
+                            "arm_side": "right",
+                            "shoulder_xy": [62, 50],
+                            "elbow_xy": [90, 62],
+                            "wrist_xy": [112, 72],
+                            "ray_start_xy": [112, 72],
+                            "ray_end_xy": [210, 94],
+                            "candidate_scores": [
+                                {
+                                    "track_id": 8,
+                                    "bbox_xyxy": [120, 20, 180, 120],
+                                    "score": 0.61,
+                                    "ray_intersects_bbox": True,
+                                },
+                                {
+                                    "track_id": 9,
+                                    "bbox_xyxy": [205, 24, 270, 126],
+                                    "score": 0.58,
+                                    "ray_intersects_bbox": True,
+                                },
+                            ],
+                        },
+                    },
+                    "candidates": [
+                        {"track_id": 8, "bbox_xyxy": [120, 20, 180, 120]},
+                        {"track_id": 9, "bbox_xyxy": [205, 24, 270, 126]},
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "public"
+    overlay_calls: list[dict[str, Any]] = []
+
+    def fake_write_image_overlay(**kwargs: Any) -> bool:
+        overlay_calls.append(kwargs)
+        output_path = kwargs["output_path"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(_valid_jpeg_bytes())
+        return True
+
+    monkeypatch.setattr(
+        memory_teaching_evidence,
+        "write_image_overlay",
+        fake_write_image_overlay,
+    )
+
+    summary = memory_teaching_evidence.render_memory_teaching_evidence(
+        artifact=artifact,
+        out=out,
+        public_demo=True,
+    )
+
+    public_index = summary["visual_evidence_index"]
+    pointing_item = {
+        item["id"]: item for item in public_index
+    }["pointing_teaching"]
+    assert pointing_item["status"] == "failed"
+    assert pointing_item["image"] == (
+        "visual-evidence/third-person-pose-pointing-failure.jpg"
+    )
+    assert "未绑定" in pointing_item["summary"]
+    assert pointing_item["metrics"]["candidate_count"] == 2
+    assert pointing_item["metrics"]["candidate_box_available"] is True
+    assert pointing_item["metrics"]["ray_evidence_available"] is True
+    _assert_image_verifies(out / pointing_item["image"])
+    pointing_call = next(
+        call
+        for call in overlay_calls
+        if call["output_path"].name == "third-person-pose-pointing-failure.jpg"
+    )
+    labels = [
+        box["label"]
+        for box in pointing_call["boxes"]
+        if isinstance(box, dict) and "label" in box
+    ]
+    assert "introducer" in labels
+    assert any("candidate 1 score 0.61" in label for label in labels)
+    assert any("candidate 2 score 0.58" in label for label in labels)
+    assert pointing_call["arrows"]
+    visual_html = (out / "visual-evidence" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "第三人称指向示教" in visual_html
+    assert "third-person-pose-pointing-failure.jpg" in visual_html
+    assert "目标不明确" in visual_html
+    for forbidden_text in ("track_id", "bbox_xyxy", "keypoints", "embedding"):
+        assert forbidden_text not in visual_html
 
 
 def test_offline_renderer_marks_familiar_unknown_missing_frame_without_image(
@@ -590,7 +911,33 @@ def test_public_renderer_uses_product_friendly_overlay_labels(
     monkeypatch,
 ) -> None:
     artifact = tmp_path / "artifact"
-    _write_artifact(artifact)
+    frame_paths = _write_artifact(artifact)
+    report_path = artifact / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["familiar_unknown"] = {
+        "status": "passed",
+        "passed": True,
+        "selected_window": {
+            "scene": memory_teaching_evidence.FAMILIAR_UNKNOWN_SCENE,
+            "frame": str(frame_paths["pic_teach_person"]),
+        },
+        "seen_count": 11,
+        "observed_duration_ms": 10_000,
+        "familiar_score": 1.0,
+        "person_visual_evidence": {
+            "source_bbox_xyxy": [40, 28, 150, 170],
+            "source_bbox_coordinate_space": "source_frame",
+            "face_detection": {
+                "coordinate_space": "source_frame",
+                "face_bbox_xyxy": [70, 42, 118, 96],
+            },
+        },
+        "events": [{"event": "familiar_unknown_present"}],
+    }
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     out = tmp_path / "public"
     overlay_calls: list[dict[str, Any]] = []
 
@@ -617,6 +964,7 @@ def test_public_renderer_uses_product_friendly_overlay_labels(
         "self-introduction-known-person.jpg",
         "third-person-pose-pointing.jpg",
         "teach-scene-scene-activated.jpg",
+        "familiar-unknown-present.jpg",
     }
     overlay_text = json.dumps(
         [
@@ -652,6 +1000,21 @@ def test_public_renderer_uses_product_friendly_overlay_labels(
     )
     assert pointing_call["arrows"]
     assert pointing_call["points"]
+    familiar_call = next(
+        call
+        for call in overlay_calls
+        if call["output_path"].name == "familiar-unknown-present.jpg"
+    )
+    assert familiar_call["title"] == "熟悉的未命名人物"
+    assert familiar_call["lines"] == [
+        "见过 11 次",
+        "累计 10s",
+        "score 1.0",
+        "person box available",
+        "face: recorded",
+    ]
+    familiar_labels = [box["label"] for box in familiar_call["boxes"]]
+    assert familiar_labels == ["familiar person", "face"]
 
 
 def test_offline_renderer_separates_transcript_templates_from_actual_posts(

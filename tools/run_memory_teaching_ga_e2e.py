@@ -1329,6 +1329,7 @@ def _run_local_familiar_unknown_demo(
     observation_count = 0
     with runner.open_stream() as websocket:
         all_events: list[dict[str, Any]] = []
+        event_state_records: list[dict[str, Any]] = []
         for index in range(FAMILIAR_UNKNOWN_MAX_OBSERVATIONS):
             observation_count = index + 1
             observation_events = _send_stable_query_and_drain_local(
@@ -1342,6 +1343,7 @@ def _run_local_familiar_unknown_demo(
                 phase=f"familiar-unknown-observation-{observation_count:02d}",
                 drain_attempts=2,
                 wait_for_idle=True,
+                event_state_records=event_state_records,
             )
             all_events.extend(observation_events)
             if (
@@ -1361,6 +1363,10 @@ def _run_local_familiar_unknown_demo(
     )
     if not isinstance(anonymous, dict):
         anonymous = {}
+    person_visual_evidence = _person_visual_evidence_from_event_state_records(
+        familiar,
+        event_state_records,
+    )
     required_seen_count = _familiar_seen_count(config)
     required_observed_duration_ms = _familiar_observed_duration_ms(config)
     assertions = {
@@ -1389,6 +1395,7 @@ def _run_local_familiar_unknown_demo(
         "seen_count": anonymous.get("seen_count"),
         "observed_duration_ms": anonymous.get("observed_duration_ms"),
         "familiar_score": anonymous.get("familiar_score"),
+        "person_visual_evidence": person_visual_evidence,
         "observation_count": observation_count,
         "required_seen_count": required_seen_count,
         "required_observed_duration_ms": required_observed_duration_ms,
@@ -1915,6 +1922,7 @@ def _send_stable_query_and_drain_local(
     phase: str,
     drain_attempts: int = 12,
     wait_for_idle: bool = False,
+    event_state_records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     for offset_ms in (400, 800):
         runner.send(
@@ -1940,6 +1948,13 @@ def _send_stable_query_and_drain_local(
         if callable(wait):
             wait(stream_ref)
     query_events = list(query_state.get("semantic_events") or [])
+    _append_event_state_records(
+        event_state_records,
+        events=query_events,
+        visual_state=query_state,
+        source_frame=source_frame,
+        phase=f"{phase}:query",
+    )
     for attempt in range(drain_attempts):
         if not wait_for_idle or attempt > 0:
             time.sleep(memory_e2e.QUERY_DRAIN_WAIT_SECONDS)
@@ -1950,10 +1965,116 @@ def _send_stable_query_and_drain_local(
             states_file=states_file,
             phase=f"{phase}:drain",
         )
-        events = [*query_events, *list(drained.get("semantic_events") or [])]
+        drained_events = list(drained.get("semantic_events") or [])
+        _append_event_state_records(
+            event_state_records,
+            events=drained_events,
+            visual_state=drained,
+            source_frame=source_frame,
+            phase=f"{phase}:drain",
+        )
+        events = [*query_events, *drained_events]
         if events:
             return events
     return query_events
+
+
+def _append_event_state_records(
+    records: list[dict[str, Any]] | None,
+    *,
+    events: list[dict[str, Any]],
+    visual_state: dict[str, Any],
+    source_frame: memory_e2e.SourceFrame,
+    phase: str,
+) -> None:
+    if records is None:
+        return
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        records.append(
+            {
+                "event": event,
+                "visual_state": visual_state,
+                "source_frame": str(source_frame.path),
+                "phase": phase,
+            }
+        )
+
+
+def _person_visual_evidence_from_event_state_records(
+    event: dict[str, Any] | None,
+    records: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+    for record in records:
+        if not _same_semantic_event(record.get("event"), event):
+            continue
+        visual_state = record.get("visual_state")
+        if not isinstance(visual_state, dict):
+            continue
+        track = _event_track_from_visual_state(event, visual_state)
+        if track is None:
+            continue
+        bbox = _float_bbox(track.get("bbox_xyxy"))
+        if bbox is None:
+            continue
+        evidence: dict[str, Any] = {
+            "source_bbox_xyxy": bbox,
+            "source_bbox_coordinate_space": "source_frame",
+        }
+        source_frame_ref = _visual_state_source_frame_ref(visual_state)
+        if source_frame_ref is not None:
+            evidence["source_frame_ref"] = source_frame_ref
+        source_frame = record.get("source_frame")
+        if isinstance(source_frame, str) and source_frame:
+            evidence["source_frame_path"] = source_frame
+        for key in ("frame_id", "frame_timestamp_ms"):
+            if visual_state.get(key) is not None:
+                evidence[key] = visual_state.get(key)
+        return evidence
+    return None
+
+
+def _same_semantic_event(left: Any, right: dict[str, Any]) -> bool:
+    if not isinstance(left, dict):
+        return False
+    left_id = left.get("event_id")
+    right_id = right.get("event_id")
+    if left_id is not None and right_id is not None:
+        return left_id == right_id
+    return (
+        left.get("event") == right.get("event")
+        and left.get("track_id") == right.get("track_id")
+    )
+
+
+def _event_track_from_visual_state(
+    event: dict[str, Any],
+    visual_state: dict[str, Any],
+) -> dict[str, Any] | None:
+    tracks = visual_state.get("tracks")
+    if not isinstance(tracks, list):
+        return None
+    track_id = _int_or_none(event.get("track_id"))
+    if track_id is not None:
+        for track in tracks:
+            if isinstance(track, dict) and track.get("track_id") == track_id:
+                return track
+        return None
+    if len(tracks) == 1 and isinstance(tracks[0], dict):
+        return tracks[0]
+    return None
+
+
+def _visual_state_source_frame_ref(visual_state: dict[str, Any]) -> str | None:
+    camera = visual_state.get("camera")
+    frame_id = visual_state.get("frame_id")
+    timestamp_ms = visual_state.get("frame_timestamp_ms")
+    if camera is None or frame_id is None or timestamp_ms is None:
+        return None
+    return f"{camera}:{frame_id}:{timestamp_ms}"
 
 
 def _local_smoke_source_frames(
@@ -2689,6 +2810,22 @@ def _int_value(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError, OverflowError):
         return default
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _float_bbox(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        return [float(item) for item in value]
+    except (TypeError, ValueError):
+        return None
 
 
 def _run_actual_scene_replay(
