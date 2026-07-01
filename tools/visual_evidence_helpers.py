@@ -34,13 +34,14 @@ def draw_visual_state(
     *,
     scene: Any = None,
     frame_id: Any = None,
+    public_labels: bool = False,
 ) -> Any:
     canvas = image.copy()
     tracks = state.get("tracks")
     if isinstance(tracks, list):
         for track in tracks:
             if isinstance(track, dict):
-                _draw_track(canvas, track)
+                _draw_track(canvas, track, public_labels=public_labels)
 
     attention = state.get("attention")
     if isinstance(attention, dict):
@@ -49,17 +50,26 @@ def draw_visual_state(
             _draw_cross(canvas, target_uv, color=(0, 255, 255), radius=16, thickness=2)
             _put_label(
                 canvas,
-                f"attention track={attention.get('target_track_id', '-')}",
+                "pointing evidence"
+                if public_labels
+                else f"attention track={attention.get('target_track_id', '-')}",
                 (int(target_uv[0]) + 8, int(target_uv[1]) - 12),
                 color=(0, 255, 255),
             )
 
-    _draw_header(canvas, state, scene=scene, frame_id=frame_id)
-    _draw_events(canvas, state)
+    if public_labels:
+        _draw_text_block(
+            canvas,
+            _public_frame_header_lines(state, scene=scene, frame_id=frame_id),
+            origin=(10, 24),
+        )
+    else:
+        _draw_header(canvas, state, scene=scene, frame_id=frame_id)
+    _draw_events(canvas, state, public_labels=public_labels)
     return canvas
 
 
-def _draw_track(canvas: Any, track: dict[str, Any]) -> None:
+def _draw_track(canvas: Any, track: dict[str, Any], *, public_labels: bool) -> None:
     import cv2
 
     bbox = track.get("bbox_xyxy")
@@ -76,7 +86,7 @@ def _draw_track(canvas: Any, track: dict[str, Any]) -> None:
     cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
 
     confidence = _fmt_float(track.get("confidence"))
-    label = f"id={track_id} conf={confidence} lost={int(track.get('lost_ms', 0))}ms"
+    label = "person" if public_labels else f"id={track_id} conf={confidence} lost={int(track.get('lost_ms', 0))}ms"
     _put_label(canvas, label, (x1, max(18, y1 - 8)), color=color)
 
     head_uv = track.get("head_uv")
@@ -117,6 +127,26 @@ def frame_header_lines(
     return lines
 
 
+def _public_frame_header_lines(
+    state: dict[str, Any],
+    *,
+    scene: Any = None,
+    frame_id: Any = None,
+) -> list[str]:
+    lines = [
+        f"frame={_short(frame_id if frame_id is not None else state.get('frame_id', '-'))}",
+        f"camera={state.get('camera', '-')}",
+    ]
+    if scene is not None:
+        lines.append(f"scene={_short(scene, 80)}")
+    scene_flags = state.get("scene_flags")
+    if isinstance(scene_flags, dict):
+        lines.append(f"people={scene_flags.get('person_count', '-')}")
+    attention = state.get("attention")
+    lines.append(f"pointing={'active' if isinstance(attention, dict) else 'none'}")
+    return lines
+
+
 def _draw_header(
     canvas: Any,
     state: dict[str, Any],
@@ -128,14 +158,18 @@ def _draw_header(
     _draw_text_block(canvas, lines, origin=(10, 24))
 
 
-def _draw_events(canvas: Any, state: dict[str, Any]) -> None:
+def _draw_events(canvas: Any, state: dict[str, Any], *, public_labels: bool) -> None:
     events = state.get("semantic_events")
     if not isinstance(events, list) or not events:
         return
     lines = []
     for event in events[:4]:
         if isinstance(event, dict):
-            lines.append(_clip(_event_summary(event), 116))
+            lines.append(
+                _clip(_public_event_label(event), 116)
+                if public_labels
+                else _clip(_event_summary(event), 116)
+            )
     if lines:
         height = canvas.shape[0]
         _draw_text_block(canvas, lines, origin=(10, max(24, height - 24 * len(lines) - 8)))
@@ -274,6 +308,15 @@ def _event_summary(event: Any) -> str:
         )
     evidence = _evidence_summary(event)
     return f"{event_name} track={track}{_event_identity_suffix(event)} evidence={evidence}"
+
+
+def _public_event_label(event: Any) -> str:
+    if not isinstance(event, dict):
+        return "event"
+    event_name = str(event.get("event") or "event")
+    if event_name in _MEMORY_EVENTS:
+        return event_name
+    return event_name.replace("_", " ")
 
 
 def _event_identity_suffix(event: dict[str, Any]) -> str:

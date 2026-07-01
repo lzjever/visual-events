@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from tools import generate_memory_teaching_evidence as module
+from tools import memory_teaching_evidence
 
 
 def _valid_jpeg_bytes(color: tuple[int, int, int] = (128, 128, 128)) -> bytes:
@@ -427,6 +429,129 @@ def test_offline_renderer_generates_html_json_images_and_crop_previews(
     assert "face_detection" in visual_html
     assert "Actual posted payload summary" in visual_html
     assert "<code>api_responses.jsonl</code>: not_present" in visual_html
+
+
+def test_public_renderer_uses_demo_rows_without_internal_debug(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    _write_artifact(artifact)
+    out = tmp_path / "public"
+
+    summary = memory_teaching_evidence.render_memory_teaching_evidence(
+        artifact=artifact,
+        out=out,
+        public_demo=True,
+    )
+
+    root_html = (out / "index.html").read_text(encoding="utf-8")
+    visual_html = (out / "visual-evidence" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    public_text = "\n".join([root_html, visual_html])
+    public_index = summary["visual_evidence_index"]
+
+    assert [item["id"] for item in public_index] == [
+        "self_introduction",
+        "scene_teaching",
+        "pointing_teaching",
+    ]
+    assert not (out / "visual_evidence_index.json").exists()
+    assert not (out / "visual-evidence" / "crops").exists()
+    public_file_names = [path.name for path in out.rglob("*") if path.is_file()]
+    assert all("person_" not in name for name in public_file_names)
+    assert all(re.search(r"[0-9a-f]{12,}", name) is None for name in public_file_names)
+    assert "记住自我介绍" in public_text
+    assert "第三人称指向示教" in public_text
+    assert "记住场景" in public_text
+    for forbidden_text in [
+        "Debug JSON",
+        "assertion_id",
+        "person_id",
+        "event_id",
+        "crop_hash",
+        "bbox_xyxy",
+        "request_snapshot_ref",
+        "resolver_target_ref",
+        "memory_match_id",
+        "embedding_id",
+        "crop_path_or_artifact_ref",
+        "Source Report",
+        "source gate",
+        "local-smoke",
+        "unsupported",
+        "not_present",
+    ]:
+        assert forbidden_text not in public_text
+
+
+def test_public_renderer_uses_product_friendly_overlay_labels(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact = tmp_path / "artifact"
+    _write_artifact(artifact)
+    out = tmp_path / "public"
+    overlay_calls: list[dict[str, Any]] = []
+
+    def fake_write_image_overlay(**kwargs: Any) -> bool:
+        overlay_calls.append(kwargs)
+        output_path = kwargs["output_path"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(_valid_jpeg_bytes())
+        return True
+
+    monkeypatch.setattr(
+        memory_teaching_evidence,
+        "write_image_overlay",
+        fake_write_image_overlay,
+    )
+
+    memory_teaching_evidence.render_memory_teaching_evidence(
+        artifact=artifact,
+        out=out,
+        public_demo=True,
+    )
+
+    assert {call["output_path"].name for call in overlay_calls} == {
+        "self-introduction-known-person.jpg",
+        "third-person-pose-pointing.jpg",
+        "teach-scene-scene-activated.jpg",
+    }
+    overlay_text = json.dumps(
+        [
+            {
+                "title": call["title"],
+                "lines": call["lines"],
+                "labels": [
+                    box.get("label")
+                    for box in call.get("boxes") or []
+                    if isinstance(box, dict)
+                ],
+            }
+            for call in overlay_calls
+        ],
+        ensure_ascii=False,
+    )
+    for expected_label in ("person", "face", "target", "introducer"):
+        assert expected_label in overlay_text
+    for forbidden_text in (
+        "person_id",
+        "event_id",
+        "crop_hash",
+        "resolver_target_ref",
+        "front:track",
+        "memory_match_id",
+        "embedding_id",
+    ):
+        assert forbidden_text not in overlay_text
+    pointing_call = next(
+        call
+        for call in overlay_calls
+        if call["output_path"].name == "third-person-pose-pointing.jpg"
+    )
+    assert pointing_call["arrows"]
+    assert pointing_call["points"]
 
 
 def test_offline_renderer_separates_transcript_templates_from_actual_posts(

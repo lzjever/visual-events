@@ -45,6 +45,17 @@ from visual_events_server.protocol import SCHEMA_VERSION, encode_frame_message
 DEFAULT_DATA_DIR = Path("val-data")
 DEFAULT_OUT = Path("artifacts/memory-teaching-ga")
 DEFAULT_CAMERA = "front"
+REAL_MODEL_MEMORY_DEMO_MODE = "memory-demo"
+REAL_MODEL_MEMORY_DEMO_GATE = "memory_demo_real_model"
+REAL_MODEL_MEMORY_DEMO_CASES = {
+    "self": "memory-demo-self",
+    "scene": "memory-demo-scene",
+    "third_person": "memory-demo-third-person",
+    "familiar_unknown": "memory-demo-familiar-unknown",
+}
+FAMILIAR_UNKNOWN_SCENE = "pic_familiar_face"
+FAMILIAR_UNKNOWN_MAX_OBSERVATIONS = 13
+FAMILIAR_UNKNOWN_OBSERVATION_INTERVAL_MS = 1_500
 PAYLOAD_FIXTURE_STREAM_REF = memory_e2e.PAYLOAD_FIXTURE_STREAM_REF
 
 JPEG_SUFFIXES = {".jpeg", ".jpg"}
@@ -663,6 +674,9 @@ def run_local_smoke(
     scene_model_path: Path | None,
     inference_backend: str,
     pose_model_path: Path | None,
+    case_names: dict[str, str] | None = None,
+    include_familiar_unknown: bool = False,
+    familiar_unknown_scene: str = FAMILIAR_UNKNOWN_SCENE,
 ) -> dict[str, Any]:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -733,6 +747,9 @@ def run_local_smoke(
             camera=camera,
             config=local_config,
             states_file=states_file,
+            case_names=case_names,
+            include_familiar_unknown=include_familiar_unknown,
+            familiar_unknown_scene=familiar_unknown_scene,
         )
 
     api_response_records = list(execution.get("api_response_records") or [])
@@ -741,6 +758,11 @@ def run_local_smoke(
     scene_result = dict(execution.get("scene_smoke") or _not_run_result())
     third_person_result = dict(
         execution.get("third_person_probe") or _not_run_result(status="insufficient_sample")
+    )
+    familiar_unknown_result = (
+        dict(execution.get("familiar_unknown"))
+        if include_familiar_unknown and isinstance(execution.get("familiar_unknown"), dict)
+        else None
     )
     third_person_result = _with_local_third_person_debug_evidence(third_person_result)
     self_result = _with_record_source_fields(
@@ -820,6 +842,7 @@ def run_local_smoke(
         self_result=self_result,
         scene_result=scene_result,
         third_person_result=third_person_result,
+        familiar_unknown_result=familiar_unknown_result,
         bounded_multi_person_recognition=bounded_multi_person_recognition,
     )
     ok = all(check["passed"] for check in checks)
@@ -856,8 +879,136 @@ def run_local_smoke(
             "No agent-facing teach payload adds track_id, bbox, point, source frame, or test hint fields.",
         ],
     }
+    if familiar_unknown_result is not None:
+        report["familiar_unknown"] = familiar_unknown_result
     _write_json(report_path, report)
     return report
+
+
+def run_real_model_memory_demo(
+    *,
+    data_dir: Path,
+    out: Path,
+    camera: str = DEFAULT_CAMERA,
+    person_model_path: Path,
+    scene_model_path: Path,
+    pose_model_path: Path,
+) -> dict[str, Any]:
+    report = run_local_smoke(
+        data_dir=data_dir,
+        out=out,
+        camera=camera,
+        embedding_backend="local",
+        person_model_path=person_model_path,
+        scene_model_path=scene_model_path,
+        inference_backend="ultralytics",
+        pose_model_path=pose_model_path,
+        case_names=REAL_MODEL_MEMORY_DEMO_CASES,
+        include_familiar_unknown=True,
+        familiar_unknown_scene=FAMILIAR_UNKNOWN_SCENE,
+    )
+    report = _real_model_memory_demo_report(
+        report,
+        person_model_path=person_model_path,
+        scene_model_path=scene_model_path,
+        pose_model_path=pose_model_path,
+    )
+    _rewrite_teach_payloads_metadata(
+        Path(out) / "teach_payloads.json",
+        mode=REAL_MODEL_MEMORY_DEMO_MODE,
+        backend="local",
+    )
+    _write_json(Path(out) / "report.json", report)
+    return report
+
+
+def _real_model_memory_demo_report(
+    report: dict[str, Any],
+    *,
+    person_model_path: Path,
+    scene_model_path: Path,
+    pose_model_path: Path,
+) -> dict[str, Any]:
+    clean = dict(report)
+    source_ok = bool(clean.get("ok"))
+    source_real_model = clean.get("real_model_evidence") is True
+    if "self_smoke" in clean:
+        clean["self_introduction"] = clean.pop("self_smoke")
+    if "scene_smoke" in clean:
+        clean["teach_scene"] = clean.pop("scene_smoke")
+    if "third_person_probe" in clean:
+        clean["third_person_introduction"] = clean.pop("third_person_probe")
+    clean.update(
+        {
+            "gate": REAL_MODEL_MEMORY_DEMO_GATE,
+            "mode": REAL_MODEL_MEMORY_DEMO_MODE,
+            "backend": "local",
+            "embedding_backend": "local",
+            "inference_backend": "ultralytics",
+            "real_model_evidence": source_ok and source_real_model,
+            "models": {
+                "pose": str(pose_model_path),
+                "face": str(person_model_path),
+                "scene": str(scene_model_path),
+            },
+            "checks": _real_model_memory_demo_checks(clean.get("checks")),
+            "visual_evidence_index": [],
+            "notes": [
+                (
+                    "Memory demo uses the local embedding backend and ultralytics "
+                    "pose backend with fixed real model paths."
+                ),
+                (
+                    "No agent-facing teach payload adds track_id, bbox, point, "
+                    "source frame, embedding, crop, or test hint fields."
+                ),
+            ],
+        }
+    )
+    return clean
+
+
+def _real_model_memory_demo_checks(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rename = {
+        "local_smoke_explicit_real_backends": "real_model_paths",
+        "expected_local_smoke_scenes": "expected_memory_demo_scenes",
+        "self_local_smoke": "self_introduction_known_person_present",
+        "scene_local_smoke": "teach_scene_scene_activated",
+        "third_person_local_probe": "third_person_pose_pointing_known_person",
+        "familiar_unknown_local_demo": "familiar_unknown_present",
+        "artifact_skeleton": "demo_outputs",
+    }
+    checks: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        copied = dict(item)
+        name = copied.get("name")
+        if isinstance(name, str) and name in rename:
+            copied["name"] = rename[name]
+        checks.append(copied)
+    return checks
+
+
+def _rewrite_teach_payloads_metadata(
+    path: Path,
+    *,
+    mode: str,
+    backend: str,
+) -> None:
+    if not path.is_file():
+        return
+    try:
+        payloads = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payloads, dict):
+        return
+    payloads["mode"] = mode
+    payloads["backend"] = backend
+    _write_json(path, payloads)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -991,6 +1142,31 @@ class LocalMemorySmokeRunner:
         states_file.flush()
         return state
 
+    def wait_for_memory_query_idle(self, stream_ref: str | None) -> bool:
+        for attempt in range(12):
+            pending = self._pending_memory_query(stream_ref)
+            if pending is not None:
+                if pending.done():
+                    return True
+            elif attempt > 0:
+                return True
+            time.sleep(memory_e2e.QUERY_DRAIN_WAIT_SECONDS)
+        return False
+
+    def _pending_memory_query(self, stream_ref: str | None) -> Any | None:
+        if not stream_ref:
+            return None
+        memory_service = self._memory_service()
+        pending_by_stream = getattr(memory_service, "_pending_queries_by_stream", None)
+        if not isinstance(pending_by_stream, dict):
+            return None
+        return pending_by_stream.get((stream_ref, self.camera))
+
+    def _memory_service(self) -> Any | None:
+        app = getattr(self.client, "app", None)
+        state = getattr(app, "state", None)
+        return getattr(state, "memory_service", None)
+
 
 def _execute_local_smoke(
     *,
@@ -1000,9 +1176,13 @@ def _execute_local_smoke(
     camera: str,
     config: ServerConfig,
     states_file: Any,
+    case_names: dict[str, str] | None = None,
+    include_familiar_unknown: bool = False,
+    familiar_unknown_scene: str = FAMILIAR_UNKNOWN_SCENE,
 ) -> dict[str, Any]:
     api_response_records: list[dict[str, Any]] = []
     botified_frame_records: list[dict[str, Any]] = []
+    cases = case_names or {}
 
     self_scene = _find_scene(scenes, "pic_teach_me")
     self_record = payloads_by_scene.get("pic_teach_me")
@@ -1019,6 +1199,7 @@ def _execute_local_smoke(
             states_file=states_file,
             api_response_records=api_response_records,
             botified_frame_records=botified_frame_records,
+            case=cases.get("self", "local-self-smoke"),
         )
 
     scene_scene = _find_scene(scenes, "pic_teach_scene_galbot")
@@ -1036,6 +1217,7 @@ def _execute_local_smoke(
             states_file=states_file,
             api_response_records=api_response_records,
             botified_frame_records=botified_frame_records,
+            case=cases.get("scene", "local-scene-smoke"),
         )
 
     third_scene = _find_scene(scenes, "pic_teach_person")
@@ -1057,15 +1239,138 @@ def _execute_local_smoke(
             states_file=states_file,
             api_response_records=api_response_records,
             botified_frame_records=botified_frame_records,
+            case=cases.get("third_person", "local-third-person-probe"),
         )
 
-    return {
+    result = {
         "self_smoke": self_result,
         "scene_smoke": scene_result,
         "third_person_probe": third_result,
         "api_response_records": api_response_records,
         "botified_frame_records": botified_frame_records,
     }
+    if include_familiar_unknown:
+        familiar_scene = _find_scene(scenes, familiar_unknown_scene)
+        if familiar_scene is None:
+            familiar_result = {
+                "status": "failed",
+                "passed": False,
+                "reason": "required_familiar_unknown_scene_missing",
+                "scene": familiar_unknown_scene,
+                "events": [],
+            }
+        else:
+            familiar_result = _run_local_familiar_unknown_demo(
+                out=out,
+                scene=familiar_scene,
+                camera=camera,
+                config=config,
+                states_file=states_file,
+                botified_frame_records=botified_frame_records,
+                case=cases.get("familiar_unknown", "local-familiar-unknown"),
+            )
+        result["familiar_unknown"] = familiar_result
+    return result
+
+
+def _run_local_familiar_unknown_demo(
+    *,
+    out: Path,
+    scene: SceneDir,
+    camera: str,
+    config: ServerConfig,
+    states_file: Any,
+    botified_frame_records: list[dict[str, Any]],
+    case: str = "local-familiar-unknown",
+) -> dict[str, Any]:
+    runner = LocalMemorySmokeRunner(
+        case=case,
+        out=out,
+        camera=camera,
+        config=config,
+    )
+    source_frame = _load_source_frame_from_scene(scene)
+    observation_count = 0
+    with runner.open_stream() as websocket:
+        all_events: list[dict[str, Any]] = []
+        for index in range(FAMILIAR_UNKNOWN_MAX_OBSERVATIONS):
+            observation_count = index + 1
+            observation_events = _send_stable_query_and_drain_local(
+                runner,
+                websocket,
+                source_frame,
+                base_timestamp_ms=(
+                    1_000 + index * FAMILIAR_UNKNOWN_OBSERVATION_INTERVAL_MS
+                ),
+                states_file=states_file,
+                phase=f"familiar-unknown-observation-{observation_count:02d}",
+                drain_attempts=2,
+                wait_for_idle=True,
+            )
+            all_events.extend(observation_events)
+            if (
+                memory_e2e.first_event(
+                    observation_events,
+                    "familiar_unknown_present",
+                )
+                is not None
+            ):
+                break
+
+    familiar = memory_e2e.first_event(all_events, "familiar_unknown_present")
+    anonymous = (
+        familiar.get("memory_context", {}).get("anonymous_person")
+        if isinstance(familiar, dict)
+        else None
+    )
+    if not isinstance(anonymous, dict):
+        anonymous = {}
+    required_seen_count = _familiar_seen_count(config)
+    required_observed_duration_ms = _familiar_observed_duration_ms(config)
+    assertions = {
+        "familiar_unknown_present": familiar is not None,
+        "anonymous_id_present": bool(anonymous.get("anonymous_id")),
+        "seen_count_reached": int(anonymous.get("seen_count") or 0)
+        >= required_seen_count,
+        "observed_duration_reached": int(anonymous.get("observed_duration_ms") or 0)
+        >= required_observed_duration_ms,
+    }
+    _append_botified_frame_records(
+        botified_frame_records,
+        case=case,
+        scene=scene.name,
+        phase="familiar-unknown",
+        events=all_events,
+    )
+    passed = all(assertions.values())
+    return {
+        "status": "passed" if passed else "failed",
+        "passed": passed,
+        "reason": "" if passed else _first_failed_assertion(assertions),
+        "scene": scene.name,
+        "assertions": assertions,
+        "anonymous_id": anonymous.get("anonymous_id"),
+        "seen_count": anonymous.get("seen_count"),
+        "observed_duration_ms": anonymous.get("observed_duration_ms"),
+        "familiar_score": anonymous.get("familiar_score"),
+        "observation_count": observation_count,
+        "required_seen_count": required_seen_count,
+        "required_observed_duration_ms": required_observed_duration_ms,
+        "selected_window": _selected_window(scene, source_frame),
+        "events": memory_e2e.compact_events(all_events),
+    }
+
+
+def _familiar_seen_count(config: ServerConfig) -> int:
+    memory = getattr(config, "memory", None)
+    matching = getattr(memory, "matching", None)
+    return int(getattr(matching, "familiar_seen_count", 3))
+
+
+def _familiar_observed_duration_ms(config: ServerConfig) -> int:
+    memory = getattr(config, "memory", None)
+    matching = getattr(memory, "matching", None)
+    return int(getattr(matching, "familiar_observed_duration_ms", 10_000))
 
 
 def _run_local_self_smoke(
@@ -1078,9 +1383,10 @@ def _run_local_self_smoke(
     states_file: Any,
     api_response_records: list[dict[str, Any]],
     botified_frame_records: list[dict[str, Any]],
+    case: str = "local-self-smoke",
 ) -> dict[str, Any]:
     runner = LocalMemorySmokeRunner(
-        case="local-self-smoke",
+        case=case,
         out=out,
         camera=camera,
         config=config,
@@ -1163,7 +1469,7 @@ def _run_local_self_smoke(
     }
     _append_botified_frame_records(
         botified_frame_records,
-        case="local-self-smoke",
+        case=case,
         scene=scene.name,
         phase="self-replay",
         events=events,
@@ -1196,9 +1502,10 @@ def _run_local_scene_smoke(
     states_file: Any,
     api_response_records: list[dict[str, Any]],
     botified_frame_records: list[dict[str, Any]],
+    case: str = "local-scene-smoke",
 ) -> dict[str, Any]:
     runner = LocalMemorySmokeRunner(
-        case="local-scene-smoke",
+        case=case,
         out=out,
         camera=camera,
         config=config,
@@ -1252,7 +1559,7 @@ def _run_local_scene_smoke(
     }
     _append_botified_frame_records(
         botified_frame_records,
-        case="local-scene-smoke",
+        case=case,
         scene=scene.name,
         phase="scene-replay",
         events=events,
@@ -1283,9 +1590,10 @@ def _run_local_third_person_probe(
     states_file: Any,
     api_response_records: list[dict[str, Any]],
     botified_frame_records: list[dict[str, Any]] | None = None,
+    case: str = "local-third-person-probe",
 ) -> dict[str, Any]:
     runner = LocalMemorySmokeRunner(
-        case="local-third-person-probe",
+        case=case,
         out=out,
         camera=camera,
         config=config,
@@ -1425,7 +1733,7 @@ def _run_local_third_person_probe(
             if botified_frame_records is not None:
                 _append_botified_frame_records(
                     botified_frame_records,
-                    case="local-third-person-probe",
+                    case=case,
                     scene=scene.name,
                     phase="third-person-replay",
                     events=events,
@@ -1528,6 +1836,8 @@ def _send_stable_query_and_drain_local(
     base_timestamp_ms: int,
     states_file: Any,
     phase: str,
+    drain_attempts: int = 12,
+    wait_for_idle: bool = False,
 ) -> list[dict[str, Any]]:
     for offset_ms in (400, 800):
         runner.send(
@@ -1538,15 +1848,24 @@ def _send_stable_query_and_drain_local(
             phase=f"{phase}:warmup",
         )
     query_timestamp_ms = base_timestamp_ms + 1_200
-    runner.send(
+    query_state = runner.send(
         websocket,
         source_frame,
         timestamp_ms=query_timestamp_ms,
         states_file=states_file,
         phase=f"{phase}:query",
     )
-    for attempt in range(12):
-        time.sleep(memory_e2e.QUERY_DRAIN_WAIT_SECONDS)
+    stream_ref = query_state.get("stream_ref")
+    if not isinstance(stream_ref, str) or not stream_ref:
+        stream_ref = getattr(runner, "latest_stream_ref", None)
+    if wait_for_idle:
+        wait = getattr(runner, "wait_for_memory_query_idle", None)
+        if callable(wait):
+            wait(stream_ref)
+    query_events = list(query_state.get("semantic_events") or [])
+    for attempt in range(drain_attempts):
+        if not wait_for_idle or attempt > 0:
+            time.sleep(memory_e2e.QUERY_DRAIN_WAIT_SECONDS)
         drained = runner.send(
             websocket,
             source_frame,
@@ -1554,10 +1873,10 @@ def _send_stable_query_and_drain_local(
             states_file=states_file,
             phase=f"{phase}:drain",
         )
-        events = list(drained.get("semantic_events") or [])
+        events = [*query_events, *list(drained.get("semantic_events") or [])]
         if events:
             return events
-    return []
+    return query_events
 
 
 def _local_smoke_source_frames(
@@ -4347,6 +4666,7 @@ def _build_local_smoke_checks(
     scene_result: dict[str, Any],
     third_person_result: dict[str, Any],
     bounded_multi_person_recognition: dict[str, Any],
+    familiar_unknown_result: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     expected_teach_scenes = {
         "pic_teach_me",
@@ -4362,7 +4682,7 @@ def _build_local_smoke_checks(
     evidence_exists = {
         item["path"]: (out / item["path"]).is_file() for item in visual_evidence_index
     }
-    return [
+    checks = [
         preflight,
         {
             "name": "discover_jpeg_scene_dirs",
@@ -4405,19 +4725,35 @@ def _build_local_smoke_checks(
             ),
             "details": third_person_result,
         },
-        _bounded_multi_person_recognition_check(
-            bounded_multi_person_recognition,
-            require_non_attention_query=False,
-        ),
-        {
-            "name": "artifact_skeleton",
-            "passed": all(artifact_exists.values()) and all(evidence_exists.values()),
-            "details": {
-                "artifacts": artifact_exists,
-                "visual_evidence": evidence_exists,
-            },
-        },
     ]
+    if familiar_unknown_result is not None:
+        checks.append(
+            {
+                "name": "familiar_unknown_local_demo",
+                "passed": (
+                    familiar_unknown_result.get("status") == "passed"
+                    and bool(familiar_unknown_result.get("passed"))
+                ),
+                "details": familiar_unknown_result,
+            }
+        )
+    checks.extend(
+        [
+            _bounded_multi_person_recognition_check(
+                bounded_multi_person_recognition,
+                require_non_attention_query=False,
+            ),
+            {
+                "name": "artifact_skeleton",
+                "passed": all(artifact_exists.values()) and all(evidence_exists.values()),
+                "details": {
+                    "artifacts": artifact_exists,
+                    "visual_evidence": evidence_exists,
+                },
+            },
+        ]
+    )
+    return checks
 
 
 def _all_transcript_interactions_mapped_check(

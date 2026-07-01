@@ -4013,33 +4013,52 @@ def _botified_track_id(payload: dict[str, Any]) -> int | None:
     if not isinstance(request, str):
         return None
     match = BOTIFIED_TRACK_ID_RE.search(request)
-    if match is None:
+    if match is not None:
+        return int(match.group(1))
+
+    visual_context, _error = _botified_visual_context_payload(payload)
+    if not isinstance(visual_context, dict):
         return None
-    return int(match.group(1))
+    event_target = visual_context.get("event_target")
+    if not isinstance(event_target, dict):
+        return None
+    track_id = event_target.get("track_id")
+    if isinstance(track_id, bool) or not isinstance(track_id, int):
+        return None
+    return track_id
 
 
 def _botified_visual_context(payload: dict[str, Any]) -> tuple[bool, str | None]:
+    visual_context, error = _botified_visual_context_payload(payload)
+    if error is not None:
+        return False, error
+    return visual_context is not None, None
+
+
+def _botified_visual_context_payload(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
     request = payload.get("request")
     if not isinstance(request, str):
-        return False, None
+        return None, None
 
     context_json, error = _extract_botified_visual_context_json(request)
     if error is not None:
-        return False, error
+        return None, error
     if context_json is None:
-        return False, None
+        return None, None
 
     try:
         wrapper = json.loads(context_json)
     except json.JSONDecodeError:
-        return False, "invalid Botified visual_context JSON"
+        return None, "invalid Botified visual_context JSON"
     if (
         not isinstance(wrapper, dict)
         or set(wrapper) != {"visual_context"}
         or not isinstance(wrapper.get("visual_context"), dict)
     ):
-        return False, "invalid Botified visual_context contract"
-    return True, None
+        return None, "invalid Botified visual_context contract"
+    return wrapper["visual_context"], None
 
 
 def _extract_botified_visual_context_json(request: str) -> tuple[str | None, str | None]:

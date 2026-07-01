@@ -97,8 +97,9 @@ def _patch_image_io(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         *,
         scene: str,
         frame_id: int,
+        public_labels: bool = False,
     ) -> dict[str, Any]:
-        calls["draw"].append((image.source, response, scene, frame_id))
+        calls["draw"].append((image.source, response, scene, frame_id, public_labels))
         return {"source": image.source, "scene": scene, "frame_id": frame_id}
 
     def fake_write(path: Path, image: Any) -> None:
@@ -211,10 +212,10 @@ def test_wrapped_jsonl_generates_root_scene_outputs_and_summary(
     assert (out / "scenes" / "lobby" / "states" / "000001.json").is_file()
     assert len(calls["draw"]) == 4
     assert {call[2:] for call in calls["draw"]} == {
-        ("hall", 0),
-        ("lobby", 0),
-        ("lobby", 1),
-        ("lobby", 2),
+        ("hall", 0, False),
+        ("lobby", 0, False),
+        ("lobby", 1, False),
+        ("lobby", 2, False),
     }
 
     assert summary["frames_total"] == 4

@@ -9,6 +9,7 @@ from typing import Any
 
 
 JPEG_SUFFIXES = {".jpeg", ".jpg"}
+FAMILIAR_UNKNOWN_SCENE = "pic_familiar_face"
 SNAPSHOT_FORBIDDEN_FIELDS = (
     "track_id",
     "bbox",
@@ -51,6 +52,7 @@ def render_memory_teaching_evidence(
     *,
     artifact: Path,
     out: Path,
+    public_demo: bool = False,
 ) -> dict[str, Any]:
     artifact = Path(artifact).resolve()
     out = Path(out)
@@ -61,7 +63,8 @@ def render_memory_teaching_evidence(
     if visual_evidence_dir.exists():
         shutil.rmtree(visual_evidence_dir)
     visual_evidence_dir.mkdir(parents=True, exist_ok=True)
-    (visual_evidence_dir / "crops").mkdir(parents=True, exist_ok=True)
+    if not public_demo:
+        (visual_evidence_dir / "crops").mkdir(parents=True, exist_ok=True)
 
     scenes = scenes_from_report(report, artifact=artifact)
     payload_records = load_payload_records(artifact)
@@ -75,6 +78,7 @@ def render_memory_teaching_evidence(
         scenes=scenes,
         report=report,
         payload_records=payload_records,
+        public_demo=public_demo,
     )
     render_failures = [
         item
@@ -87,32 +91,50 @@ def render_memory_teaching_evidence(
             for item in render_failures
         )
         raise MemoryTeachingEvidenceError(f"visual evidence render failed: {failures}")
+    public_visual_evidence_index = (
+        _public_demo_visual_evidence_index(visual_evidence_index)
+        if public_demo
+        else visual_evidence_index
+    )
+    public_source_summary = (
+        public_demo_source_summary(source_summary) if public_demo else source_summary
+    )
     write_visual_evidence_index(
         visual_evidence_dir / "index.html",
         scenes=scenes,
         payload_records=payload_records,
         manifest=manifest,
         mode=str(report.get("mode") or "unknown"),
-        visual_evidence_index=visual_evidence_index,
-        source_summary=source_summary,
+        visual_evidence_index=public_visual_evidence_index,
+        source_summary=public_source_summary,
         actual_posted_payload_summary=actual_posted_payload_summary,
+        public_demo=public_demo,
     )
-    _write_json(out / "visual_evidence_index.json", visual_evidence_index)
-    _write_json(
-        out / "source-artifact.json",
-        {
-            "schema_version": 1,
-            "artifact_path": str(artifact),
-            "report_path": str((artifact / "report.json").resolve()),
-            "source_gate": source_summary,
-            "source_artifacts": report.get("artifacts", {}),
-            "source_report": report,
-        },
-    )
+    if not public_demo:
+        _write_json(out / "visual_evidence_index.json", public_visual_evidence_index)
+    if not public_demo:
+        _write_json(
+            out / "source-artifact.json",
+            {
+                "schema_version": 1,
+                "artifact_path": str(artifact),
+                "report_path": str((artifact / "report.json").resolve()),
+                "source_gate": source_summary,
+                "source_artifacts": report.get("artifacts", {}),
+                "source_report": report,
+            },
+        )
     (out / "index.html").write_text(
-        render_root_index_html(
-            source_summary=source_summary,
-            visual_evidence_index=visual_evidence_index,
+        (
+            render_public_demo_root_index_html(
+                source_summary=public_source_summary,
+                visual_evidence_index=public_visual_evidence_index,
+            )
+            if public_demo
+            else render_root_index_html(
+                source_summary=source_summary,
+                visual_evidence_index=public_visual_evidence_index,
+            )
         ),
         encoding="utf-8",
     )
@@ -124,7 +146,8 @@ def render_memory_teaching_evidence(
         "source_report_ok": bool(report.get("ok")),
         "source_status": _source_gate_status(report),
         "source_report_path": str(artifact / "report.json"),
-        "visual_evidence_index": visual_evidence_index,
+        "visual_evidence_index": public_visual_evidence_index,
+        "report_path": str(out / "report.json"),
     }
 
 
@@ -217,6 +240,7 @@ def build_artifact_visual_evidence_index(
     scenes: list[EvidenceScene],
     report: dict[str, Any],
     payload_records: list[dict[str, Any]] | None = None,
+    public_demo: bool = False,
 ) -> list[dict[str, Any]]:
     mode = str(report.get("mode") or "")
     scene_by_name = {scene.name: scene for scene in scenes}
@@ -241,6 +265,7 @@ def build_artifact_visual_evidence_index(
             ),
             report_section="self_smoke" if mode == "local-smoke" else "checks.self_introduction_known_person_present.details",
             include_not_present=True,
+            public_demo=public_demo,
         )
     )
     items.append(
@@ -254,6 +279,7 @@ def build_artifact_visual_evidence_index(
             ),
             report_section="third_person_probe" if mode == "local-smoke" else "third_person_introduction",
             include_not_present=True,
+            public_demo=public_demo,
         )
     )
     items.append(
@@ -267,8 +293,12 @@ def build_artifact_visual_evidence_index(
             ),
             report_section="scene_smoke" if mode == "local-smoke" else "checks.teach_scene_scene_activated.details",
             include_not_present=True,
+            public_demo=public_demo,
         )
     )
+    items.append(_build_familiar_unknown_summary_item(report))
+    if public_demo:
+        return items
     items.append(
         _build_object_visual_item(
             out=out,
@@ -356,6 +386,7 @@ def _build_self_visual_item(
     result: dict[str, Any] | None,
     report_section: str,
     include_not_present: bool = False,
+    public_demo: bool = False,
 ) -> dict[str, Any] | None:
     result = result if isinstance(result, dict) else {}
     base = {
@@ -383,11 +414,15 @@ def _build_self_visual_item(
         person_visual_evidence.get("embedding_crop_path") if person_visual_evidence else None,
         result.get("teach_crop_path_or_artifact_ref"),
     )
-    crop_preview = _copy_crop_preview(
-        artifact=artifact,
-        out=out,
-        source=crop_source,
-        fallback_name="self-person-crop.jpg",
+    crop_preview = (
+        None
+        if public_demo
+        else _copy_crop_preview(
+            artifact=artifact,
+            out=out,
+            source=crop_source,
+            fallback_name="self-person-crop.jpg",
+        )
     )
     source_bbox = _bbox_from_visual_evidence(
         person_visual_evidence,
@@ -425,7 +460,7 @@ def _build_self_visual_item(
     boxes = (
         [
             {
-                "label": "person target",
+                "label": "person" if public_demo else "person target",
                 "bbox_xyxy": source_bbox,
                 "color": (0, 190, 255),
             }
@@ -444,13 +479,24 @@ def _build_self_visual_item(
     ok = write_image_overlay(
         source_path=source_path,
         output_path=Path(out) / item["path"],
-        title="Self introduction / known person",
-        lines=[
-            f"person_id: {_short_text(item.get('person_id'))}",
-            f"event_id: {_short_text(item.get('event_id'))}",
-            f"crop_hash: {_short_text(item.get('crop_hash'))}",
-            f"face_detection: {face_detection_status}",
-        ],
+        title=(
+            "Self introduction remembered"
+            if public_demo
+            else "Self introduction / known person"
+        ),
+        lines=(
+            [
+                "person: remembered",
+                f"face: {face_detection_status}",
+            ]
+            if public_demo
+            else [
+                f"person_id: {_short_text(item.get('person_id'))}",
+                f"event_id: {_short_text(item.get('event_id'))}",
+                f"crop_hash: {_short_text(item.get('crop_hash'))}",
+                f"face_detection: {face_detection_status}",
+            ]
+        ),
         boxes=boxes,
     )
     return item if ok else (_status_item(
@@ -469,6 +515,7 @@ def _build_third_person_visual_item(
     result: dict[str, Any] | None,
     report_section: str,
     include_not_present: bool = False,
+    public_demo: bool = False,
 ) -> dict[str, Any] | None:
     result = result if isinstance(result, dict) else {}
     base = {
@@ -524,11 +571,15 @@ def _build_third_person_visual_item(
         else None,
         result.get("stored_crop_path_or_artifact_ref"),
     )
-    crop_preview = _copy_crop_preview(
-        artifact=artifact,
-        out=out,
-        source=crop_source,
-        fallback_name="third-person-target-crop.jpg",
+    crop_preview = (
+        None
+        if public_demo
+        else _copy_crop_preview(
+            artifact=artifact,
+            out=out,
+            source=crop_source,
+            fallback_name="third-person-target-crop.jpg",
+        )
     )
     face_detection = (
         person_visual_evidence.get("face_detection")
@@ -577,7 +628,11 @@ def _build_third_person_visual_item(
     if target_bbox_xyxy is not None:
         boxes.append(
             {
-                "label": f"target {_short_text(item.get('resolver_target_ref'), max_len=24)}",
+                "label": (
+                    "target"
+                    if public_demo
+                    else f"target {_short_text(item.get('resolver_target_ref'), max_len=24)}"
+                ),
                 "bbox_xyxy": target_bbox_xyxy,
                 "color": (0, 190, 255),
             }
@@ -585,7 +640,11 @@ def _build_third_person_visual_item(
     if introducer_bbox_xyxy is not None:
         boxes.append(
             {
-                "label": f"introducer {_short_text(item.get('introducer_ref'), max_len=20)}",
+                "label": (
+                    "introducer"
+                    if public_demo
+                    else f"introducer {_short_text(item.get('introducer_ref'), max_len=20)}"
+                ),
                 "bbox_xyxy": introducer_bbox_xyxy,
                 "color": (90, 220, 120),
             }
@@ -603,15 +662,30 @@ def _build_third_person_visual_item(
     ok = write_image_overlay(
         source_path=source_path,
         output_path=Path(out) / item["path"],
-        title="Third-person pose pointing",
-        lines=[
-            f"target: {_short_text(item.get('resolver_target_ref'))}",
-            f"introducer: {_short_text(item.get('introducer_ref'))}",
-            f"candidate_score: {_short_text(candidate_score)}",
-            f"arm_side: {_short_text(item.get('arm_side'))}",
-            f"crop_hash: {_short_text(item.get('crop_hash'))}",
-            f"face_detection: {face_detection_status}",
-        ],
+        title=(
+            "Third-person pointing evidence"
+            if public_demo
+            else "Third-person pose pointing"
+        ),
+        lines=(
+            [
+                "pointing evidence: present",
+                "target: selected",
+                "introducer: present",
+                f"score: {_short_text(candidate_score)}",
+                f"arm: {_short_text(item.get('arm_side'))}",
+                f"face: {face_detection_status}",
+            ]
+            if public_demo
+            else [
+                f"target: {_short_text(item.get('resolver_target_ref'))}",
+                f"introducer: {_short_text(item.get('introducer_ref'))}",
+                f"candidate_score: {_short_text(candidate_score)}",
+                f"arm_side: {_short_text(item.get('arm_side'))}",
+                f"crop_hash: {_short_text(item.get('crop_hash'))}",
+                f"face_detection: {face_detection_status}",
+            ]
+        ),
         boxes=boxes,
         arrows=arrows,
         points=points,
@@ -632,6 +706,7 @@ def _build_scene_visual_item(
     result: dict[str, Any] | None,
     report_section: str,
     include_not_present: bool = False,
+    public_demo: bool = False,
 ) -> dict[str, Any] | None:
     result = result if isinstance(result, dict) else {}
     base = {
@@ -671,12 +746,20 @@ def _build_scene_visual_item(
     ok = write_image_overlay(
         source_path=source_path,
         output_path=Path(out) / item["path"],
-        title="Teach scene / scene activated",
-        lines=[
-            f"scene_id: {_short_text(item.get('scene_id'))}",
-            f"event_id: {_short_text(item.get('event_id'))}",
-            f"crop_hash: {_short_text(item.get('crop_hash'))}",
-        ],
+        title=(
+            "Scene teaching remembered"
+            if public_demo
+            else "Teach scene / scene activated"
+        ),
+        lines=(
+            ["scene: remembered"]
+            if public_demo
+            else [
+                f"scene_id: {_short_text(item.get('scene_id'))}",
+                f"event_id: {_short_text(item.get('event_id'))}",
+                f"crop_hash: {_short_text(item.get('crop_hash'))}",
+            ]
+        ),
     )
     return item if ok else (_status_item(
         base,
@@ -766,6 +849,48 @@ def _build_full_replay_summary_item(report: dict[str, Any]) -> dict[str, Any]:
         "replayed_scene_count": replay.get("replayed_scene_count"),
         "scene_count": len(replay.get("scenes") or []) if isinstance(replay.get("scenes"), list) else None,
         "summary": _compact_replay_summary(replay),
+    }
+
+
+def _build_familiar_unknown_summary_item(report: dict[str, Any]) -> dict[str, Any]:
+    result = report.get("familiar_unknown")
+    base = {
+        "assertion_id": "familiar_unknown_present",
+        "kind": "memory_demo_summary",
+        "path": None,
+        "scene": FAMILIAR_UNKNOWN_SCENE,
+        "report_section": "familiar_unknown",
+    }
+    if not isinstance(result, dict):
+        return _status_item(base, "not_present", "familiar_unknown not present")
+    if result.get("passed") is not True and result.get("status") != "passed":
+        return _status_item(
+            base,
+            str(result.get("status") or "failed"),
+            result.get("reason") or "familiar_unknown_present not confirmed",
+            source=result,
+        )
+    event = _first_compact_event(result, "familiar_unknown_present")
+    evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+    anonymous = (
+        event.get("memory_context", {}).get("anonymous_person")
+        if isinstance(event.get("memory_context"), dict)
+        else None
+    )
+    if not isinstance(anonymous, dict):
+        anonymous = {}
+    return {
+        **base,
+        "status": "present",
+        "event_id": event.get("event_id"),
+        "memory_match_id": evidence.get("memory_match_id"),
+        "anonymous_id": result.get("anonymous_id") or anonymous.get("anonymous_id"),
+        "seen_count": result.get("seen_count") or anonymous.get("seen_count"),
+        "observed_duration_ms": result.get("observed_duration_ms")
+        or anonymous.get("observed_duration_ms"),
+        "familiar_score": result.get("familiar_score")
+        or anonymous.get("familiar_score"),
+        "selected_frame": _selected_frame_path(result),
     }
 
 
@@ -1191,6 +1316,7 @@ def write_visual_evidence_index(
     visual_evidence_index: list[dict[str, Any]] | None = None,
     source_summary: dict[str, Any] | None = None,
     actual_posted_payload_summary: dict[str, Any] | None = None,
+    public_demo: bool = False,
 ) -> None:
     scene_items = "\n".join(
         (
@@ -1216,6 +1342,44 @@ def write_visual_evidence_index(
         if manifest.get("matches_actual_scene_dirs")
         else "manifest mismatch recorded as non-blocking risk"
     )
+    if public_demo:
+        source_block = _demo_summary_html(source_summary) if source_summary else ""
+        overlay_items = visual_evidence_items_html(
+            visual_evidence_index or [],
+            public_demo=True,
+        )
+        document = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Memory Demo</title>
+  <style>
+    body {{ font-family: sans-serif; margin: 24px; line-height: 1.4; }}
+    code, pre {{ background: #f5f5f5; }}
+    pre {{ padding: 12px; overflow-x: auto; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px; vertical-align: top; }}
+    th {{ background: #f5f5f5; text-align: left; }}
+    img.thumb {{ max-width: 220px; height: auto; }}
+  </style>
+</head>
+<body>
+  <h1>Memory Demo</h1>
+  <h2>Demo Summary</h2>
+  {source_block}
+  {_models_html((source_summary or {}).get("models"))}
+  <h2>Demo Items</h2>
+  {overlay_items}
+  <h2>Scenes</h2>
+  <ul>
+    {scene_items}
+  </ul>
+</body>
+</html>
+"""
+        path.write_text(document, encoding="utf-8")
+        return
+
     source_block = _source_summary_html(source_summary) if source_summary else ""
     overlay_items = visual_evidence_items_html(visual_evidence_index or [])
     if actual_posted_payload_summary is None:
@@ -1301,7 +1465,12 @@ def actual_posted_payload_summary_html(summary: dict[str, Any]) -> str:
 
 def visual_evidence_items_html(
     visual_evidence_index: list[dict[str, Any]],
+    *,
+    public_demo: bool = False,
 ) -> str:
+    if public_demo:
+        return public_demo_items_html(visual_evidence_index)
+
     items = [
         item
         for item in visual_evidence_index
@@ -1327,16 +1496,24 @@ def visual_evidence_items_html(
                 "resolver_target_ref",
                 "event_id",
                 "memory_match_id",
-                "crop_hash",
-                "crop_preview_path",
                 "face_detection",
                 "face_bbox_xyxy",
+                "anonymous_id",
+                "seen_count",
+                "observed_duration_ms",
+                "familiar_score",
                 "source_text_path",
                 "source_image_path",
                 "transcript_source",
             )
             if item.get(key) is not None
         }
+        for key in ("crop_hash", "crop_preview_path"):
+            if item.get(key) is not None:
+                key_refs[key] = item.get(key)
+        details_html = (
+            f"<td><details><summary>JSON</summary><pre>{html.escape(json.dumps(item, ensure_ascii=False, indent=2))}</pre></details></td>"
+        )
         rows.append(
             "<tr>"
             f"<td><code>{html.escape(str(item.get('assertion_id') or ''))}</code></td>"
@@ -1344,14 +1521,53 @@ def visual_evidence_items_html(
             f"<td>{html.escape(str(item.get('status') or ''))}</td>"
             f"<td>{image_html}</td>"
             f"<td><code>{html.escape(str(item.get('report_section') or ''))}</code></td>"
-            f"<td><pre>{html.escape(json.dumps(key_refs, ensure_ascii=False, indent=2))}</pre></td>"
-            f"<td><details><summary>JSON</summary><pre>{html.escape(json.dumps(item, ensure_ascii=False, indent=2))}</pre></details></td>"
+            + f"<td><pre>{html.escape(json.dumps(key_refs, ensure_ascii=False, indent=2))}</pre></td>"
+            + details_html
+            + "</tr>"
+        )
+    headers = (
+        "<th>Assertion</th><th>Scene</th><th>Status</th><th>Image</th>"
+        "<th>Report section</th><th>Key refs</th><th>Details</th>"
+    )
+    return (
+        "<table><thead><tr>"
+        + headers
+        + "</tr></thead><tbody>"
+        + "\n".join(rows)
+        + "</tbody></table>"
+    )
+
+
+def public_demo_items_html(visual_evidence_index: list[dict[str, Any]]) -> str:
+    if not visual_evidence_index:
+        return "<p>No completed demo highlights were generated.</p>"
+
+    rows = []
+    for item in visual_evidence_index:
+        href = _visual_evidence_href(item.get("image"))
+        image_html = (
+            f"<a href=\"{html.escape(href)}\"><img class=\"thumb\" src=\"{html.escape(href)}\" alt=\"\"></a>"
+            if href != "#"
+            else ""
+        )
+        metrics = item.get("metrics")
+        metrics_html = (
+            f"<pre>{html.escape(json.dumps(metrics, ensure_ascii=False, indent=2))}</pre>"
+            if isinstance(metrics, dict) and metrics
+            else ""
+        )
+        rows.append(
+            "<tr>"
+            f"<td><strong>{html.escape(str(item.get('title') or ''))}</strong></td>"
+            f"<td><code>{html.escape(str(item.get('scene') or ''))}</code></td>"
+            f"<td>{html.escape(str(item.get('status') or ''))}</td>"
+            f"<td>{image_html}</td>"
+            f"<td>{html.escape(str(item.get('summary') or ''))}{metrics_html}</td>"
             "</tr>"
         )
     return (
         "<table><thead><tr>"
-        "<th>Assertion</th><th>Scene</th><th>Status</th><th>Image</th>"
-        "<th>Report section</th><th>Key refs</th><th>Details</th>"
+        "<th>Demo Item</th><th>Scene</th><th>Status</th><th>Image</th><th>What happened</th>"
         "</tr></thead><tbody>"
         + "\n".join(rows)
         + "</tbody></table>"
@@ -1399,6 +1615,115 @@ def render_root_index_html(
   <h2>Source Artifact</h2>
   <pre>{summary_json}</pre>
   <h2>Evidence Items</h2>
+  <ul>{rows}</ul>
+</body>
+</html>
+"""
+
+
+DEMO_ITEM_LABELS = {
+    "self_introduction_known_person": "记住自我介绍",
+    "third_person_pose_pointing": "第三人称指向示教",
+    "teach_scene_scene_activated": "记住场景",
+    "familiar_unknown_present": "匿名熟客出现",
+    "visual_state_identity_overlay": "Current identity overlay",
+    "event_identity_context": "Event identity context",
+    "identify_current_response": "Current visual snapshot",
+    "teach_auto_merge_anonymous": "Anonymous profile merged after teaching",
+    "cli_current_visual_snapshot": "Agent-facing snapshot",
+}
+DEMO_ITEM_PUBLIC_IDS = {
+    "self_introduction_known_person": "self_introduction",
+    "teach_scene_scene_activated": "scene_teaching",
+    "third_person_pose_pointing": "pointing_teaching",
+    "familiar_unknown_present": "familiar_unknown",
+}
+DEMO_ITEM_SUMMARIES = {
+    "self_introduction_known_person": "自我介绍后再次看到本人时识别为已记住的人。",
+    "third_person_pose_pointing": "根据第三人称指向选择被介绍的人并完成记忆。",
+    "teach_scene_scene_activated": "示教过的场景再次出现时被识别出来。",
+    "familiar_unknown_present": "未命名但重复出现的人被标记为熟悉的陌生人。",
+}
+
+
+def _public_demo_visual_evidence_index(
+    visual_evidence_index: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in visual_evidence_index:
+        assertion_id = str(item.get("assertion_id") or "")
+        if assertion_id not in DEMO_ITEM_PUBLIC_IDS:
+            continue
+        if item.get("status") != "present":
+            continue
+        row: dict[str, Any] = {
+            "id": DEMO_ITEM_PUBLIC_IDS[assertion_id],
+            "title": DEMO_ITEM_LABELS[assertion_id],
+            "status": "passed",
+            "scene": item.get("scene"),
+            "summary": DEMO_ITEM_SUMMARIES[assertion_id],
+        }
+        path = item.get("path")
+        if isinstance(path, str) and path:
+            row["image"] = path
+        metrics = {
+            key: item.get(key)
+            for key in (
+                "seen_count",
+                "observed_duration_ms",
+                "familiar_score",
+                "face_detection",
+            )
+            if item.get(key) is not None
+        }
+        if metrics:
+            row["metrics"] = metrics
+        rows.append(row)
+    order = {item_id: index for index, item_id in enumerate(DEMO_ITEM_PUBLIC_IDS.values())}
+    return sorted(rows, key=lambda row: order.get(str(row.get("id") or ""), 999))
+
+
+def render_public_demo_root_index_html(
+    *,
+    source_summary: dict[str, Any],
+    visual_evidence_index: list[dict[str, Any]],
+) -> str:
+    status = html.escape(str(source_summary.get("status") or "unknown"))
+    real_model = html.escape(str(source_summary.get("real_model_evidence")))
+    rows = "\n".join(
+        "<li>"
+        f"<strong>{html.escape(str(item.get('title') or ''))}</strong>: "
+        f"{html.escape(str(item.get('status') or ''))} "
+        f"{html.escape(str(item.get('summary') or ''))}"
+        "</li>"
+        for item in visual_evidence_index
+    )
+    if not rows:
+        rows = "<li>No completed demo highlights were generated.</li>"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Memory Demo</title>
+  <style>
+    body {{ font-family: sans-serif; margin: 24px; line-height: 1.4; max-width: 1100px; }}
+    code, pre {{ background: #f5f5f5; }}
+    pre {{ padding: 12px; overflow-x: auto; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }}
+    th {{ background: #f5f5f5; }}
+  </style>
+</head>
+<body>
+  <h1>Memory Demo</h1>
+  <h2>Demo Summary</h2>
+  <p>status: {status}; real_model_evidence: {real_model}</p>
+  {_models_html(source_summary.get("models"))}
+  <ul>
+    <li><a href="visual-evidence/index.html">Visual evidence page</a></li>
+    <li><a href="report.json">report.json</a></li>
+  </ul>
+  <h2>Demo Items</h2>
   <ul>{rows}</ul>
 </body>
 </html>
@@ -1516,9 +1841,33 @@ def source_report_summary(report: dict[str, Any], *, artifact: Path) -> dict[str
         "gate": report.get("gate"),
         "mode": report.get("mode"),
         "backend": report.get("backend"),
+        "embedding_backend": report.get("embedding_backend"),
+        "inference_backend": report.get("inference_backend"),
         "real_model_evidence": report.get("real_model_evidence"),
+        "models": report.get("models"),
         "scene_count": report.get("scene_count"),
     }
+
+
+def public_demo_source_summary(source_summary: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "status",
+        "real_model_evidence",
+        "models",
+        "scene_count",
+    )
+    return {key: source_summary.get(key) for key in keys if key in source_summary}
+
+
+def _demo_summary_html(source_summary: dict[str, Any] | None) -> str:
+    if not source_summary:
+        return ""
+    rows = "\n".join(
+        f"<li><code>{html.escape(str(key))}</code>: {html.escape(str(value))}</li>"
+        for key, value in source_summary.items()
+        if key != "models"
+    )
+    return f"<ul>{rows}</ul>"
 
 
 def response_evidence(body: dict[str, Any]) -> dict[str, Any]:
@@ -1970,6 +2319,24 @@ def _source_summary_html(source_summary: dict[str, Any] | None) -> str:
         for key, value in source_summary.items()
     )
     return f"<h2>Source Report</h2><ul>{rows}</ul>"
+
+
+def _models_html(models: Any) -> str:
+    if not isinstance(models, dict) or not models:
+        return "<p>models: <em>not recorded</em></p>"
+    rows = "\n".join(
+        "<tr>"
+        f"<th>{html.escape(str(key))}</th>"
+        f"<td><code>{html.escape(str(value))}</code></td>"
+        "</tr>"
+        for key, value in models.items()
+    )
+    return (
+        "<h2>Models</h2>"
+        "<table><tbody>"
+        + rows
+        + "</tbody></table>"
+    )
 
 
 def _visual_evidence_href(path: Any) -> str:

@@ -214,6 +214,7 @@ def generate_visual_evidence(
     source_images: dict[tuple[str, int], Path],
     out: Path,
     input_jsonl: Path,
+    public_demo: bool = False,
 ) -> dict[str, Any]:
     out.mkdir(parents=True, exist_ok=True)
     scenes_dir = out / "scenes"
@@ -225,17 +226,28 @@ def generate_visual_evidence(
 
     root_frames: list[dict[str, Any]] = []
     for scene, items in sorted(scene_records.items()):
-        root_frames.extend(_write_scene(out, scenes_dir, scene, items, source_images))
+        root_frames.extend(
+            _write_scene(
+                out,
+                scenes_dir,
+                scene,
+                items,
+                source_images,
+                public_demo=public_demo,
+            )
+        )
 
     summary = summarize_records(records)
-    _write_json(out / "summary.json", summary)
-    _write_wrapped_jsonl(out / "visual_state.jsonl", records)
+    _write_json(out / "summary.json", _public_summary(summary) if public_demo else summary)
+    if not public_demo:
+        _write_wrapped_jsonl(out / "visual_state.jsonl", records)
     (out / "index.html").write_text(
         _render_root_html(
             out=out,
             summary=summary,
             frames=root_frames,
             input_jsonl=input_jsonl,
+            public_demo=public_demo,
         ),
         encoding="utf-8",
     )
@@ -262,6 +274,65 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "keyframes": scene_keyframes,
         "scenes": scene_summaries,
     }
+
+
+def _public_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        key: summary[key]
+        for key in ("frames_total", "frames_ok", "errors")
+        if key in summary
+    }
+    person = summary.get("person")
+    if isinstance(person, dict):
+        result["person"] = {
+            key: person.get(key)
+            for key in (
+                "frames_with_person",
+                "person_frame_ratio",
+                "max_person_count",
+            )
+            if key in person
+        }
+    tracking = summary.get("tracking")
+    if isinstance(tracking, dict):
+        result["tracking"] = {
+            key: tracking.get(key)
+            for key in (
+                "unique_track_count",
+                "max_tracks_per_frame",
+                "avg_tracks_per_frame",
+            )
+            if key in tracking
+        }
+    attention = summary.get("attention")
+    if isinstance(attention, dict):
+        result["attention"] = {
+            key: attention.get(key)
+            for key in (
+                "available_frames",
+                "available_ratio",
+                "null_frames",
+                "target_switches",
+            )
+            if key in attention
+        }
+    semantic_events = summary.get("semantic_events")
+    if isinstance(semantic_events, dict):
+        result["semantic_events"] = {
+            key: semantic_events.get(key)
+            for key in ("total", "counts_by_type", "first_frame_by_type")
+            if key in semantic_events
+        }
+    if isinstance(summary.get("keyframes"), dict):
+        result["keyframes"] = summary["keyframes"]
+    scenes = summary.get("scenes")
+    if isinstance(scenes, dict):
+        result["scenes"] = {
+            str(scene): _public_summary(item)
+            for scene, item in scenes.items()
+            if isinstance(item, dict)
+        }
+    return result
 
 
 def _summary_for_records(
@@ -410,12 +481,15 @@ def _write_scene(
     scene: str,
     records: list[dict[str, Any]],
     source_images: dict[tuple[str, int], Path],
+    *,
+    public_demo: bool = False,
 ) -> list[dict[str, Any]]:
     scene_dir = scenes_dir / scene
     frame_dir = scene_dir / "frames"
     state_dir = scene_dir / "states"
     frame_dir.mkdir(parents=True, exist_ok=True)
-    state_dir.mkdir(parents=True, exist_ok=True)
+    if not public_demo:
+        state_dir.mkdir(parents=True, exist_ok=True)
 
     frames: list[dict[str, Any]] = []
     for record in records:
@@ -427,38 +501,44 @@ def _write_scene(
             record["response"],
             scene=scene,
             frame_id=frame_id,
+            public_labels=public_demo,
         )
         output_image = frame_dir / f"{frame_id:06d}.jpg"
         output_state = state_dir / f"{frame_id:06d}.json"
         _write_jpeg(output_image, annotated)
-        _write_json(output_state, record["response"])
 
-        frames.append(
-            {
-                "frame_id": frame_id,
-                "scene": scene,
-                "source": source,
-                "source_name": (
-                    f"{source.name} path={source.as_posix()} "
-                    f"latency_ms={record['latency_ms']}"
-                ),
-                "image_path": output_image,
-                "state_path": output_state,
-                "state": record["response"],
-                "latency_ms": record["latency_ms"],
-            }
-        )
+        frame = {
+            "frame_id": frame_id,
+            "scene": scene,
+            "source": source,
+            "source_name": (
+                f"{source.name} path={source.as_posix()} "
+                f"latency_ms={record['latency_ms']}"
+            ),
+            "image_path": output_image,
+            "state": record["response"],
+            "latency_ms": record["latency_ms"],
+        }
+        if not public_demo:
+            _write_json(output_state, record["response"])
+            frame["state_path"] = output_state
+        frames.append(frame)
 
     scene_summary = _summary_for_records(records)
     scene_summary["keyframes"] = _scene_keyframes(records)
-    _write_json(scene_dir / "summary.json", scene_summary)
-    _write_wrapped_jsonl(scene_dir / "visual_state.jsonl", records)
+    _write_json(
+        scene_dir / "summary.json",
+        _public_summary(scene_summary) if public_demo else scene_summary,
+    )
+    if not public_demo:
+        _write_wrapped_jsonl(scene_dir / "visual_state.jsonl", records)
     (scene_dir / "index.html").write_text(
         _render_scene_html(
             root=scene_dir,
             scene=scene,
             frames=frames,
             summary=scene_summary,
+            public_demo=public_demo,
         ),
         encoding="utf-8",
     )
@@ -509,16 +589,26 @@ def _render_scene_html(
     scene: str,
     frames: list[dict[str, Any]],
     summary: dict[str, Any],
+    public_demo: bool = False,
 ) -> str:
     cards = "\n".join(
-        render_frame_card(root, frame, anchor=f"frame-{frame['frame_id']}")
+        (
+            _render_public_frame_card(root, frame, anchor=f"frame-{frame['frame_id']}")
+            if public_demo
+            else render_frame_card(root, frame, anchor=f"frame-{frame['frame_id']}")
+        )
         for frame in frames
+    )
+    artifact_links = (
+        '<a href="summary.json">summary.json</a>'
+        if public_demo
+        else '<a href="summary.json">summary.json</a> | <a href="visual_state.jsonl">visual_state.jsonl</a>'
     )
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>visual evidence - {html.escape(scene)}</title>
+  <title>{'Visual Demo' if public_demo else 'visual evidence'} - {html.escape(scene)}</title>
   <style>{_CSS}</style>
 </head>
 <body>
@@ -527,8 +617,7 @@ def _render_scene_html(
     frames: {summary["frames_total"]} |
     ok: {summary["frames_ok"]} |
     errors: {summary["errors"]} |
-    <a href="summary.json">summary.json</a> |
-    <a href="visual_state.jsonl">visual_state.jsonl</a>
+    {artifact_links}
   </p>
   <div class="grid">
     {cards}
@@ -544,10 +633,43 @@ def _render_root_html(
     summary: dict[str, Any],
     frames: list[dict[str, Any]],
     input_jsonl: Path,
+    public_demo: bool = False,
 ) -> str:
-    scenes_table = _scenes_table_html(summary["scenes"])
+    scenes_table = _scenes_table_html(summary["scenes"], public_demo=public_demo)
     keyframes = _keyframes_html(summary["keyframes"])
-    timeline = _semantic_event_timeline(out, frames)
+    timeline = (
+        _public_semantic_event_timeline(out, frames)
+        if public_demo
+        else _semantic_event_timeline(out, frames)
+    )
+    if public_demo:
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Visual Demo</title>
+  <style>{_CSS}</style>
+</head>
+<body>
+  <h1>Visual Demo</h1>
+  <p class="meta">
+    frames: {summary["frames_total"]} |
+    ok: {summary["frames_ok"]} |
+    errors: {summary["errors"]} |
+    person_frames: {summary["person"]["frames_with_person"]} |
+    tracks: {summary["tracking"]["unique_track_count"]} |
+    events: {summary["semantic_events"]["total"]}<br>
+    <a href="summary.json">summary.json</a>
+  </p>
+  <h2>Scenes</h2>
+  {scenes_table}
+  <h2>Key Moments</h2>
+  {keyframes}
+  <h2>Events</h2>
+  {timeline}
+</body>
+</html>
+"""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -579,7 +701,44 @@ def _render_root_html(
 """
 
 
-def _scenes_table_html(scene_summaries: dict[str, dict[str, Any]]) -> str:
+def _render_public_frame_card(
+    root: Path,
+    frame_evidence: dict[str, Any],
+    *,
+    anchor: str | None = None,
+) -> str:
+    response = frame_evidence["state"]
+    events = response.get("semantic_events")
+    event_names = [
+        str(event.get("event"))
+        for event in events
+        if isinstance(event, dict) and event.get("event")
+    ] if isinstance(events, list) else []
+    attention = response.get("attention")
+    attention_text = "active" if isinstance(attention, dict) else "none"
+    scene = frame_evidence.get("scene")
+    scene_text = str(scene) if scene is not None else "-"
+    frame_id = frame_evidence.get("frame_id", response.get("frame_id", "-"))
+    people = _person_count(response)
+    event_text = ", ".join(event_names[:3]) if event_names else "none"
+    anchor_attr = f' id="{html.escape(anchor)}"' if anchor else ""
+    return f"""<div class="card"{anchor_attr}>
+  <img src="{html.escape(_rel(root, frame_evidence["image_path"]))}" alt="frame {html.escape(str(frame_id))}">
+  <div class="caption">
+    frame={html.escape(str(frame_id))}
+    | scene={html.escape(scene_text)}
+    | people={people}
+    | attention={html.escape(attention_text)}
+    | events={html.escape(event_text)}
+  </div>
+</div>"""
+
+
+def _scenes_table_html(
+    scene_summaries: dict[str, dict[str, Any]],
+    *,
+    public_demo: bool = False,
+) -> str:
     if not scene_summaries:
         return '<p class="meta">scenes=none</p>'
 
@@ -595,7 +754,7 @@ def _scenes_table_html(scene_summaries: dict[str, dict[str, Any]]) -> str:
             f'<td>{item["frames_total"]}</td>'
             f'<td>{item["frames_ok"]} / {item["errors"]}</td>'
             f'<td>{person["frames_with_person"]} / {person["max_person_count"]}</td>'
-            f'<td>{_tracks_cell(tracking)}</td>'
+            f'<td>{_tracks_cell(tracking, public_demo=public_demo)}</td>'
             f'<td>{_attention_cell(attention)}</td>'
             f'<td>{_events_cell(events)}</td>'
             f'<td>{_scene_keyframes_cell(scene, item.get("keyframes"))}</td>'
@@ -621,7 +780,9 @@ def _scenes_table_html(scene_summaries: dict[str, dict[str, Any]]) -> str:
     )
 
 
-def _tracks_cell(tracking: dict[str, Any]) -> str:
+def _tracks_cell(tracking: dict[str, Any], *, public_demo: bool = False) -> str:
+    if public_demo:
+        return f'unique={tracking["unique_track_count"]}'
     return (
         f'unique={tracking["unique_track_count"]} '
         f'ids={html.escape(_compact_list(tracking["track_ids"]))}'
@@ -742,6 +903,34 @@ def _semantic_event_timeline(out: Path, frames: list[dict[str, Any]]) -> str:
                 f'frame={html.escape(str(frame["frame_id"]))}'
                 "</a> "
                 f"{html.escape(_event_summary(event))}"
+                "</li>"
+            )
+    if not items:
+        return '<p class="meta">events=none</p>'
+    return "<ol>\n" + "\n".join(items) + "\n</ol>"
+
+
+def _public_semantic_event_timeline(out: Path, frames: list[dict[str, Any]]) -> str:
+    items: list[str] = []
+    for frame in frames:
+        events = frame["state"].get("semantic_events")
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_name = event.get("event")
+            if not event_name:
+                continue
+            href = _rel(out, Path("scenes") / frame["scene"] / "index.html")
+            href = f"{href}#frame-{frame['frame_id']}"
+            items.append(
+                "<li>"
+                f'<a href="{html.escape(href)}">'
+                f'{html.escape(frame["scene"])} '
+                f'frame={html.escape(str(frame["frame_id"]))}'
+                "</a> "
+                f"{html.escape(str(event_name))}"
                 "</li>"
             )
     if not items:

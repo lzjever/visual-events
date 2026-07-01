@@ -1,6 +1,8 @@
-# Visual Evidence Tool Development Plan
+# Legacy Visual Evidence Tool Development Plan
 
-> Note: 本文描述通用视觉 evidence 工具；Identity Overlay、memory teaching evidence 和示教证据的当前 active source of truth 是 [Identity Overlay 产品与开发计划](identity-overlay-product-development-plan.md)。
+> Legacy note: 当前 active demo source of truth 是 [Real Model Evidence Demo Development Plan](../real-model-evidence-demo-development-plan.md)。用户可见 demo 只使用 `tools/run_visual_demo.py` 和 `tools/run_memory_demo.py`，输出分别是 `artifacts/demo/visual/index.html` 和 `artifacts/demo/memory/index.html`；本文下方旧 `generate_visual_evidence.py` 命令只作历史/debug 设计参考。
+
+> Note: 本文描述通用视觉 evidence 工具；Identity Overlay、memory teaching evidence 和示教证据的当前 active source of truth 是 [Identity Overlay 产品与开发计划](../identity-overlay-product-development-plan.md)。
 
 ## 1. 产品目标和非目标
 

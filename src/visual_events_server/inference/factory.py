@@ -10,6 +10,9 @@ from .mock import MockInferBackend
 from .ultralytics_pose import UltralyticsPoseBackend
 
 
+INFERENCE_CACHE_DIR_ENV = "VISUAL_EVENTS_INFERENCE_CACHE_DIR"
+
+
 def create_infer_backend(
     inference_config: InferenceConfig,
     *,
@@ -29,7 +32,12 @@ def create_infer_backend(
 
 
 def configure_inference_cache(runtime_dir: Path) -> None:
-    cache_dir = Path(runtime_dir) / "cache"
+    configured_cache_dir = os.environ.get(INFERENCE_CACHE_DIR_ENV)
+    cache_dir = (
+        Path(configured_cache_dir).expanduser()
+        if configured_cache_dir
+        else Path(runtime_dir) / "cache"
+    )
     paths = {
         "YOLO_CONFIG_DIR": cache_dir / "yolo",
         "TORCH_HOME": cache_dir / "torch",

@@ -4,9 +4,10 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-GA_PLAN = REPO_ROOT / "docs" / "ga-development-plan.md"
-DDS_STACK_DECISION = REPO_ROOT / "docs" / "dds-stack-decision-record.md"
-NO_MOTION_AUDIT = REPO_ROOT / "docs" / "no-motion-sdk-audit.md"
+LEGACY_DOCS = REPO_ROOT / "docs" / "legacy"
+GA_PLAN = LEGACY_DOCS / "ga-development-plan.md"
+DDS_STACK_DECISION = LEGACY_DOCS / "dds-stack-decision-record.md"
+NO_MOTION_AUDIT = LEGACY_DOCS / "no-motion-sdk-audit.md"
 PROTOCOL = REPO_ROOT / "common" / "schema" / "protocol.md"
 VAL_DATA_MANIFEST_SCHEMA = REPO_ROOT / "common" / "schema" / "val_data_manifest_v1.md"
 GITIGNORE = REPO_ROOT / ".gitignore"

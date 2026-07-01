@@ -2055,6 +2055,88 @@ def test_local_runner_frame_bound_posts_include_latest_stream_ref(
     assert payload["stream_ref"] != memory_e2e.PAYLOAD_FIXTURE_STREAM_REF
 
 
+def test_local_familiar_unknown_demo_observes_until_default_familiar_duration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    frame_path = tmp_path / "img_000.jpeg"
+    frame_path.write_bytes(_valid_jpeg_bytes())
+    scene = module.SceneDir(
+        name="pic_familiar_face",
+        path=tmp_path,
+        jpeg_paths=(frame_path,),
+    )
+    calls: list[dict[str, Any]] = []
+
+    class FakeRunner:
+        def __init__(self, **kwargs: Any) -> None:
+            self.case = kwargs["case"]
+            self.latest_stream_ref = "ws_familiar"
+
+        def open_stream(self):
+            return self
+
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+    def fake_replay(*_args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        calls.append(kwargs)
+        if len(calls) < 11:
+            return []
+        return [
+            {
+                "event": "familiar_unknown_present",
+                "event_id": "evt_familiar",
+                "evidence": {"memory_match_id": "anon_123"},
+                "memory_context": {
+                    "anonymous_person": {
+                        "anonymous_id": "anon_123",
+                        "seen_count": 3,
+                        "observed_duration_ms": 10_000,
+                        "familiar_score": 1.0,
+                    }
+                },
+            }
+        ]
+
+    monkeypatch.setattr(module, "LocalMemorySmokeRunner", FakeRunner)
+    monkeypatch.setattr(module, "_send_stable_query_and_drain_local", fake_replay)
+
+    states_path = tmp_path / "visual_states.jsonl"
+    with states_path.open("w", encoding="utf-8") as states_file:
+        result = module._run_local_familiar_unknown_demo(
+            out=tmp_path,
+            scene=scene,
+            camera="front",
+            config=module.ServerConfig(
+                memory=module.MemoryConfig(
+                    matching=module.MemoryMatchingConfig(
+                        familiar_seen_count=3,
+                        familiar_observed_duration_ms=10_000,
+                    )
+                )
+            ),
+            states_file=states_file,
+            botified_frame_records=[],
+            case="memory-demo-familiar-unknown",
+        )
+
+    assert result["status"] == "passed"
+    assert result["observation_count"] == 11
+    assert result["required_seen_count"] == 3
+    assert result["required_observed_duration_ms"] == 10_000
+    assert result["anonymous_id"] == "anon_123"
+    assert result["seen_count"] == 3
+    assert result["observed_duration_ms"] == 10_000
+    assert [call["base_timestamp_ms"] for call in calls] == [
+        1_000 + index * module.FAMILIAR_UNKNOWN_OBSERVATION_INTERVAL_MS
+        for index in range(11)
+    ]
+
+
 def test_identify_current_payload_injects_latest_stream_ref() -> None:
     payload = memory_e2e._with_stream_ref_for_endpoint(  # noqa: SLF001
         endpoint="/v1/memory/identify-current",
